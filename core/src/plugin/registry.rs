@@ -105,33 +105,44 @@ impl Registry {
 
     /// 現在登録されている全プラグインの `PluginInfo`(manifest・state・
     /// effective settings)を返す。RPC の一覧応答に使う。
+    ///
+    /// `entries` ロックは manifest/state のクローン取得のみに使い、ロックを
+    /// 解放してから(ディスクを読む)`SettingsStore::effective` を呼ぶ。他の
+    /// `Registry` 呼び出し(`set_disabled` など、プラグインスレッドから叩か
+    /// れるものを含む)が settings のディスク I/O の間ブロックされないように
+    /// するため。
     pub fn list(&self) -> Vec<PluginInfo> {
-        self.entries
+        let snapshot: Vec<(Manifest, PluginState)> = self
+            .entries
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .iter()
-            .map(|entry| PluginInfo {
-                manifest: entry.manifest.clone(),
-                state: entry.state.clone(),
-                values: self.settings_store.effective(&entry.manifest),
+            .map(|entry| (entry.manifest.clone(), entry.state.clone()))
+            .collect();
+
+        snapshot
+            .into_iter()
+            .map(|(manifest, state)| {
+                let values = self.settings_store.effective(&manifest);
+                PluginInfo {
+                    manifest,
+                    state,
+                    values,
+                }
             })
             .collect()
     }
 
     /// `id` のプラグインの effective settings(`SettingsStore` 由来)を返す。
+    ///
+    /// `list()` と同様、`entries` ロックは manifest のクローン取得のみに使い、
+    /// ロックを解放してから `SettingsStore::effective` を呼ぶ。
     pub fn values(
         &self,
         id: &str,
     ) -> Result<serde_json::Map<String, serde_json::Value>, RegistryError> {
-        let guard = self
-            .entries
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let entry = guard
-            .iter()
-            .find(|entry| entry.manifest.id == id)
-            .ok_or_else(|| RegistryError::UnknownPlugin(id.to_string()))?;
-        Ok(self.settings_store.effective(&entry.manifest))
+        let manifest = self.find_manifest(id)?;
+        Ok(self.settings_store.effective(&manifest))
     }
 
     /// `id` のプラグインの settings を検証・永続化し、稼働中プラグインが参照
@@ -139,34 +150,54 @@ impl Registry {
     ///
     /// 検証(`SettingsStore::update`)に失敗した場合は何も変更されず、
     /// `RegistryError::Settings` を返す。
+    ///
+    /// `entries` ロックは manifest と `settings_json` の共有ハンドル
+    /// (`Arc<Mutex<String>>`)を取得する間だけ保持し、`SettingsStore::update`/
+    /// `effective` によるファイル I/O はロックを解放した後に行う。書き込み先の
+    /// `settings_json` は `Arc` のクローンなので、`entries` ロックを再取得せず
+    /// に書き込んでも実行中プラグインが参照しているのと同じセルを更新できる。
     pub fn set_values(
         &self,
         id: &str,
         values: &serde_json::Map<String, serde_json::Value>,
     ) -> Result<serde_json::Map<String, serde_json::Value>, RegistryError> {
-        let mut guard = self
-            .entries
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let entry = guard
-            .iter_mut()
-            .find(|entry| entry.manifest.id == id)
-            .ok_or_else(|| RegistryError::UnknownPlugin(id.to_string()))?;
+        let (manifest, settings_json) = {
+            let guard = self
+                .entries
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let entry = guard
+                .iter()
+                .find(|entry| entry.manifest.id == id)
+                .ok_or_else(|| RegistryError::UnknownPlugin(id.to_string()))?;
+            (entry.manifest.clone(), entry.settings_json.clone())
+        };
 
         self.settings_store
-            .update(&entry.manifest, values)
+            .update(&manifest, values)
             .map_err(RegistryError::Settings)?;
 
-        let effective = self.settings_store.effective(&entry.manifest);
+        let effective = self.settings_store.effective(&manifest);
         let settings_json_string =
             serde_json::to_string(&serde_json::Value::Object(effective.clone()))
                 .unwrap_or_else(|_| "{}".to_string());
-        *entry
-            .settings_json
+        *settings_json
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = settings_json_string;
 
         Ok(effective)
+    }
+
+    /// `id` のプラグインの manifest クローンを返す(`entries` ロック保持は
+    /// このルックアップの間だけ)。
+    fn find_manifest(&self, id: &str) -> Result<Manifest, RegistryError> {
+        self.entries
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .iter()
+            .find(|entry| entry.manifest.id == id)
+            .map(|entry| entry.manifest.clone())
+            .ok_or_else(|| RegistryError::UnknownPlugin(id.to_string()))
     }
 
     /// `id` のプラグインが持つ settings JSON の共有ハンドルを返す。
