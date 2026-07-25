@@ -84,7 +84,8 @@ capability 欄は予約(log・settings は暗黙)。検証エラーのあるマ�
 { "type": "rpc-error", "id": …, "error": "<message>" }
 ```
 
-- `plugins/list` の result: `[{ id, name, version, description, state: "running"|"disabled", settings: [ …スキーマ… ], values: { …現在値… } }]`
+- `plugins/list` の result: `{ pluginsDir: "<path>", plugins: [{ id, name, version, description, state: "running"|"disabled", reason?: "<disabled 理由>", settings: [ …スキーマ… ], values: { …現在値… } }] }`
+  (当初は配列としていたが、プラグイン 0 件時に UI が plugins dir のパスを案内する要件のためオブジェクトに変更)
 - 未知 method・不正 params・未知 plugin は `rpc-error`。パース不能なクライアントメッセージは従来どおり無視
 - `set-settings` はスキーマの key に対する部分更新。未知 key は rpc-error
 
