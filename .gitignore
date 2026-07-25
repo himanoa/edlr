@@ -1,2 +1,5 @@
 conversation.txt
 /target
+node_modules/
+ui/frontend/dist/
+ui/frontend/*.tsbuildinfo

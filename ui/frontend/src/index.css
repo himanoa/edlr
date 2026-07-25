@@ -1,0 +1,37 @@
+:root {
+  color-scheme: dark;
+  font-family: system-ui, sans-serif;
+}
+body {
+  margin: 0;
+  background: #14171c;
+  color: #d8dee9;
+}
+.app {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+}
+.tabs {
+  display: flex;
+  gap: 0.25rem;
+  padding: 0.5rem;
+  border-bottom: 1px solid #2b313b;
+}
+.tab {
+  background: none;
+  border: none;
+  color: #8a93a2;
+  padding: 0.4rem 0.9rem;
+  cursor: pointer;
+  border-radius: 4px;
+}
+.tab.active {
+  background: #2b313b;
+  color: #e8edf4;
+}
+.page {
+  flex: 1;
+  overflow: auto;
+  padding: 1rem;
+}
