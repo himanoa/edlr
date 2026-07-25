@@ -1,0 +1,17 @@
+# hello-logger
+
+`edlr:plugin@0.1.0` WIT world (`core/wit/plugin.wit`) を実装したサンプル WASM component プラグイン。
+
+- `init()` — 起動時に `"hello-logger initialized"` を info レベルでログ出力する
+- `on-event(ev)` — `host-settings.get-all()` から取得した JSON の `enabled`(省略時・パース不可時は `true` 扱い)が真のときのみ、`"<kind>:<name> <payload-json>"` を info レベルでログ出力する(`name` は `ev.name` が無ければ `"-"`)
+
+このクレートはルートの Cargo workspace には含まれない独立クレート(`Cargo.toml` に空の `[workspace]` テーブルを持つ)。`core/wit` を `wit_bindgen::generate!` の `path` で直接参照しており、WIT ファイルはコピーしない。
+
+## Build
+
+```sh
+cd examples/plugins/hello-logger
+cargo build --target wasm32-wasip2 --release
+```
+
+生成物: `target/wasm32-wasip2/release/hello_logger.wasm`
