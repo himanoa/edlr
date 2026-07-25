@@ -84,7 +84,11 @@ async fn main() {
         }
     };
     tracing::info!("http/ws server listening on {}", args.listen);
-    let state = server::ServerState::new(&router);
+    // Task 3 でプラグイン起動を server 起動より前に持ってきて `Some(registry)`
+    // を渡すよう配線する。ここでは(プラグイン起動が server::serve より後で
+    // 完了する現状の順序を崩さずに)コンパイル・既存テストを通すため `None`
+    // を渡しておく。
+    let state = server::ServerState::new(&router, None);
     tokio::spawn(server::serve(listener, state, args.ui_dir.clone()));
 
     let mut rx = router.subscribe();

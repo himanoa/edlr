@@ -1,4 +1,5 @@
 use crate::event::Event;
+use crate::plugin::Registry;
 use crate::router::Router;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
@@ -41,6 +42,7 @@ pub fn event_to_ws_json(event: &Event) -> String {
 #[derive(Clone)]
 pub struct ServerState {
     inner: Arc<Mutex<ReplayBuffer>>,
+    registry: Option<Registry>,
 }
 
 struct ReplayBuffer {
@@ -49,13 +51,14 @@ struct ReplayBuffer {
 }
 
 impl ServerState {
-    pub fn new(router: &Router) -> Self {
+    pub fn new(router: &Router, registry: Option<Registry>) -> Self {
         let (tx, _) = broadcast::channel(256);
         let state = Self {
             inner: Arc::new(Mutex::new(ReplayBuffer {
                 buf: VecDeque::new(),
                 tx,
             })),
+            registry,
         };
         let mut rx = router.subscribe();
         let feeder = state.clone();
@@ -86,6 +89,74 @@ impl ServerState {
     fn snapshot_and_subscribe(&self) -> (Vec<Arc<String>>, broadcast::Receiver<Arc<String>>) {
         let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         (inner.buf.iter().cloned().collect(), inner.tx.subscribe())
+    }
+}
+
+/// `plugins/*` RPC メソッドを処理する純関数。テスト容易性のため公開。
+///
+/// `registry` が `None` の場合(プラグインホスト起動失敗などで
+/// `ServerState` に `Registry` が渡されなかった場合)はどのメソッドも
+/// `Err("plugins unavailable")` を返す。
+pub fn handle_rpc(
+    registry: Option<&Registry>,
+    method: &str,
+    params: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let registry = registry.ok_or_else(|| "plugins unavailable".to_string())?;
+    match method {
+        "plugins/list" => {
+            let plugins: Vec<serde_json::Value> = registry
+                .list()
+                .into_iter()
+                .map(|info| {
+                    let mut value = serde_json::json!({
+                        "id": info.manifest.id,
+                        "name": info.manifest.name,
+                        "version": info.manifest.version,
+                        "description": info.manifest.description,
+                        "settings": info.manifest.settings,
+                        "values": info.values,
+                    });
+                    match info.state {
+                        crate::plugin::PluginState::Running => {
+                            value["state"] = serde_json::json!("running");
+                        }
+                        crate::plugin::PluginState::Disabled { reason } => {
+                            value["state"] = serde_json::json!("disabled");
+                            value["reason"] = serde_json::json!(reason);
+                        }
+                    }
+                    value
+                })
+                .collect();
+            Ok(serde_json::json!({
+                "pluginsDir": registry.plugins_dir().to_string_lossy(),
+                "plugins": plugins,
+            }))
+        }
+        "plugins/get-settings" => {
+            let plugin = params
+                .get("plugin")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| "params.plugin must be a string".to_string())?;
+            let values = registry.values(plugin).map_err(|e| e.to_string())?;
+            Ok(serde_json::Value::Object(values))
+        }
+        "plugins/set-settings" => {
+            let plugin = params
+                .get("plugin")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| "params.plugin must be a string".to_string())?;
+            let values = params
+                .get("values")
+                .and_then(|v| v.as_object())
+                .ok_or_else(|| "params.values must be an object".to_string())?;
+            let updated = registry
+                .set_values(plugin, values)
+                .map_err(|e| e.to_string())?;
+            Ok(serde_json::Value::Object(updated))
+        }
+        other => Err(format!("unknown method: {other}")),
     }
 }
 
@@ -176,12 +247,43 @@ async fn client_loop(mut socket: WebSocket, state: ServerState) {
                 Err(broadcast::error::RecvError::Closed) => return,
             },
             incoming = socket.recv() => match incoming {
-                // クライアント→サーバは将来の RPC 用に予約。現状は無視する
+                Some(Ok(Message::Text(text))) => {
+                    if let Some(response) = handle_client_message(&state, &text) {
+                        if socket.send(Message::Text(response.into())).await.is_err() {
+                            return;
+                        }
+                    }
+                }
                 Some(Ok(_)) => {}
                 _ => return,
             },
         }
     }
+}
+
+/// クライアントからの生テキストメッセージを解析し、`{"type":"rpc",...}` で
+/// あれば `handle_rpc` を呼んで応答 JSON 文字列を返す。
+///
+/// - JSON としてパースできない、または `type` が `"rpc"` でないメッセージは
+///   `None`(無視)
+/// - `id` が欠落・非数値の rpc メッセージも `None`(無視、応答しない)
+/// - `method` が欠落・非文字列の場合も `None`(無視)。ここまでは仕様上の
+///   「不正メッセージは無視」の範囲内で、`id` が取れない以上応答しようがない
+fn handle_client_message(state: &ServerState, text: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(text).ok()?;
+    if value.get("type").and_then(|v| v.as_str()) != Some("rpc") {
+        return None;
+    }
+    let id = value.get("id")?.as_i64()?;
+    let method = value.get("method")?.as_str()?;
+    let empty_params = serde_json::json!({});
+    let params = value.get("params").unwrap_or(&empty_params);
+
+    let response = match handle_rpc(state.registry.as_ref(), method, params) {
+        Ok(result) => serde_json::json!({"type": "rpc-result", "id": id, "result": result}),
+        Err(error) => serde_json::json!({"type": "rpc-error", "id": id, "error": error}),
+    };
+    Some(response.to_string())
 }
 
 #[cfg(test)]
