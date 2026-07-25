@@ -1,4 +1,4 @@
-import { parseWsMessage } from "./ws";
+import { defaultWsUrl, parseWsMessage } from "./ws";
 
 test("parses hello", () => {
   expect(parseWsMessage('{"type":"hello","protocol":1}')).toEqual({
@@ -20,4 +20,25 @@ test("returns null for garbage or unknown types", () => {
   expect(parseWsMessage("not json")).toBeNull();
   expect(parseWsMessage('{"type":"mystery"}')).toBeNull();
   expect(parseWsMessage('{"type":"event","kind":"other","raw":{}}')).toBeNull();
+});
+
+test("defaultWsUrl derives from location on a plain http(s) page", () => {
+  expect(
+    defaultWsUrl({ protocol: "http:", host: "localhost:5173", hostname: "localhost" }),
+  ).toBe("ws://localhost:5173/ws");
+  expect(
+    defaultWsUrl({ protocol: "https:", host: "example.com", hostname: "example.com" }),
+  ).toBe("wss://example.com/ws");
+});
+
+test("defaultWsUrl falls back to the daemon default under Tauri (tauri.localhost)", () => {
+  expect(
+    defaultWsUrl({ protocol: "http:", host: "tauri.localhost", hostname: "tauri.localhost" }),
+  ).toBe("ws://127.0.0.1:8137/ws");
+});
+
+test("defaultWsUrl falls back to the daemon default for a non-http protocol (tauri:)", () => {
+  expect(defaultWsUrl({ protocol: "tauri:", host: "", hostname: "" })).toBe(
+    "ws://127.0.0.1:8137/ws",
+  );
 });

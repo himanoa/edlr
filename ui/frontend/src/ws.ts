@@ -35,13 +35,32 @@ export function parseWsMessage(data: string): WsMessage | null {
   return null;
 }
 
-export function defaultWsUrl(): string {
-  if (window.location.protocol.startsWith("http") && window.location.host) {
-    const scheme = window.location.protocol === "https:" ? "wss" : "ws";
-    return `${scheme}://${window.location.host}/ws`;
+const DAEMON_DEFAULT_WS_URL = "ws://127.0.0.1:8137/ws";
+
+export type LocationLike = {
+  protocol: string;
+  host: string;
+  hostname: string;
+};
+
+function isTauriRuntime(loc: LocationLike): boolean {
+  if (typeof window !== "undefined" && "__TAURI_INTERNALS__" in window) return true;
+  if (loc.hostname === "tauri.localhost") return true;
+  if (loc.protocol === "tauri:") return true;
+  return false;
+}
+
+export function defaultWsUrl(loc: LocationLike = window.location): string {
+  if (isTauriRuntime(loc)) {
+    // Tauri シェル(tauri:// または tauri.localhost)では常にデーモンの既定アドレスへ接続する
+    return DAEMON_DEFAULT_WS_URL;
   }
-  // Tauri(tauri://)やテスト環境では既定のデーモンアドレスに接続する
-  return "ws://127.0.0.1:8137/ws";
+  if (loc.protocol.startsWith("http") && loc.host) {
+    const scheme = loc.protocol === "https:" ? "wss" : "ws";
+    return `${scheme}://${loc.host}/ws`;
+  }
+  // それ以外(non-http プロトコルやテスト環境)では既定のデーモンアドレスに接続する
+  return DAEMON_DEFAULT_WS_URL;
 }
 
 export function useEventStream(url: string): {
