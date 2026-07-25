@@ -30,7 +30,9 @@ export default function Logs() {
     if (follow && bottomRef.current?.scrollIntoView) {
       bottomRef.current.scrollIntoView({ behavior: "auto" });
     }
-  }, [shown.length, follow]);
+    // shown.length はクライアントバッファが上限(2000件)に達すると増加が止まるため、
+    // 末尾エントリの id を依存に使い、上限到達後も新着で再発火させる
+  }, [shown[shown.length - 1]?.id, follow]);
 
   return (
     <section className="logs">
