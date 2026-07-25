@@ -1,5 +1,6 @@
 pub mod event;
 pub mod journal;
+pub mod monitor;
 pub mod router;
 pub mod status;
 pub mod watch;
