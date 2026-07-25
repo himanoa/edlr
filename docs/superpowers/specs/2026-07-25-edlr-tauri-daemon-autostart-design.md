@@ -38,5 +38,9 @@
 
 ## スコープ外
 
-- デーモンのヘルスチェック再起動(死活監視)
+- デーモンのヘルスチェック再起動(死活監視。spawn したデーモンが途中で死んでも再起動しない)
 - GUI からのデーモン停止・再起動操作(将来の WS RPC で扱う)
+- アプリ側の panic / SIGKILL 時の孤児対策(将来案: Linux の `PR_SET_PDEATHSIG` で親死亡時にデーモン自終了)
+- graceful shutdown(現状 `Child::kill` = SIGKILL。デーモンが永続状態を持ったら SIGTERM 化する)
+- Windows 対応(`edlr.exe` の探索、テストの Unix 依存の cfg ガード)
+- ポート 8137 を無関係プロセスが占有しているケースの識別(将来案: HTTP ヘルスプローブ)
