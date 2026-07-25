@@ -260,6 +260,46 @@ options = ["a", "b"]
     }
 
     #[test]
+    fn number_setting_accepts_bare_toml_integer_default() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin_dir = tmp.path().join("int-default-plugin");
+        fs::create_dir_all(&plugin_dir).unwrap();
+        write_entry(&plugin_dir, "plugin.wasm");
+        write_manifest(
+            &plugin_dir,
+            r#"
+id = "int-default-plugin"
+name = "Int Default"
+version = "0.1.0"
+entry = "plugin.wasm"
+
+[[settings]]
+key = "volume"
+label = "Volume"
+type = "number"
+default = 80
+"#,
+        );
+
+        let manifest =
+            load_manifest(&plugin_dir).expect("manifest with integer default should parse");
+
+        assert_eq!(manifest.settings.len(), 1);
+        assert_eq!(
+            manifest.settings[0],
+            SettingField::Number {
+                key: "volume".into(),
+                label: "Volume".into(),
+                default: 80.0,
+            }
+        );
+        assert_eq!(
+            manifest.settings[0].default_value(),
+            serde_json::json!(80.0)
+        );
+    }
+
+    #[test]
     fn id_mismatch_with_directory_name_is_rejected() {
         let tmp = tempfile::tempdir().unwrap();
         let plugin_dir = tmp.path().join("myplugin");
