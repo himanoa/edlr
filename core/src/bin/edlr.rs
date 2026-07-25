@@ -32,6 +32,11 @@ async fn main() {
         std::process::exit(1);
     };
 
+    if !dir.is_dir() {
+        eprintln!("error: journal directory does not exist: {}", dir.display());
+        std::process::exit(1);
+    }
+
     tracing::info!("watching {}", dir.display());
     let router = Router::new(256);
     let mut rx = router.subscribe();

@@ -12,6 +12,9 @@ pub fn latest_journal(dir: &Path) -> io::Result<Option<PathBuf>> {
         if !(name.starts_with("Journal.") && name.ends_with(".log")) {
             continue;
         }
+        if !path.is_file() {
+            continue;
+        }
         if latest.as_ref().is_none_or(|l| path > *l) {
             latest = Some(path);
         }
@@ -29,6 +32,9 @@ pub fn next_journal_after(dir: &Path, current: &Path) -> io::Result<Option<PathB
             continue;
         };
         if !(name.starts_with("Journal.") && name.ends_with(".log")) {
+            continue;
+        }
+        if !path.is_file() {
             continue;
         }
         if path <= *current {
@@ -82,5 +88,22 @@ mod tests {
 
         let next = next_journal_after(dir.path(), &new).unwrap();
         assert_eq!(next, None);
+    }
+
+    #[test]
+    fn ignores_directories_matching_journal_naming_pattern() {
+        let dir = tempfile::tempdir().unwrap();
+        // ディレクトリなのに Journal.*.log という名前を持つ紛らわしいエントリ
+        std::fs::create_dir(dir.path().join("Journal.2026-07-25T130000.01.log")).unwrap();
+        let real = dir.path().join("Journal.2026-07-25T120000.01.log");
+        std::fs::write(&real, "").unwrap();
+
+        let latest = latest_journal(dir.path()).unwrap().unwrap();
+        assert_eq!(latest, real);
+
+        let old = dir.path().join("Journal.2026-07-25T100000.01.log");
+        std::fs::write(&old, "").unwrap();
+        let next = next_journal_after(dir.path(), &old).unwrap();
+        assert_eq!(next, Some(real));
     }
 }

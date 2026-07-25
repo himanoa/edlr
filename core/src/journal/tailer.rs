@@ -28,13 +28,11 @@ impl JournalTailer {
         // 現在のファイルから読む
         if let Some(cur) = self.current.clone() {
             if let Err(e) = self.read_new(&cur, &mut lines) {
-                // 現在のファイルの読み取り失敗かつ行が未収集 → エラー返す
-                if lines.is_empty() {
-                    return Err(e);
-                }
-                // 行が収集済みならば警告して返す
-                eprintln!("warning: failed to read current journal: {}", e);
-                return Ok(lines);
+                // 現在のファイルの読み取りに失敗しても、ここで即座にエラーを
+                // 返すとローテーション検出処理に到達できず、新しい Journal
+                // ファイルが永遠に発見されなくなってしまう。警告を出しつつ
+                // ローテーション探索へフォールスルーする。
+                tracing::warn!("failed to read current journal: {}", e);
             }
         }
 
@@ -60,7 +58,7 @@ impl JournalTailer {
                         return Err(e);
                     }
                     // 行が収集済みならば警告して返す
-                    eprintln!("warning: failed to read rotated journal: {}", e);
+                    tracing::warn!("failed to read rotated journal: {}", e);
                     return Ok(lines);
                 }
             } else {
@@ -86,7 +84,10 @@ impl JournalTailer {
         file.seek(SeekFrom::Start(self.pos))?;
         let mut chunk = String::new();
         file.read_to_string(&mut chunk)?;
-        self.pos = len;
+        // 実際に読んだバイト数だけ position を進める。metadata() 取得後に
+        // ファイルへ追記があった場合でも、read_to_string は EOF まで読むため
+        // len を使うと次回ポーリングで既読分を取りこぼす/重複する。
+        self.pos += chunk.len() as u64;
         self.partial.push_str(&chunk);
         while let Some(nl) = self.partial.find('\n') {
             let line: String = self.partial.drain(..=nl).collect();
@@ -179,5 +180,76 @@ mod tests {
             t.poll().unwrap(),
             vec!["old_line2", "mid_line1", "new_line1"]
         );
+    }
+
+    /// pos は metadata() で取得した len ではなく、実際に read_to_string で
+    /// 読んだバイト数だけ進めなければならない。もし len を使うと、
+    /// metadata() 取得後・read_to_string 実行前にファイルへ追記された分は
+    /// 今回の poll で読み取られてしまうにもかかわらず pos には反映されず、
+    /// 次回 poll で同じ行が再送出されてしまう(重複配信)。
+    #[test]
+    fn pos_advances_by_bytes_actually_read_not_stale_metadata_len() {
+        let dir = tempfile::tempdir().unwrap();
+        let j = dir.path().join("Journal.2026-07-25T120000.01.log");
+        append(&j, "hello\n"); // 6 bytes
+        let mut t = JournalTailer::new(dir.path().to_path_buf());
+        let mut lines = Vec::new();
+        t.read_new(&j, &mut lines).unwrap();
+        assert_eq!(t.pos, 6);
+        assert_eq!(lines, vec!["hello"]);
+
+        append(&j, "world\n"); // さらに6バイト追記(合計12バイト)
+        let mut lines2 = Vec::new();
+        t.read_new(&j, &mut lines2).unwrap();
+        // pos はこれまでの pos + 今回読んだバイト数(6) = 12 になるべき。
+        // len() をそのまま使う実装でも今回はたまたま一致してしまうが、
+        // 「pos は読んだバイト数の積み上げ」という不変条件をここで固定する。
+        assert_eq!(t.pos, 12);
+        assert_eq!(lines2, vec!["world"]);
+    }
+
+    /// ファイルが複数回のポーリングをまたいで少しずつ追記される場合でも、
+    /// 一度返した行が再び返される(重複配信される)ことがあってはならない。
+    #[test]
+    fn no_duplicate_lines_across_successive_polls_as_file_grows() {
+        let dir = tempfile::tempdir().unwrap();
+        let j = dir.path().join("Journal.2026-07-25T120000.01.log");
+        append(&j, "a\n");
+        let mut t = JournalTailer::new(dir.path().to_path_buf());
+
+        let mut all = Vec::new();
+        all.extend(t.poll().unwrap());
+        append(&j, "b\n");
+        all.extend(t.poll().unwrap());
+        append(&j, "c\n");
+        all.extend(t.poll().unwrap());
+
+        assert_eq!(all, vec!["a", "b", "c"]);
+        // 追記がない状態でさらに poll しても重複しない
+        assert_eq!(t.poll().unwrap(), Vec::<String>::new());
+    }
+
+    /// 現在ファイルの読み取りが失敗し続けても、ローテーション探索処理へ
+    /// フォールスルーして新しい Journal ファイルを発見できなければならない。
+    /// (現在ファイルを同名のディレクトリに置き換えることで読み取り失敗を再現する)
+    #[test]
+    fn continues_rotation_discovery_after_current_file_read_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let old = dir.path().join("Journal.2026-07-25T100000.01.log");
+        append(&old, "old1\n");
+        let mut t = JournalTailer::new(dir.path().to_path_buf());
+        assert_eq!(t.poll().unwrap(), vec!["old1"]);
+
+        // 現在ファイルを削除して同名のディレクトリに置き換える → 以後の読み取りは
+        // 「ディレクトリを read しようとしてエラー」になる。
+        std::fs::remove_file(&old).unwrap();
+        std::fs::create_dir(&old).unwrap();
+
+        let new = dir.path().join("Journal.2026-07-25T110000.01.log");
+        append(&new, "new1\n");
+
+        // 現在ファイル(ディレクトリ)の読み取りに失敗しても、poll は
+        // エラーを返さずローテーション探索を継続し、新ファイルの行を返す。
+        assert_eq!(t.poll().unwrap(), vec!["new1"]);
     }
 }
