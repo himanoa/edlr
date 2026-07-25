@@ -1,6 +1,7 @@
 import "@testing-library/jest-dom/vitest";
 
-// localStorage mock for tests
+// localStorage is not automatically available in this jsdom setup,
+// so we provide a mock implementation for test environments
 if (typeof window !== "undefined" && !window.localStorage) {
   const store: Record<string, string> = {};
   window.localStorage = {
