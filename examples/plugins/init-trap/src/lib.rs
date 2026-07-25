@@ -8,6 +8,7 @@ wit_bindgen::generate!({
 struct InitTrap;
 
 impl Guest for InitTrap {
+    #[allow(clippy::empty_loop)]
     fn init() {
         loop {
             // Intentionally never terminates, so the host's epoch-based call
