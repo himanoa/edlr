@@ -37,14 +37,6 @@ struct Args {
     settings_dir: Option<PathBuf>,
 }
 
-/// `home` と(あれば)`$XDG_CONFIG_HOME` から `<config-base>/edlr/<sub>` を組み立てる。
-fn resolve_config_subdir(home: &std::path::Path, sub: &str) -> PathBuf {
-    match std::env::var_os("XDG_CONFIG_HOME") {
-        Some(xdg) if !xdg.is_empty() => PathBuf::from(xdg).join("edlr").join(sub),
-        _ => config::default_config_subdir(home, sub),
-    }
-}
-
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt()
@@ -70,13 +62,12 @@ async fn main() {
     let router = Router::new(256);
 
     let home = std::env::var_os("HOME").map(PathBuf::from);
+    let xdg_config_home = std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from);
     let plugins_dir = args.plugins_dir.clone().unwrap_or_else(|| {
-        let home = home.clone().unwrap_or_else(|| PathBuf::from("."));
-        resolve_config_subdir(&home, "plugins")
+        config::config_subdir(xdg_config_home.as_deref(), home.as_deref(), "plugins")
     });
     let settings_dir = args.settings_dir.clone().unwrap_or_else(|| {
-        let home = home.clone().unwrap_or_else(|| PathBuf::from("."));
-        resolve_config_subdir(&home, "settings")
+        config::config_subdir(xdg_config_home.as_deref(), home.as_deref(), "settings")
     });
 
     if let Some(ui_dir) = &args.ui_dir {
