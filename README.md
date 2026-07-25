@@ -88,6 +88,54 @@ Elite Dangerous の Journal / Status.json を監視し、イベントをドラ�
       --plugins-dir <PATH> \
       --settings-dir <PATH>
 
+### プラグイン設定 RPC
+
+`/ws` は journal/status イベントの配信と同じ WebSocket 接続上で、プラグイン
+一覧取得・設定の読み書きを行う RPC を多重化している。
+
+リクエストは次の形式で送る:
+
+    {"type": "rpc", "id": <任意の値>, "method": "<method>", "params": {...}}
+
+レスポンスは成功時 `rpc-result`、失敗時 `rpc-error`(`error` は文字列)で、
+`id` はリクエストの値をそのまま返す:
+
+    {"type": "rpc-result", "id": <同じ id>, "result": {...}}
+    {"type": "rpc-error", "id": <同じ id>, "error": "<message>"}
+
+不正な JSON や `type: "rpc"` 以外のメッセージは黙って無視され、接続は切れない。
+
+サポートするメソッド:
+
+- **`plugins/list`**(`params` 不要) — `plugins-dir` のパスと、ロード済み全プラグインの
+  状態を返す。
+
+      result: {
+        "pluginsDir": "<path>",
+        "plugins": [
+          {
+            "id": "hello-logger", "name": "Hello Logger", "version": "0.1.0",
+            "description": "...",
+            "state": "running" | "disabled",
+            "reason": "<disabled のときのみ>",
+            "settings": [ /* manifest.toml の [[settings]] 定義 */ ],
+            "values": { "enabled": true, ... }  /* 現在の設定値 */
+          }
+        ]
+      }
+
+- **`plugins/get-settings`** `{"plugin": "<id>"}` → 現在の設定値オブジェクト
+  (`{"enabled": true, ...}`)。未知の `plugin` は `rpc-error`。
+- **`plugins/set-settings`** `{"plugin": "<id>", "values": {"<key>": <value>, ...}}`
+  → 更新後の設定値オブジェクト。未知の `plugin` / 未知の `key` は
+  `rpc-error` になり、値は変更されない。設定は `<settings-dir>/<id>.json`
+  に永続化され、稼働中のプラグインは次に受け取るイベントから新しい値を
+  読み取る(再起動不要)。
+
+UI の Plugins 画面はこの 3 メソッドのみでプラグイン一覧・設定フォームを
+描画しており、localStorage やモックデータには依存していない。設定変更は
+即座にデーモンへ送られ、`<settings-dir>/<id>.json` に反映される。
+
 ## UI
 
     # デーモン(WS サーバ込み)を起動
