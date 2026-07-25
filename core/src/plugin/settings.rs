@@ -1,12 +1,20 @@
 use std::fmt;
 use std::fs;
 use std::path::PathBuf;
+use std::sync::Mutex;
 
 use crate::plugin::{Manifest, SettingField};
 
 /// プラグインごとの設定値を `<settings-dir>/<id>.json` に保存するストア。
+///
+/// 内部に `Mutex<()>` を持ち、`update`/`effective` は常にこのロックを保持した
+/// 状態でファイルを読み書きする。これにより複数スレッド(RPC ごとに
+/// `spawn_blocking` される)から同じマニフェストに対して同時に呼び出されても、
+/// read-merge-write のロストアップデートや、書き込み途中のファイルを読んで
+/// しまう競合が起きない。
 pub struct SettingsStore {
     dir: PathBuf,
+    lock: Mutex<()>,
 }
 
 /// `SettingsStore::update` が返しうるエラー。
@@ -47,7 +55,10 @@ impl std::error::Error for SettingsError {}
 
 impl SettingsStore {
     pub fn new(dir: PathBuf) -> Self {
-        SettingsStore { dir }
+        SettingsStore {
+            dir,
+            lock: Mutex::new(()),
+        }
     }
 
     fn path_for(&self, manifest: &Manifest) -> PathBuf {
@@ -112,6 +123,13 @@ impl SettingsStore {
     /// スキーマ外の古い key はマージ元(`effective()`)に含まれず、結果として
     /// ディスク上のファイルから間引かれる。
     pub fn effective(&self, manifest: &Manifest) -> serde_json::Map<String, serde_json::Value> {
+        let _guard = self.lock.lock().unwrap_or_else(|p| p.into_inner());
+        self.effective_locked(manifest)
+    }
+
+    /// `effective()` の本体。呼び出し元が既に `self.lock` を保持していること
+    /// を前提とする(二重ロックしない内部ヘルパー)。
+    fn effective_locked(&self, manifest: &Manifest) -> serde_json::Map<String, serde_json::Value> {
         let mut result = serde_json::Map::new();
         for setting in &manifest.settings {
             result.insert(setting.key().to_string(), setting.default_value());
@@ -148,6 +166,21 @@ impl SettingsStore {
         manifest: &Manifest,
         values: &serde_json::Map<String, serde_json::Value>,
     ) -> Result<(), SettingsError> {
+        self.update_and_effective(manifest, values)?;
+        Ok(())
+    }
+
+    /// `update()` と同じ検証・永続化を行い、書き込み後の effective settings
+    /// を同じロック区間内でまとめて返す。`update()` に続けて `effective()`
+    /// を呼ぶと、その間に別スレッドの `update()` が割り込んで
+    /// (呼び出し元が期待する)「自分が書いた値」と異なる effective 値を
+    /// 読んでしまう可能性があるため、両者をアトミックに行いたい呼び出し元
+    /// (`Registry::set_values` など)はこちらを使うこと。
+    pub fn update_and_effective(
+        &self,
+        manifest: &Manifest,
+        values: &serde_json::Map<String, serde_json::Value>,
+    ) -> Result<serde_json::Map<String, serde_json::Value>, SettingsError> {
         for (key, value) in values {
             let field = manifest
                 .settings
@@ -157,7 +190,9 @@ impl SettingsStore {
             Self::validate_value(field, value)?;
         }
 
-        let mut current = self.effective(manifest);
+        let _guard = self.lock.lock().unwrap_or_else(|p| p.into_inner());
+
+        let mut current = self.effective_locked(manifest);
         for (key, value) in values {
             current.insert(key.clone(), value.clone());
         }
@@ -165,9 +200,14 @@ impl SettingsStore {
         fs::create_dir_all(&self.dir).map_err(SettingsError::Io)?;
         let serialized = serde_json::to_string_pretty(&serde_json::Value::Object(current))
             .map_err(SettingsError::Serialize)?;
-        fs::write(self.path_for(manifest), serialized).map_err(SettingsError::Io)?;
+        let target = self.path_for(manifest);
+        let tmp_path = self
+            .dir
+            .join(format!("{}.json.tmp.{}", manifest.id, std::process::id()));
+        fs::write(&tmp_path, serialized).map_err(SettingsError::Io)?;
+        fs::rename(&tmp_path, &target).map_err(SettingsError::Io)?;
 
-        Ok(())
+        Ok(self.effective_locked(manifest))
     }
 }
 
@@ -430,5 +470,68 @@ mod tests {
             effective.get("greeting"),
             Some(&serde_json::json!("first value"))
         );
+    }
+
+    /// N 個のフィールドを持つマニフェスト(並行更新テスト用)。
+    fn concurrent_manifest(n: usize) -> Manifest {
+        Manifest {
+            id: "concurrent-plugin".into(),
+            name: "Concurrent Plugin".into(),
+            version: "0.1.0".into(),
+            description: String::new(),
+            entry: "plugin.wasm".into(),
+            events: vec![],
+            settings: (0..n)
+                .map(|i| SettingField::String {
+                    key: format!("key{i}"),
+                    label: format!("Key {i}"),
+                    default: "unset".into(),
+                })
+                .collect(),
+        }
+    }
+
+    /// 複数スレッドが同一マニフェストの異なる key を同時に `update` しても、
+    /// 全ての書き込みが失われずに `effective()` へ反映されることを確認する。
+    /// `SettingsStore` 内部にロックがなく read-merge-write が非アトミックだった
+    /// 旧実装では、スレッド同士が互いの書き込みを踏み潰すロストアップデートが
+    /// 発生し、このテストは(すべてのキーが埋まらず)失敗していた。
+    #[test]
+    fn concurrent_updates_to_different_keys_are_not_lost() {
+        use std::sync::Arc;
+        use std::thread;
+
+        const N: usize = 8;
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("settings");
+        let store = Arc::new(SettingsStore::new(dir));
+        let manifest = Arc::new(concurrent_manifest(N));
+
+        let handles: Vec<_> = (0..N)
+            .map(|i| {
+                let store = Arc::clone(&store);
+                let manifest = Arc::clone(&manifest);
+                thread::spawn(move || {
+                    let mut values = serde_json::Map::new();
+                    values.insert(format!("key{i}"), serde_json::json!(format!("value{i}")));
+                    store
+                        .update(&manifest, &values)
+                        .expect("concurrent update should succeed");
+                })
+            })
+            .collect();
+
+        for handle in handles {
+            handle.join().expect("thread should not panic");
+        }
+
+        let effective = store.effective(&manifest);
+        for i in 0..N {
+            assert_eq!(
+                effective.get(&format!("key{i}")),
+                Some(&serde_json::json!(format!("value{i}"))),
+                "key{i} should retain its concurrently written value"
+            );
+        }
     }
 }

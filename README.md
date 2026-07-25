@@ -95,7 +95,7 @@ Elite Dangerous の Journal / Status.json を監視し、イベントをドラ�
 
 リクエストは次の形式で送る:
 
-    {"type": "rpc", "id": <任意の値>, "method": "<method>", "params": {...}}
+    {"type": "rpc", "id": <数値>, "method": "<method>", "params": {...}}
 
 レスポンスは成功時 `rpc-result`、失敗時 `rpc-error`(`error` は文字列)で、
 `id` はリクエストの値をそのまま返す:

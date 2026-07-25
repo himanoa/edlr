@@ -152,10 +152,14 @@ impl Registry {
     /// `RegistryError::Settings` を返す。
     ///
     /// `entries` ロックは manifest と `settings_json` の共有ハンドル
-    /// (`Arc<Mutex<String>>`)を取得する間だけ保持し、`SettingsStore::update`/
-    /// `effective` によるファイル I/O はロックを解放した後に行う。書き込み先の
-    /// `settings_json` は `Arc` のクローンなので、`entries` ロックを再取得せず
-    /// に書き込んでも実行中プラグインが参照しているのと同じセルを更新できる。
+    /// (`Arc<Mutex<String>>`)を取得する間だけ保持し、
+    /// `SettingsStore::update_and_effective` によるファイル I/O はロックを
+    /// 解放した後に行う。書き込み先の `settings_json` は `Arc` のクローンな
+    /// ので、`entries` ロックを再取得せずに書き込んでも実行中プラグインが
+    /// 参照しているのと同じセルを更新できる。`update_and_effective` は
+    /// `SettingsStore` 内部ロックの下で書き込みと直後の読み出しをまとめて
+    /// 行うため、他スレッドの並行 `set_values` が割り込んでここでの
+    /// `effective` が「自分が書いた値」とずれることはない。
     pub fn set_values(
         &self,
         id: &str,
@@ -173,11 +177,11 @@ impl Registry {
             (entry.manifest.clone(), entry.settings_json.clone())
         };
 
-        self.settings_store
-            .update(&manifest, values)
+        let effective = self
+            .settings_store
+            .update_and_effective(&manifest, values)
             .map_err(RegistryError::Settings)?;
 
-        let effective = self.settings_store.effective(&manifest);
         let settings_json_string =
             serde_json::to_string(&serde_json::Value::Object(effective.clone()))
                 .unwrap_or_else(|_| "{}".to_string());

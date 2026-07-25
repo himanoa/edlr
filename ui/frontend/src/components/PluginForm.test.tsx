@@ -38,7 +38,7 @@ test("toggling a boolean calls onChange(key, value)", async () => {
   expect(onChange).toHaveBeenCalledWith("enabled", false);
 });
 
-test("shows an error and reverts the value when onChange rejects", async () => {
+test("shows an error and reverts the value when onChange rejects (boolean)", async () => {
   const onChange = vi.fn().mockRejectedValue(new Error("save failed"));
   const plugin = makePlugin();
   render(<PluginForm plugin={plugin} onChange={onChange} />);
@@ -50,4 +50,80 @@ test("shows an error and reverts the value when onChange rejects", async () => {
 
   expect(await screen.findByText("save failed")).toBeInTheDocument();
   expect(checkbox.checked).toBe(true);
+});
+
+test("a boolean field still commits immediately on change", async () => {
+  const onChange = vi.fn().mockResolvedValue(undefined);
+  const plugin = makePlugin();
+  render(<PluginForm plugin={plugin} onChange={onChange} />);
+
+  await userEvent.click(screen.getByLabelText("有効"));
+
+  expect(onChange).toHaveBeenCalledTimes(1);
+  expect(onChange).toHaveBeenCalledWith("enabled", false);
+});
+
+test("typing in a string field does not call onChange until blur or Enter", async () => {
+  const onChange = vi.fn().mockResolvedValue(undefined);
+  const plugin = makePlugin();
+  render(<PluginForm plugin={plugin} onChange={onChange} />);
+
+  const input = screen.getByLabelText("エンドポイント") as HTMLInputElement;
+  await userEvent.clear(input);
+  await userEvent.type(input, "http://localhost:5000");
+
+  expect(input.value).toBe("http://localhost:5000");
+  expect(onChange).not.toHaveBeenCalled();
+});
+
+test("blurring a string field commits the draft once with the final value", async () => {
+  const onChange = vi.fn().mockResolvedValue(undefined);
+  const plugin = makePlugin();
+  render(<PluginForm plugin={plugin} onChange={onChange} />);
+
+  const input = screen.getByLabelText("エンドポイント") as HTMLInputElement;
+  await userEvent.clear(input);
+  await userEvent.type(input, "http://localhost:5000");
+  await userEvent.tab();
+
+  expect(onChange).toHaveBeenCalledTimes(1);
+  expect(onChange).toHaveBeenCalledWith("endpoint", "http://localhost:5000");
+});
+
+test("pressing Enter in a string field commits the draft", async () => {
+  const onChange = vi.fn().mockResolvedValue(undefined);
+  const plugin = makePlugin();
+  render(<PluginForm plugin={plugin} onChange={onChange} />);
+
+  const input = screen.getByLabelText("エンドポイント") as HTMLInputElement;
+  await userEvent.clear(input);
+  await userEvent.type(input, "http://example.com{Enter}");
+
+  expect(onChange).toHaveBeenCalledTimes(1);
+  expect(onChange).toHaveBeenCalledWith("endpoint", "http://example.com");
+});
+
+test("a failed save on a string field surfaces the error and reverts the draft", async () => {
+  const onChange = vi.fn().mockRejectedValue(new Error("save failed"));
+  const plugin = makePlugin();
+  render(<PluginForm plugin={plugin} onChange={onChange} />);
+
+  const input = screen.getByLabelText("エンドポイント") as HTMLInputElement;
+  await userEvent.clear(input);
+  await userEvent.type(input, "http://bad{Enter}");
+
+  expect(await screen.findByText("save failed")).toBeInTheDocument();
+  expect(input.value).toBe("http://localhost");
+});
+
+test("blurring a string field without editing does not call onChange", async () => {
+  const onChange = vi.fn().mockResolvedValue(undefined);
+  const plugin = makePlugin();
+  render(<PluginForm plugin={plugin} onChange={onChange} />);
+
+  const input = screen.getByLabelText("エンドポイント") as HTMLInputElement;
+  await userEvent.click(input);
+  await userEvent.tab();
+
+  expect(onChange).not.toHaveBeenCalled();
 });
