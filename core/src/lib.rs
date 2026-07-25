@@ -1,3 +1,4 @@
+pub mod config;
 pub mod event;
 pub mod journal;
 pub mod monitor;
