@@ -55,15 +55,23 @@ fn main() {
     // ウィンドウを出してフロントエンドを表示する薄い皮 + デーモンの道連れ起動。
     // 既に起動済みのデーモンには spawn も kill もしない。
     let mut child = autostart_daemon();
-    tauri::Builder::default()
-        .build(tauri::generate_context!())
-        .expect("error while building tauri application")
-        .run(move |_app, event| {
-            if let tauri::RunEvent::Exit = event {
-                if let Some(mut c) = child.take() {
-                    let _ = c.kill();
-                    let _ = c.wait();
-                }
+    let app = match tauri::Builder::default().build(tauri::generate_context!()) {
+        Ok(app) => app,
+        Err(e) => {
+            if let Some(mut c) = child.take() {
+                let _ = c.kill();
+                let _ = c.wait();
             }
-        });
+            eprintln!("error while building tauri application: {e}");
+            std::process::exit(1);
+        }
+    };
+    app.run(move |_app, event| {
+        if let tauri::RunEvent::Exit = event {
+            if let Some(mut c) = child.take() {
+                let _ = c.kill();
+                let _ = c.wait();
+            }
+        }
+    });
 }
