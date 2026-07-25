@@ -12,7 +12,12 @@ pub struct JournalTailer {
 
 impl JournalTailer {
     pub fn new(dir: PathBuf) -> Self {
-        Self { dir, current: None, pos: 0, partial: String::new() }
+        Self {
+            dir,
+            current: None,
+            pos: 0,
+            partial: String::new(),
+        }
     }
 
     /// 追記された完全な行を返す。新しい Journal が現れたら旧ファイルを読み切って切り替える。
@@ -101,7 +106,11 @@ mod tests {
     use std::io::Write;
 
     fn append(path: &std::path::Path, s: &str) {
-        let mut f = OpenOptions::new().create(true).append(true).open(path).unwrap();
+        let mut f = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .unwrap();
         f.write_all(s.as_bytes()).unwrap();
     }
 

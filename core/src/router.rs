@@ -34,7 +34,9 @@ mod tests {
         let router = Router::new(16);
         let mut a = router.subscribe();
         let mut b = router.subscribe();
-        router.publish(Event::Status { raw: serde_json::json!({"Flags": 1}) });
+        router.publish(Event::Status {
+            raw: serde_json::json!({"Flags": 1}),
+        });
         assert!(matches!(*a.recv().await.unwrap(), Event::Status { .. }));
         assert!(matches!(*b.recv().await.unwrap(), Event::Status { .. }));
     }
@@ -42,6 +44,8 @@ mod tests {
     #[test]
     fn publish_without_subscribers_does_not_panic() {
         let router = Router::new(16);
-        router.publish(Event::Status { raw: serde_json::json!({}) });
+        router.publish(Event::Status {
+            raw: serde_json::json!({}),
+        });
     }
 }

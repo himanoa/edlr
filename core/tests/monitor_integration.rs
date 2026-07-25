@@ -6,7 +6,11 @@ use std::io::Write;
 use std::time::Duration;
 
 fn append(path: &std::path::Path, s: &str) {
-    let mut f = OpenOptions::new().create(true).append(true).open(path).unwrap();
+    let mut f = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .unwrap();
     f.write_all(s.as_bytes()).unwrap();
 }
 

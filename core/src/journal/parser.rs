@@ -6,7 +6,11 @@ pub fn parse_line(line: &str) -> Option<Event> {
     let raw: Value = serde_json::from_str(line.trim()).ok()?;
     let timestamp = raw.get("timestamp")?.as_str()?.to_string();
     let event = raw.get("event")?.as_str()?.to_string();
-    Some(Event::Journal { timestamp, event, raw })
+    Some(Event::Journal {
+        timestamp,
+        event,
+        raw,
+    })
 }
 
 #[cfg(test)]
@@ -17,7 +21,12 @@ mod tests {
     #[test]
     fn parses_journal_line() {
         let line = r#"{"timestamp":"2026-07-25T12:00:00Z","event":"FSDJump","StarSystem":"Sol"}"#;
-        let Some(Event::Journal { timestamp, event, raw }) = parse_line(line) else {
+        let Some(Event::Journal {
+            timestamp,
+            event,
+            raw,
+        }) = parse_line(line)
+        else {
             panic!("expected Journal event");
         };
         assert_eq!(timestamp, "2026-07-25T12:00:00Z");

@@ -41,7 +41,10 @@ pub fn wake_source(dir: &Path, interval: Duration) -> WakeSource {
         }
     });
 
-    WakeSource { _watcher: watcher, rx }
+    WakeSource {
+        _watcher: watcher,
+        rx,
+    }
 }
 
 #[cfg(test)]
