@@ -1,0 +1,19 @@
+[package]
+name = "edlr-core"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "edlr"
+path = "src/bin/edlr.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+serde_json = "1"
+notify = "8"
+clap = { version = "4", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = "0.3"
+
+[dev-dependencies]
+tempfile = "3"
