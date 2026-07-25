@@ -5,6 +5,6 @@ pub mod runner;
 pub mod settings;
 
 pub use manifest::{load_manifest, matches_event, Manifest, ManifestError, SettingField};
-pub use registry::{PluginEntry, PluginState, Registry};
+pub use registry::{PluginEntry, PluginInfo, PluginState, Registry, RegistryError};
 pub use runner::start_plugins;
 pub use settings::{SettingsError, SettingsStore};

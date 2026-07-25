@@ -41,7 +41,12 @@ pub fn start_plugins(
     host: PluginHost,
 ) -> Registry {
     let host = Arc::new(host);
-    let registry = Registry::new(host.clone());
+    let settings_store = Arc::new(settings_store);
+    let registry = Registry::new(
+        host.clone(),
+        settings_store.clone(),
+        plugins_dir.to_path_buf(),
+    );
 
     let dir_entries = match std::fs::read_dir(plugins_dir) {
         Ok(dir_entries) => dir_entries,

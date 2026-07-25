@@ -43,6 +43,18 @@ fn init_trap_wasm() -> PathBuf {
 /// Materializes a plugin directory under `plugins_dir` with a copy of
 /// `wasm_src` as its entry and a manifest declaring `events`.
 fn write_plugin(plugins_dir: &Path, id: &str, wasm_src: &Path, events: &[&str]) {
+    write_plugin_with_settings(plugins_dir, id, wasm_src, events, "");
+}
+
+/// Like `write_plugin`, but appends `settings_toml` (one or more `[[settings]]`
+/// tables, already formatted) to the generated manifest.
+fn write_plugin_with_settings(
+    plugins_dir: &Path,
+    id: &str,
+    wasm_src: &Path,
+    events: &[&str],
+    settings_toml: &str,
+) {
     let dir = plugins_dir.join(id);
     fs::create_dir_all(&dir).unwrap();
     let entry_name = wasm_src.file_name().unwrap().to_str().unwrap();
@@ -62,11 +74,20 @@ name = "{id}"
 version = "0.1.0"
 entry = "{entry_name}"
 events = [{events_toml}]
+{settings_toml}
 "#
         ),
     )
     .unwrap();
 }
+
+const HELLO_LOGGER_ENABLED_SETTING: &str = r#"
+[[settings]]
+key = "enabled"
+label = "Enabled"
+type = "boolean"
+default = true
+"#;
 
 fn state_of<'a>(
     snapshot: &'a [(edlr_core::plugin::Manifest, PluginState)],
@@ -247,5 +268,128 @@ async fn init_failure_registers_disabled_and_starts_no_event_task() {
         state_of(&snapshot, "hello-logger"),
         Some(&PluginState::Running),
         "hello-logger should be unaffected by init-trap's failure"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn list_returns_plugin_info_with_effective_values_matching_manifest_defaults() {
+    let tmp = tempfile::tempdir().unwrap();
+    let plugins_dir = tmp.path().join("plugins");
+    fs::create_dir_all(&plugins_dir).unwrap();
+    write_plugin_with_settings(
+        &plugins_dir,
+        "hello-logger",
+        &hello_logger_wasm(),
+        &["FSDJump"],
+        HELLO_LOGGER_ENABLED_SETTING,
+    );
+
+    let settings_store = SettingsStore::new(tmp.path().join("settings"));
+    let router = Router::new(16);
+    let host = PluginHost::new().expect("host should start");
+
+    let registry = start_plugins(&plugins_dir, settings_store, &router, host);
+
+    let list = registry.list();
+    assert_eq!(list.len(), 1, "hello-logger should be registered");
+    let info = &list[0];
+    assert_eq!(info.manifest.id, "hello-logger");
+    assert_eq!(info.state, PluginState::Running);
+
+    for setting in &info.manifest.settings {
+        assert_eq!(
+            info.values.get(setting.key()),
+            Some(&setting.default_value()),
+            "values[{}] should match manifest default",
+            setting.key()
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn set_values_persists_validates_and_updates_shared_settings_json() {
+    let tmp = tempfile::tempdir().unwrap();
+    let plugins_dir = tmp.path().join("plugins");
+    fs::create_dir_all(&plugins_dir).unwrap();
+    write_plugin_with_settings(
+        &plugins_dir,
+        "hello-logger",
+        &hello_logger_wasm(),
+        &["FSDJump"],
+        HELLO_LOGGER_ENABLED_SETTING,
+    );
+
+    let settings_store = SettingsStore::new(tmp.path().join("settings"));
+    let router = Router::new(16);
+    let host = PluginHost::new().expect("host should start");
+
+    let registry = start_plugins(&plugins_dir, settings_store, &router, host);
+
+    let mut new_values = serde_json::Map::new();
+    new_values.insert("enabled".to_string(), serde_json::json!(false));
+
+    let returned = registry
+        .set_values("hello-logger", &new_values)
+        .expect("set_values should succeed for a known key");
+    assert_eq!(returned.get("enabled"), Some(&serde_json::json!(false)));
+
+    let values = registry
+        .values("hello-logger")
+        .expect("values should succeed for a registered plugin");
+    assert_eq!(values.get("enabled"), Some(&serde_json::json!(false)));
+
+    let shared = registry
+        .entry_settings("hello-logger")
+        .expect("hello-logger should have a shared settings handle");
+    let shared_json = shared
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone();
+    let parsed: serde_json::Value =
+        serde_json::from_str(&shared_json).expect("shared settings_json should be valid JSON");
+    assert_eq!(
+        parsed.get("enabled"),
+        Some(&serde_json::json!(false)),
+        "the running plugin's shared settings_json should reflect the update"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn set_values_with_unknown_key_returns_err_and_leaves_values_unchanged() {
+    let tmp = tempfile::tempdir().unwrap();
+    let plugins_dir = tmp.path().join("plugins");
+    fs::create_dir_all(&plugins_dir).unwrap();
+    write_plugin_with_settings(
+        &plugins_dir,
+        "hello-logger",
+        &hello_logger_wasm(),
+        &["FSDJump"],
+        HELLO_LOGGER_ENABLED_SETTING,
+    );
+
+    let settings_store = SettingsStore::new(tmp.path().join("settings"));
+    let router = Router::new(16);
+    let host = PluginHost::new().expect("host should start");
+
+    let registry = start_plugins(&plugins_dir, settings_store, &router, host);
+
+    let before = registry
+        .values("hello-logger")
+        .expect("values should succeed for a registered plugin");
+
+    let mut bad_values = serde_json::Map::new();
+    bad_values.insert("nope".to_string(), serde_json::json!(1));
+
+    let err = registry
+        .set_values("hello-logger", &bad_values)
+        .expect_err("unknown settings key should be rejected");
+    assert!(matches!(err, edlr_core::plugin::RegistryError::Settings(_)));
+
+    let after = registry
+        .values("hello-logger")
+        .expect("values should succeed for a registered plugin");
+    assert_eq!(
+        before, after,
+        "rejected update should not change existing values"
     );
 }
