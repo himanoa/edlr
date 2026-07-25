@@ -1,31 +1,53 @@
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { mockPlugins } from "../mock/plugins";
-import { loadSettings } from "../lib/settings";
+import { expect, test, vi } from "vitest";
+import type { PluginInfo } from "../types/plugin";
 import PluginForm from "./PluginForm";
 
-beforeEach(() => localStorage.clear());
+function makePlugin(overrides: Partial<PluginInfo> = {}): PluginInfo {
+  return {
+    id: "voice-notify",
+    name: "Voice Notify",
+    version: "1.0.0",
+    description: "test plugin",
+    state: "running",
+    settings: [
+      { type: "boolean", key: "enabled", label: "有効", default: true },
+      { type: "string", key: "endpoint", label: "エンドポイント", default: "http://localhost" },
+      { type: "number", key: "volume", label: "音量", default: 80 },
+      { type: "select", key: "voice", label: "音声", default: "Amber", options: ["Amber", "Blue"] },
+    ],
+    values: { enabled: true, endpoint: "http://localhost", volume: 80, voice: "Amber" },
+    ...overrides,
+  };
+}
 
-test("renders a control per setting field", () => {
-  const manifest = mockPlugins[0];
-  render(<PluginForm manifest={manifest} />);
-  for (const field of manifest.settings) {
+test("renders a control per setting field for all 4 types", () => {
+  const plugin = makePlugin();
+  render(<PluginForm plugin={plugin} onChange={vi.fn()} />);
+  for (const field of plugin.settings) {
     expect(screen.getByLabelText(field.label)).toBeInTheDocument();
   }
 });
 
-test("changing a boolean persists to localStorage", async () => {
-  const manifest = mockPlugins[0]; // enabled: default true
-  render(<PluginForm manifest={manifest} />);
+test("toggling a boolean calls onChange(key, value)", async () => {
+  const onChange = vi.fn().mockResolvedValue(undefined);
+  const plugin = makePlugin();
+  render(<PluginForm plugin={plugin} onChange={onChange} />);
   await userEvent.click(screen.getByLabelText("有効"));
-  expect(loadSettings(manifest).enabled).toBe(false);
+  expect(onChange).toHaveBeenCalledWith("enabled", false);
 });
 
-test("changing a number persists to localStorage", async () => {
-  const manifest = mockPlugins[0];
-  render(<PluginForm manifest={manifest} />);
-  const volume = screen.getByLabelText("音量");
-  await userEvent.clear(volume);
-  await userEvent.type(volume, "42");
-  expect(loadSettings(manifest).volume).toBe(42);
+test("shows an error and reverts the value when onChange rejects", async () => {
+  const onChange = vi.fn().mockRejectedValue(new Error("save failed"));
+  const plugin = makePlugin();
+  render(<PluginForm plugin={plugin} onChange={onChange} />);
+
+  const checkbox = screen.getByLabelText("有効") as HTMLInputElement;
+  expect(checkbox.checked).toBe(true);
+
+  await userEvent.click(checkbox);
+
+  expect(await screen.findByText("save failed")).toBeInTheDocument();
+  expect(checkbox.checked).toBe(true);
 });
