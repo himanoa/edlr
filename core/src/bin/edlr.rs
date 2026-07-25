@@ -88,27 +88,53 @@ async fn main() {
     tokio::spawn(server::serve(listener, state, args.ui_dir.clone()));
 
     let mut rx = router.subscribe();
-    tokio::spawn(monitor::run(
-        dir,
-        router.clone(),
-        Duration::from_millis(args.poll_interval_ms),
-    ));
 
     // プラグインホストの起動に失敗しても(wasmtime エンジン初期化失敗など)
     // デーモン本体は止めない。プラグイン機能なしで継続する。
     // `_registry` は後続の Plan B(RPC 経由でのプラグイン一覧・設定操作)が
     // 消費する想定でここに保持しておく。
+    //
+    // 各プラグインの load/init は同期・ブロッキングであり(`start_plugins`
+    // は最後のプラグインの起動結果が確定するまで戻らない)、これを直接
+    // await すると tokio のワーカースレッドを長時間専有してしまう。
+    // `spawn_blocking` で専用スレッドに逃がし、非同期ランタイムをブロック
+    // しないようにする。また、`monitor::run` がイベントを配信し始める前に
+    // プラグインの購読を確立できるよう、`monitor::run` の起動より先に完了
+    // させる。
+    let router_for_plugins = router.clone();
     let _registry = match PluginHost::new() {
         Ok(host) => {
             tracing::info!(plugins_dir = %plugins_dir.display(), "starting plugins");
             let settings_store = SettingsStore::new(settings_dir);
-            Some(start_plugins(&plugins_dir, settings_store, &router, host))
+            let plugins_dir_for_blocking = plugins_dir.clone();
+            match tokio::task::spawn_blocking(move || {
+                start_plugins(
+                    &plugins_dir_for_blocking,
+                    settings_store,
+                    &router_for_plugins,
+                    host,
+                )
+            })
+            .await
+            {
+                Ok(registry) => Some(registry),
+                Err(e) => {
+                    tracing::warn!("plugin startup task panicked, continuing without plugins: {e}");
+                    None
+                }
+            }
         }
         Err(e) => {
             tracing::warn!("failed to initialize plugin host, continuing without plugins: {e}");
             None
         }
     };
+
+    tokio::spawn(monitor::run(
+        dir,
+        router.clone(),
+        Duration::from_millis(args.poll_interval_ms),
+    ));
 
     loop {
         match rx.recv().await {
