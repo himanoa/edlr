@@ -4,3 +4,5 @@ node_modules/
 ui/frontend/dist/
 ui/frontend/*.tsbuildinfo
 ui/src-tauri/target/
+ui/src-tauri/gen/
+ui/src-tauri/Cargo.lock
