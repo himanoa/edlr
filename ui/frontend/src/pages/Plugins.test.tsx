@@ -9,11 +9,15 @@ let listImpl: () => Promise<PluginsList> = () =>
   Promise.resolve({ pluginsDir: "/plugins", plugins: [] });
 let setSettingsImpl: (params: unknown) => Promise<Record<string, unknown>> = () =>
   Promise.resolve({});
+let instances: Array<{ close: ReturnType<typeof vi.fn> }> = [];
 
 vi.mock("../rpc", () => {
   return {
     RpcClient: class {
       close = vi.fn();
+      constructor() {
+        instances.push(this);
+      }
       call(method: string, params?: unknown) {
         calls.push({ method, params });
         if (method === "plugins/list") return listImpl();
@@ -43,6 +47,7 @@ function makePlugin(overrides: Partial<PluginInfo> = {}): PluginInfo {
 
 beforeEach(() => {
   calls.length = 0;
+  instances = [];
   listImpl = () => Promise.resolve({ pluginsDir: "/plugins", plugins: [] });
   setSettingsImpl = () => Promise.resolve({});
 });
@@ -84,6 +89,19 @@ test("shows the reason for a disabled plugin", async () => {
   render(<Plugins />);
 
   expect(await screen.findByText(/wasm load failed/)).toBeInTheDocument();
+});
+
+test("closes the RpcClient when the component unmounts", async () => {
+  const plugin = makePlugin();
+  listImpl = () => Promise.resolve({ pluginsDir: "/plugins", plugins: [plugin] });
+
+  const { unmount } = render(<Plugins />);
+  await screen.findByText("Voice Notify");
+
+  unmount();
+
+  expect(instances).toHaveLength(1);
+  expect(instances[0].close).toHaveBeenCalledTimes(1);
 });
 
 test("changing a setting calls plugins/set-settings with the right args and updates displayed values", async () => {

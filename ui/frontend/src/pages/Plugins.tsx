@@ -19,32 +19,36 @@ function StateBadge({ plugin }: { plugin: PluginInfo }) {
 
 export default function Plugins() {
   const clientRef = useRef<RpcClient | null>(null);
+  // Guards every post-await setState in this component (the initial `plugins/list`
+  // load and `handleChange`'s `plugins/set-settings` round-trip) against firing
+  // after the component has unmounted (e.g. the user switches tabs mid-save).
+  const mountedRef = useRef(true);
   const [status, setStatus] = useState<Status>("loading");
   const [pluginsDir, setPluginsDir] = useState("");
   const [plugins, setPlugins] = useState<PluginInfo[]>([]);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
+    mountedRef.current = true;
     const client = new RpcClient(defaultWsUrl());
     clientRef.current = client;
-    let cancelled = false;
 
     client
       .call<PluginsList>("plugins/list")
       .then((res) => {
-        if (cancelled) return;
+        if (!mountedRef.current) return;
         setPluginsDir(res.pluginsDir);
         setPlugins(res.plugins);
         setStatus("ready");
       })
       .catch((err) => {
-        if (cancelled) return;
+        if (!mountedRef.current) return;
         setError(err instanceof Error ? err.message : String(err));
         setStatus("error");
       });
 
     return () => {
-      cancelled = true;
+      mountedRef.current = false;
       clientRef.current = null;
       client.close();
     };
@@ -57,6 +61,7 @@ export default function Plugins() {
       plugin: pluginId,
       values: { [key]: value },
     });
+    if (!mountedRef.current) return;
     setPlugins((prev) =>
       prev.map((p) => (p.id === pluginId ? { ...p, values: updated } : p)),
     );
