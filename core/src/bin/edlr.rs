@@ -1,4 +1,6 @@
 use clap::Parser;
+use edlr_core::plugin::host::PluginHost;
+use edlr_core::plugin::{start_plugins, SettingsStore};
 use edlr_core::{config, monitor, router::Router, server};
 use std::path::PathBuf;
 use std::time::Duration;
@@ -22,6 +24,25 @@ struct Args {
     /// UI 静的ファイルのディレクトリ(指定時のみ配信)
     #[arg(long)]
     ui_dir: Option<PathBuf>,
+
+    /// プラグインディレクトリ(未指定時は $XDG_CONFIG_HOME/edlr/plugins、
+    /// 未設定なら ~/.config/edlr/plugins)。存在しなくてもエラーにはならない
+    /// (プラグイン 0 件として起動する)
+    #[arg(long)]
+    plugins_dir: Option<PathBuf>,
+
+    /// プラグイン設定の保存先ディレクトリ(未指定時は $XDG_CONFIG_HOME/edlr/settings、
+    /// 未設定なら ~/.config/edlr/settings)
+    #[arg(long)]
+    settings_dir: Option<PathBuf>,
+}
+
+/// `home` と(あれば)`$XDG_CONFIG_HOME` から `<config-base>/edlr/<sub>` を組み立てる。
+fn resolve_config_subdir(home: &std::path::Path, sub: &str) -> PathBuf {
+    match std::env::var_os("XDG_CONFIG_HOME") {
+        Some(xdg) if !xdg.is_empty() => PathBuf::from(xdg).join("edlr").join(sub),
+        _ => config::default_config_subdir(home, sub),
+    }
 }
 
 #[tokio::main]
@@ -48,6 +69,16 @@ async fn main() {
     tracing::info!("watching {}", dir.display());
     let router = Router::new(256);
 
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let plugins_dir = args.plugins_dir.clone().unwrap_or_else(|| {
+        let home = home.clone().unwrap_or_else(|| PathBuf::from("."));
+        resolve_config_subdir(&home, "plugins")
+    });
+    let settings_dir = args.settings_dir.clone().unwrap_or_else(|| {
+        let home = home.clone().unwrap_or_else(|| PathBuf::from("."));
+        resolve_config_subdir(&home, "settings")
+    });
+
     if let Some(ui_dir) = &args.ui_dir {
         if !ui_dir.is_dir() {
             eprintln!("error: --ui-dir {} is not a directory", ui_dir.display());
@@ -71,6 +102,22 @@ async fn main() {
         router.clone(),
         Duration::from_millis(args.poll_interval_ms),
     ));
+
+    // プラグインホストの起動に失敗しても(wasmtime エンジン初期化失敗など)
+    // デーモン本体は止めない。プラグイン機能なしで継続する。
+    // `_registry` は後続の Plan B(RPC 経由でのプラグイン一覧・設定操作)が
+    // 消費する想定でここに保持しておく。
+    let _registry = match PluginHost::new() {
+        Ok(host) => {
+            tracing::info!(plugins_dir = %plugins_dir.display(), "starting plugins");
+            let settings_store = SettingsStore::new(settings_dir);
+            Some(start_plugins(&plugins_dir, settings_store, &router, host))
+        }
+        Err(e) => {
+            tracing::warn!("failed to initialize plugin host, continuing without plugins: {e}");
+            None
+        }
+    };
 
     loop {
         match rx.recv().await {
