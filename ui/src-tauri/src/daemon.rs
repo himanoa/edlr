@@ -80,10 +80,7 @@ mod tests {
     #[test]
     fn resolve_prefers_env_bin_unconditionally() {
         let p = std::path::PathBuf::from("/nonexistent/edlr");
-        assert_eq!(
-            resolve_edlr_bin(Some(p.clone()), None, None, None),
-            Some(p)
-        );
+        assert_eq!(resolve_edlr_bin(Some(p.clone()), None, None, None), Some(p));
     }
 
     #[test]
@@ -96,13 +93,23 @@ mod tests {
 
         // exe_dir の edlr が最優先
         assert_eq!(
-            resolve_edlr_bin(None, Some(exe_dir.path()), Some(path_hit.clone()), Some(dev_bin.clone())),
+            resolve_edlr_bin(
+                None,
+                Some(exe_dir.path()),
+                Some(path_hit.clone()),
+                Some(dev_bin.clone())
+            ),
             Some(sibling)
         );
         // exe_dir に無ければ PATH ヒット
         let empty = tempfile::tempdir().unwrap();
         assert_eq!(
-            resolve_edlr_bin(None, Some(empty.path()), Some(path_hit.clone()), Some(dev_bin.clone())),
+            resolve_edlr_bin(
+                None,
+                Some(empty.path()),
+                Some(path_hit.clone()),
+                Some(dev_bin.clone())
+            ),
             Some(path_hit)
         );
         // PATH にも無ければ dev fallback(実在する場合のみ)
@@ -111,7 +118,12 @@ mod tests {
             Some(dev_bin)
         );
         assert_eq!(
-            resolve_edlr_bin(None, Some(empty.path()), None, Some(std::path::PathBuf::from("/nonexistent"))),
+            resolve_edlr_bin(
+                None,
+                Some(empty.path()),
+                None,
+                Some(std::path::PathBuf::from("/nonexistent"))
+            ),
             None
         );
     }
@@ -128,7 +140,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let script = dir.path().join("fake-edlr");
         // 引数をファイルに書いてから sleep する偽デーモン
-        fs::write(&script, "#!/bin/sh\necho \"$@\" > \"$(dirname \"$0\")/args.txt\"\nsleep 30\n").unwrap();
+        fs::write(
+            &script,
+            "#!/bin/sh\necho \"$@\" > \"$(dirname \"$0\")/args.txt\"\nsleep 30\n",
+        )
+        .unwrap();
         fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
 
         let jdir = dir.path().join("journal");

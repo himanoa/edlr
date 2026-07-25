@@ -31,3 +31,6 @@ Elite Dangerous の Journal / Status.json を監視し、イベントをドラ�
 
     # Tauri(要 libwebkit2gtk-4.1-dev ほかシステム依存)
     cd ui/src-tauri && cargo tauri dev
+
+    # Tauri アプリはデーモン未起動なら自動で spawn し、終了時に道連れで止める。
+    # 既に起動済みのデーモンには手を出さない。EDLR_BIN / EDLR_JOURNAL_DIR で上書き可。
