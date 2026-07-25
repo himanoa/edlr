@@ -248,7 +248,7 @@ async fn client_loop(mut socket: WebSocket, state: ServerState) {
             },
             incoming = socket.recv() => match incoming {
                 Some(Ok(Message::Text(text))) => {
-                    if let Some(response) = handle_client_message(&state, &text) {
+                    if let Some(response) = handle_client_message(&state, &text).await {
                         if socket.send(Message::Text(response.into())).await.is_err() {
                             return;
                         }
@@ -269,19 +269,38 @@ async fn client_loop(mut socket: WebSocket, state: ServerState) {
 /// - `id` が欠落・非数値の rpc メッセージも `None`(無視、応答しない)
 /// - `method` が欠落・非文字列の場合も `None`(無視)。ここまでは仕様上の
 ///   「不正メッセージは無視」の範囲内で、`id` が取れない以上応答しようがない
-fn handle_client_message(state: &ServerState, text: &str) -> Option<String> {
+///
+/// `handle_rpc` 自体は同期関数だが、`SettingsStore` 経由のファイル I/O を
+/// 行いうる(`plugins/list` はプラグイン数分のファイル読み取り)。この関数を
+/// `client_loop` の `select!` 内で直接 await すると、その I/O が終わるまで
+/// 同じループ反復がイベント配信アーム(`rx.recv()`)を一切ポーリングしなく
+/// なり、他クライアントとワーカースレッドを共有している場合はイベント配信を
+/// 遅延させてしまう。そのため実際の `handle_rpc` 呼び出しは
+/// `tokio::task::spawn_blocking` に逃がし、ここでは `JoinHandle` を await
+/// するだけにする。
+async fn handle_client_message(state: &ServerState, text: &str) -> Option<String> {
     let value: serde_json::Value = serde_json::from_str(text).ok()?;
     if value.get("type").and_then(|v| v.as_str()) != Some("rpc") {
         return None;
     }
     let id = value.get("id")?.as_i64()?;
-    let method = value.get("method")?.as_str()?;
-    let empty_params = serde_json::json!({});
-    let params = value.get("params").unwrap_or(&empty_params);
+    let method = value.get("method")?.as_str()?.to_string();
+    let params = value
+        .get("params")
+        .cloned()
+        .unwrap_or(serde_json::json!({}));
+    let registry = state.registry.clone();
 
-    let response = match handle_rpc(state.registry.as_ref(), method, params) {
-        Ok(result) => serde_json::json!({"type": "rpc-result", "id": id, "result": result}),
-        Err(error) => serde_json::json!({"type": "rpc-error", "id": id, "error": error}),
+    let result =
+        tokio::task::spawn_blocking(move || handle_rpc(registry.as_ref(), &method, &params)).await;
+
+    let response = match result {
+        Ok(Ok(result)) => serde_json::json!({"type": "rpc-result", "id": id, "result": result}),
+        Ok(Err(error)) => serde_json::json!({"type": "rpc-error", "id": id, "error": error}),
+        Err(e) => {
+            tracing::warn!("rpc handler task panicked: {e}");
+            serde_json::json!({"type": "rpc-error", "id": id, "error": "internal error"})
+        }
     };
     Some(response.to_string())
 }

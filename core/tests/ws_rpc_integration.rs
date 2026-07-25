@@ -288,6 +288,25 @@ async fn malformed_messages_are_ignored_and_connection_survives() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn rpc_message_with_non_string_method_is_ignored_and_connection_survives() {
+    let (_tmp, registry) = hello_logger_registry();
+    let (_router, addr) = setup(Some(registry)).await;
+    let mut ws = connect(addr).await;
+    recv_hello(&mut ws).await;
+
+    ws.send(Message::Text(
+        "{\"type\":\"rpc\",\"id\":1,\"method\":123}".into(),
+    ))
+    .await
+    .unwrap();
+
+    send_rpc(&mut ws, 2, "plugins/list", serde_json::json!({})).await;
+    let resp = recv_json(&mut ws).await;
+    assert_eq!(resp["type"], "rpc-result");
+    assert_eq!(resp["id"], 2);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn rpc_responses_and_events_are_multiplexed_on_the_same_socket() {
     let (_tmp, registry) = hello_logger_registry();
     let (router, addr) = setup(Some(registry)).await;
