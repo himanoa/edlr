@@ -3,3 +3,4 @@ conversation.txt
 node_modules/
 ui/frontend/dist/
 ui/frontend/*.tsbuildinfo
+ui/src-tauri/target/

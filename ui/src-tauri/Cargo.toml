@@ -1,0 +1,13 @@
+[package]
+name = "edlr-ui"
+version = "0.1.0"
+edition = "2021"
+
+# ルート workspace から独立させる(webkit2gtk 等のシステム依存を隔離)
+[workspace]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
