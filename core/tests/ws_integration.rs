@@ -4,6 +4,7 @@ use edlr_core::server::{self, ServerState};
 use futures_util::{SinkExt, StreamExt};
 use std::net::SocketAddr;
 use std::time::Duration;
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::Message;
 
 type Ws =
@@ -101,6 +102,24 @@ async fn multiple_clients_receive_the_same_events() {
     router.publish(journal("Docked"));
     assert_eq!(recv_json(&mut a).await["event"], "Docked");
     assert_eq!(recv_json(&mut b).await["event"], "Docked");
+}
+
+#[tokio::test]
+async fn rejects_connection_with_disallowed_origin() {
+    let (_router, addr) = setup(None).await;
+    let mut req = format!("ws://{addr}/ws").into_client_request().unwrap();
+    req.headers_mut().insert(
+        "Origin",
+        "https://evil.example".parse().expect("valid header value"),
+    );
+    let err = tokio_tungstenite::connect_async(req)
+        .await
+        .expect_err("connection with disallowed Origin must be rejected");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("403") || msg.contains("Forbidden"),
+        "expected a 403 rejection, got: {msg}"
+    );
 }
 
 async fn http_get(addr: SocketAddr, path: &str) -> String {

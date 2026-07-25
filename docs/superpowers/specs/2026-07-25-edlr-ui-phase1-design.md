@@ -35,6 +35,10 @@ JSON テキストフレーム。フェーズ 1 はサーバ→クライアント
   送ってからライブ配信に移行する。ログビューワーが開いた瞬間に空にならないため
 - クライアント→サーバのメッセージは無視する(将来の RPC 用に予約)
 - broadcast の Lagged はそのクライアントへの配信欠落として許容(warn ログ)
+- **Origin チェック**: `/ws` へのアップグレード要求は Origin ヘッダが localhost 系
+  (`127.0.0.1` / `localhost` / `[::1]`、任意ポート・任意スキーム)または Tauri のオリジン
+  (`tauri://localhost`、`http(s)://tauri.localhost`)以外であれば 403 で拒否する。
+  Origin ヘッダ無しは非ブラウザクライアント(tokio-tungstenite・curl 等)として許可する。
 
 ## ui/frontend(React + TypeScript + Vite)
 

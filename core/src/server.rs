@@ -2,6 +2,7 @@ use crate::event::Event;
 use crate::router::Router;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::get;
 use std::collections::VecDeque;
@@ -105,8 +106,38 @@ pub async fn serve(listener: TcpListener, state: ServerState, ui_dir: Option<Pat
     }
 }
 
-async fn ws_handler(ws: WebSocketUpgrade, State(state): State<ServerState>) -> impl IntoResponse {
+/// `/ws` に許可される Origin かどうかを判定する。
+///
+/// ブラウザからの WS 接続は Origin ヘッダを送るため、任意の Web ページが
+/// `ws://127.0.0.1:8137/ws` を開いてジャーナルストリームを読み取れてしまうのを防ぐ。
+/// 許可するのは localhost 系(127.0.0.1 / localhost / [::1]、任意ポート・任意スキーム)と
+/// Tauri のオリジン(`tauri://localhost`、`http(s)://tauri.localhost`)のみ。
+/// Origin ヘッダ自体が無い接続(tokio-tungstenite や curl などブラウザ以外のクライアント)は許可する。
+fn origin_allowed(origin: &str) -> bool {
+    let Ok(uri) = origin.parse::<axum::http::Uri>() else {
+        return false;
+    };
+    let Some(host) = uri.host() else {
+        return false;
+    };
+    // http::Uri は IPv6 ホストをブラケット付き("[::1]")で返すため剥がしてから比較する
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    matches!(host, "127.0.0.1" | "localhost" | "::1" | "tauri.localhost")
+}
+
+async fn ws_handler(
+    ws: WebSocketUpgrade,
+    headers: HeaderMap,
+    State(state): State<ServerState>,
+) -> impl IntoResponse {
+    if let Some(origin) = headers.get(axum::http::header::ORIGIN) {
+        let allowed = origin.to_str().map(origin_allowed).unwrap_or(false);
+        if !allowed {
+            return StatusCode::FORBIDDEN.into_response();
+        }
+    }
     ws.on_upgrade(move |socket| client_loop(socket, state))
+        .into_response()
 }
 
 async fn client_loop(mut socket: WebSocket, state: ServerState) {
@@ -150,5 +181,31 @@ async fn client_loop(mut socket: WebSocket, state: ServerState) {
                 _ => return,
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod origin_tests {
+    use super::origin_allowed;
+
+    #[test]
+    fn allows_localhost_origins() {
+        assert!(origin_allowed("http://localhost:5173"));
+        assert!(origin_allowed("http://127.0.0.1:8137"));
+        assert!(origin_allowed("http://[::1]:8137"));
+    }
+
+    #[test]
+    fn allows_tauri_origins() {
+        assert!(origin_allowed("tauri://localhost"));
+        assert!(origin_allowed("http://tauri.localhost"));
+        assert!(origin_allowed("https://tauri.localhost"));
+    }
+
+    #[test]
+    fn rejects_other_origins() {
+        assert!(!origin_allowed("https://evil.example"));
+        assert!(!origin_allowed("http://localhost.evil.example"));
+        assert!(!origin_allowed("not a uri"));
     }
 }
