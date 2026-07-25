@@ -31,6 +31,10 @@ fn busy_loop_wasm() -> PathBuf {
     build_fixture("examples/plugins/busy-loop", "busy_loop.wasm")
 }
 
+fn memory_hog_wasm() -> PathBuf {
+    build_fixture("examples/plugins/memory-hog", "memory_hog.wasm")
+}
+
 fn ctx(settings_json: &str) -> (HostCtx, Arc<Mutex<String>>) {
     let settings = Arc::new(Mutex::new(settings_json.to_string()));
     (
@@ -112,5 +116,39 @@ fn busy_loop_on_event_hits_deadline() {
     assert!(
         elapsed < PluginInstance::CALL_DEADLINE + std::time::Duration::from_secs(5),
         "call took too long: {elapsed:?}"
+    );
+}
+
+/// Guards against unbounded linear-memory growth: a plugin that keeps
+/// allocating past the host's `StoreLimits` memory cap (64 MiB, see
+/// `PLUGIN_MEMORY_LIMIT` in `core/src/plugin/host.rs`) must be trapped by
+/// the host rather than being allowed to OOM the daemon process.
+///
+/// The fixture allocates in 8 MiB chunks, so it blows through the 64 MiB
+/// cap in well under a second -- far short of `PluginInstance::CALL_DEADLINE`
+/// (2s). This test can't fully distinguish "trapped for memory" from
+/// "trapped for time" purely from the `Err` return (wasmtime does not
+/// expose a structured trap-reason enum through this host's error mapping),
+/// but the tight elapsed-time bound below makes a deadline-trap implausible.
+#[test]
+fn memory_hog_on_event_hits_memory_limit() {
+    let wasm = memory_hog_wasm();
+    let host = PluginHost::new().expect("host should start");
+    let (mut instance, _settings) = load(&host, &wasm, r#"{}"#);
+
+    instance.call_init().expect("call_init should succeed");
+
+    let start = Instant::now();
+    let result = instance.call_on_event("journal", None, Some("FSDJump"), "{}");
+    let elapsed = start.elapsed();
+
+    assert!(
+        result.is_err(),
+        "memory hog call should trap/err once it exceeds the host's memory limit"
+    );
+    assert!(
+        elapsed < PluginInstance::CALL_DEADLINE,
+        "call took {elapsed:?}, which is suspiciously close to the call deadline; \
+         this may be a deadline trap rather than a memory-limit trap"
     );
 }

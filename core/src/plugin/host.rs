@@ -9,7 +9,7 @@ use std::thread;
 use std::time::Duration;
 
 use wasmtime::component::{Component, HasSelf, Linker, ResourceTable};
-use wasmtime::{Config, Engine, Store};
+use wasmtime::{Config, Engine, Store, StoreLimits, StoreLimitsBuilder};
 use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
 mod bindings {
@@ -26,6 +26,26 @@ use bindings::{Event as WitEvent, Plugin as PluginBindings};
 /// Interval between epoch ticks driven by the background ticker thread.
 const EPOCH_TICK_INTERVAL: Duration = Duration::from_millis(100);
 
+/// Maximum linear memory (bytes) a single plugin instance may allocate.
+///
+/// The epoch deadline (see `PluginInstance::CALL_DEADLINE`) bounds how long a
+/// guest call may run, but says nothing about how much memory it may claim
+/// while doing so; without a cap a plugin can grow its linear memory without
+/// bound and OOM-kill the whole daemon, defeating the isolation the plugin
+/// host is meant to provide. 64 MiB is a generous ceiling for the kind of
+/// small, single-purpose plugins this host targets (log formatters, simple
+/// notifiers, ...); it is a fixed constant for now but can be made
+/// configurable per-plugin later if a legitimate use case needs more.
+const PLUGIN_MEMORY_LIMIT: usize = 64 * 1024 * 1024;
+
+/// Maximum number of component instances / tables a single plugin `Store`
+/// may create. Plugins in this host are single-component and single-table by
+/// construction; these caps are a cheap extra guard against a
+/// pathological/malicious guest rather than a limit anyone should expect to
+/// approach in normal use.
+const PLUGIN_INSTANCE_LIMIT: usize = 8;
+const PLUGIN_TABLE_LIMIT: usize = 8;
+
 /// Per-plugin-instance host state, exposed to the guest via the generated
 /// `Host` traits.
 pub struct HostCtx {
@@ -39,6 +59,9 @@ pub struct HostCtx {
     /// Rust standard library / adapter, so the host must satisfy them.
     wasi_ctx: WasiCtx,
     wasi_table: ResourceTable,
+    /// Resource limits (memory/instances/tables) enforced on this plugin's
+    /// `Store` via `Store::limiter`. See `PLUGIN_MEMORY_LIMIT`.
+    limits: StoreLimits,
 }
 
 impl HostCtx {
@@ -46,8 +69,17 @@ impl HostCtx {
         HostCtx {
             plugin_id,
             settings_json,
+            // Deliberately empty sandbox default: no preopened directories,
+            // no stdio, no network access, so a plugin can only interact
+            // with the host through the `plugin` world's explicit imports.
             wasi_ctx: WasiCtxBuilder::new().build(),
             wasi_table: ResourceTable::new(),
+            limits: StoreLimitsBuilder::new()
+                .memory_size(PLUGIN_MEMORY_LIMIT)
+                .instances(PLUGIN_INSTANCE_LIMIT)
+                .tables(PLUGIN_TABLE_LIMIT)
+                .trap_on_grow_failure(true)
+                .build(),
         }
     }
 }
@@ -126,6 +158,7 @@ impl PluginHost {
             .map_err(|e| anyhow::anyhow!("failed to wire host imports into linker: {e}"))?;
 
         let mut store = Store::new(&self.engine, ctx);
+        store.limiter(|ctx| &mut ctx.limits);
         // Ticks-beyond-current is set fresh before every call in
         // `PluginInstance::call`; this initial deadline just prevents
         // instantiation itself (which may run guest start code) from
