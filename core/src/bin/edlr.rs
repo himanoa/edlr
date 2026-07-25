@@ -84,19 +84,11 @@ async fn main() {
         }
     };
     tracing::info!("http/ws server listening on {}", args.listen);
-    // Task 3 でプラグイン起動を server 起動より前に持ってきて `Some(registry)`
-    // を渡すよう配線する。ここでは(プラグイン起動が server::serve より後で
-    // 完了する現状の順序を崩さずに)コンパイル・既存テストを通すため `None`
-    // を渡しておく。
-    let state = server::ServerState::new(&router, None);
-    tokio::spawn(server::serve(listener, state, args.ui_dir.clone()));
-
-    let mut rx = router.subscribe();
 
     // プラグインホストの起動に失敗しても(wasmtime エンジン初期化失敗など)
     // デーモン本体は止めない。プラグイン機能なしで継続する。
-    // `_registry` は後続の Plan B(RPC 経由でのプラグイン一覧・設定操作)が
-    // 消費する想定でここに保持しておく。
+    // `registry` は RPC 経由でのプラグイン一覧・設定操作に消費する想定で
+    // ここに保持しておく。
     //
     // 各プラグインの load/init は同期・ブロッキングであり(`start_plugins`
     // は最後のプラグインの起動結果が確定するまで戻らない)、これを直接
@@ -106,7 +98,7 @@ async fn main() {
     // プラグインの購読を確立できるよう、`monitor::run` の起動より先に完了
     // させる。
     let router_for_plugins = router.clone();
-    let _registry = match PluginHost::new() {
+    let registry = match PluginHost::new() {
         Ok(host) => {
             tracing::info!(plugins_dir = %plugins_dir.display(), "starting plugins");
             let settings_store = SettingsStore::new(settings_dir);
@@ -133,6 +125,11 @@ async fn main() {
             None
         }
     };
+
+    let state = server::ServerState::new(&router, registry.clone());
+    tokio::spawn(server::serve(listener, state, args.ui_dir.clone()));
+
+    let mut rx = router.subscribe();
 
     tokio::spawn(monitor::run(
         dir,
