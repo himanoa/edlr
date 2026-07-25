@@ -2,6 +2,7 @@ pub mod config;
 pub mod event;
 pub mod journal;
 pub mod monitor;
+pub mod plugin;
 pub mod router;
 pub mod server;
 pub mod status;

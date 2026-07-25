@@ -1,0 +1,25 @@
+package edlr:plugin@0.1.0;
+
+interface host-log {
+  enum level { debug, info, warn, error }
+  log: func(level: level, message: string);
+}
+
+interface host-settings {
+  get-all: func() -> string; // 設定値 JSON オブジェクト文字列(defaults マージ済み)
+}
+
+world plugin {
+  import host-log;
+  import host-settings;
+
+  record event {
+    kind: string,               // "journal" | "status"
+    timestamp: option<string>,
+    name: option<string>,       // journal イベント名
+    payload-json: string,       // raw JSON
+  }
+
+  export init: func();
+  export on-event: func(ev: event);
+}
