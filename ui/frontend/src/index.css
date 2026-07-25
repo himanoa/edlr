@@ -86,3 +86,30 @@ body {
   overflow-x: auto;
 }
 .logs-count { margin-left: auto; color: #6d7787; }
+.note { color: #8a93a2; font-size: 0.9rem; }
+.plugin-card {
+  background: #1c2129;
+  border: 1px solid #2b313b;
+  border-radius: 8px;
+  padding: 1rem 1.25rem;
+  margin-bottom: 1rem;
+  max-width: 40rem;
+}
+.plugin-card h2 { margin-top: 0; }
+.form-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 1rem;
+  padding: 0.35rem 0;
+}
+.form-row input[type="text"],
+.form-row input[type="number"],
+.form-row select {
+  background: #14171c;
+  border: 1px solid #2b313b;
+  color: inherit;
+  padding: 0.3rem 0.5rem;
+  border-radius: 4px;
+  width: 14rem;
+}
