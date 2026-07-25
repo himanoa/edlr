@@ -29,15 +29,11 @@ type PendingCall = {
   timer: ReturnType<typeof setTimeout>;
 };
 
-type QueuedFrame = {
-  frame: string;
-};
-
 export class RpcClient {
   private ws: WebSocket;
   private nextId = 1;
   private pending = new Map<number, PendingCall>();
-  private queue: QueuedFrame[] = [];
+  private queue: string[] = [];
   private open = false;
   private closed = false;
   private readonly timeoutMs: number;
@@ -47,7 +43,7 @@ export class RpcClient {
     this.ws = new WebSocket(url);
     this.ws.onopen = () => {
       this.open = true;
-      for (const { frame } of this.queue) {
+      for (const frame of this.queue) {
         this.ws.send(frame);
       }
       this.queue = [];
@@ -66,6 +62,10 @@ export class RpcClient {
       }
     };
     this.ws.onclose = () => {
+      // caller-initiated close() already rejected pending calls with "RpcClient closed"
+      // before calling ws.close(); this handler only fires for remote/unexpected closes.
+      if (this.closed) return;
+      this.closed = true;
       this.rejectAllPending(new Error("WebSocket closed"));
     };
   }
@@ -94,15 +94,16 @@ export class RpcClient {
       if (this.open) {
         this.ws.send(serialized);
       } else {
-        this.queue.push({ frame: serialized });
+        this.queue.push(serialized);
       }
     });
   }
 
   close(): void {
+    if (this.closed) return;
     this.closed = true;
-    this.ws.close();
     this.rejectAllPending(new Error("RpcClient closed"));
+    this.ws.close();
   }
 
   private rejectAllPending(reason: unknown): void {

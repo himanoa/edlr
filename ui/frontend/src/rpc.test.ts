@@ -137,7 +137,7 @@ test("call rejects with a timeout when no response arrives in time", async () =>
   await assertion;
 });
 
-test("closing the socket rejects all pending calls", async () => {
+test("a remote/unexpected socket close rejects all pending calls with a remote-close message", async () => {
   const client = new RpcClient("ws://x/ws");
   const ws = FakeWebSocket.instances[0];
   ws.triggerOpen();
@@ -147,6 +147,34 @@ test("closing the socket rejects all pending calls", async () => {
 
   ws.triggerClose();
 
-  await expect(p1).rejects.toThrow();
-  await expect(p2).rejects.toThrow();
+  await expect(p1).rejects.toThrow(/websocket closed/i);
+  await expect(p2).rejects.toThrow(/websocket closed/i);
+});
+
+test("client.close() rejects in-flight calls with a caller-initiated message", async () => {
+  const client = new RpcClient("ws://x/ws");
+  const ws = FakeWebSocket.instances[0];
+  ws.triggerOpen();
+
+  const p1 = client.call("a");
+  const p2 = client.call("b");
+
+  client.close();
+
+  await expect(p1).rejects.toThrow(/rpcclient closed/i);
+  await expect(p2).rejects.toThrow(/rpcclient closed/i);
+});
+
+test("call() after close() rejects immediately and does not send", async () => {
+  const client = new RpcClient("ws://x/ws");
+  const ws = FakeWebSocket.instances[0];
+  ws.triggerOpen();
+
+  client.close();
+  const sentBeforeCall = ws.sent.length;
+
+  const promise = client.call("late");
+
+  await expect(promise).rejects.toThrow(/closed/i);
+  expect(ws.sent).toHaveLength(sentBeforeCall);
 });
