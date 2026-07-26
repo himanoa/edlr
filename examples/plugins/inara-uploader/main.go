@@ -8,8 +8,9 @@
 //     まとめて送る。
 //   - edlr は Journal の読み取り位置を永続化しており、デーモン再起動をまたいで
 //     続きから配信する。デーモンが動き出す前に既に書かれていたイベントには
-//     `event.replay` が立つので、既定ではこれを送らない(`uploadHistorical` で
-//     変更可)。
+//     `event.replay` が立つが、重複配信は起きないので既定ではこれも送る
+//     (`uploadHistorical = false` にすると、デーモンが止まっていた間の
+//     イベントは送られない)。
 //
 // 詳細は README.md の「不足している実装」を参照。
 package main
@@ -22,6 +23,7 @@ import (
 	hostlog "github.com/himanoa/edlr/examples/plugins/inara-uploader/gen/edlr/plugin/host-log"
 	hostsettings "github.com/himanoa/edlr/examples/plugins/inara-uploader/gen/edlr/plugin/host-settings"
 	plugin "github.com/himanoa/edlr/examples/plugins/inara-uploader/gen/edlr/plugin/plugin"
+	settingspkg "github.com/himanoa/edlr/examples/plugins/inara-uploader/settings"
 )
 
 // appName / appVersion は INARA のヘッダに載せるクライアント識別子。
@@ -34,18 +36,9 @@ const (
 // 送信できないまま無制限にメモリを食うのを防ぐための保険。
 const maxQueued = 200
 
-// settings は manifest の `[[settings]]` に対応する。値は毎イベント
-// `host-settings.get-all` から読み直すので、UI での変更は次のイベントから効く。
-type settings struct {
-	Enabled          bool
-	APIKey           string
-	CommanderName    string
-	IsBeingDeveloped bool
-	BatchSize        int
-	MinIntervalSec   int
-	UploadHistorical bool
-	DryRun           bool
-}
+// settings の実体は `settings` パッケージにある。main は `//go:wasmimport` を
+// 含むため `go test` でリンクできず、設定の解釈だけを別パッケージへ出してある。
+type settings = settingspkg.Settings
 
 // state はプラグインのプロセス内状態。永続化はされない。
 type state struct {
@@ -233,43 +226,7 @@ func learnIdentity(name string, payload map[string]any) {
 }
 
 func loadSettings() settings {
-	cfg := settings{
-		Enabled:          true,
-		IsBeingDeveloped: true,
-		BatchSize:        10,
-		MinIntervalSec:   60,
-	}
-
-	var raw map[string]any
-	if err := json.Unmarshal([]byte(hostsettings.GetAll()), &raw); err != nil {
-		return cfg
-	}
-
-	if v, ok := raw["enabled"].(bool); ok {
-		cfg.Enabled = v
-	}
-	if v, ok := raw["apiKey"].(string); ok {
-		cfg.APIKey = v
-	}
-	if v, ok := raw["commanderName"].(string); ok {
-		cfg.CommanderName = v
-	}
-	if v, ok := raw["isBeingDeveloped"].(bool); ok {
-		cfg.IsBeingDeveloped = v
-	}
-	if v, ok := raw["batchSize"].(float64); ok && v >= 1 {
-		cfg.BatchSize = int(v)
-	}
-	if v, ok := raw["minIntervalSeconds"].(float64); ok && v >= 0 {
-		cfg.MinIntervalSec = int(v)
-	}
-	if v, ok := raw["uploadHistorical"].(bool); ok {
-		cfg.UploadHistorical = v
-	}
-	if v, ok := raw["dryRun"].(bool); ok {
-		cfg.DryRun = v
-	}
-	return cfg
+	return settingspkg.Parse(hostsettings.GetAll())
 }
 
 func logf(level hostlog.Level, format string, args ...any) {

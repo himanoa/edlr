@@ -21,6 +21,10 @@ cd examples/plugins/inara-uploader
 ./build.sh              # plugin.wasm を出力
 ```
 
+設定値の解釈は `settings` パッケージ(ホストの import に依存しない純粋な Go)に
+分けてあり、`go test ./settings/` で検証できる。`main` パッケージは
+`//go:wasmimport` を含むためネイティブではリンクできず、テストを書けない。
+
 ビルド対象の world は `plugin` ではなく **`plugin-guest`**(= `plugin` に WASI の
 import 一式を足したもの)。Go/TinyGo の標準ライブラリはプラグインが何も呼ばなくても
 WASI を import するため、`plugin` を直接対象にすると `wasm-tools component new` が
@@ -63,7 +67,7 @@ wit-bindgen-go generate --world plugin --out gen ../../../core/wit
 | `isBeingDeveloped` | boolean | `true` | INARA 側で「開発中クライアント」として扱わせる |
 | `batchSize` | number | `10` | この件数溜まったら送る |
 | `minIntervalSeconds` | number | `60` | 送信の最短間隔。INARA は高頻度の送信を控えるよう求めている |
-| `uploadHistorical` | boolean | `false` | `true` にすると、デーモン起動より前に既に Journal へ書かれていたイベント(`event.replay = true`)も送る。edlr は Journal の読み取り位置を永続化しているため、これを `true` にしても再起動のたびに重複送信することはない |
+| `uploadHistorical` | boolean | `true` | デーモン起動より前に既に Journal へ書かれていたイベント(`event.replay = true`)も送る。edlr は Journal の読み取り位置を永続化しており、再起動しても続きから配信するため、既定で送っても重複送信にはならない。**`false` にすると、デーモンが止まっていた間に書かれたイベントは INARA へ送られない**(その分は欠測になる) |
 | `dryRun` | boolean | `false` | 送信せず、組み立てた JSON をログに出す |
 
 送信は「イベントを受け取ったついで」に行い、次のいずれかで実際に飛ぶ:
