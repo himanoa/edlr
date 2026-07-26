@@ -249,7 +249,7 @@ pub fn capabilities_json_string(hosts: &[String]) -> String {
 /// 形の JSON を持っていても(このホスト実装自身はそのような値を書かないが、
 /// `Arc<Mutex<String>>` は防御的にパースする)「何も許可されていない」に
 /// フォールバックする。
-fn parse_capability_hosts(raw: &str) -> Vec<String> {
+pub(crate) fn parse_capability_hosts(raw: &str) -> Vec<String> {
     let value: serde_json::Value = match serde_json::from_str(raw) {
         Ok(value) => value,
         Err(_) => return Vec::new(),

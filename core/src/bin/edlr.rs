@@ -1,5 +1,6 @@
 use clap::Parser;
 use edlr_core::plugin::host::PluginHost;
+use edlr_core::plugin::sidecar::SidecarConfigStore;
 use edlr_core::plugin::{start_plugins, GrantsStore, SettingsStore};
 use edlr_core::{config, monitor, router::Router, server};
 use std::path::PathBuf;
@@ -109,13 +110,15 @@ async fn main() {
     let registry = match PluginHost::new() {
         Ok(host) => {
             tracing::info!(plugins_dir = %plugins_dir.display(), "starting plugins");
-            let settings_store = SettingsStore::new(settings_dir);
+            let settings_store = SettingsStore::new(settings_dir.clone());
             let grants_store = GrantsStore::new(grants_dir);
+            let sidecar_config_store = SidecarConfigStore::new(settings_dir);
             let plugins_dir_for_blocking = plugins_dir.clone();
             match tokio::task::spawn_blocking(move || {
                 start_plugins(
                     &plugins_dir_for_blocking,
                     settings_store,
+                    sidecar_config_store,
                     grants_store,
                     &router_for_plugins,
                     host,
@@ -161,5 +164,13 @@ async fn main() {
             }
             Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
         }
+    }
+
+    // デーモン終了経路: 生きているサイドカーを確実に停止してから抜ける。
+    // `ProcessDriver::stop_all`(`PluginHost::drop` 経由でも最後の砦として
+    // 呼ばれる)は、まだ稼働中の `Registry`/`PluginHost` を保持したままの
+    // 明示的な shutdown シーケンスの一部として、ここでも呼んでおく。
+    if let Some(registry) = &registry {
+        registry.stop_all_sidecars();
     }
 }

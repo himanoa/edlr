@@ -230,12 +230,39 @@ impl ProcessDriver {
     /// ままにする(ただし `stop_all` は、この関数が今まさに逃がした kill も
     /// `pending_detached` 経由で待つ。後述)。
     pub fn stop_detached(self: Arc<Self>, key: &str) {
-        let taken = {
-            let mut groups = self.lock();
-            match groups.get_mut(key) {
-                Some(group) => take_for_stop(group),
-                None => Vec::new(),
-            }
+        // `groups` はこの関数の最後(= `pending_detached` へのハンドル登録
+        // まで)保持し続ける。理由(2 つ目の `stop_all` 呼び出し元を足した
+        // レビューで指摘された競合の閉じ方):
+        //
+        // 以前は `take_for_stop` の直後で `groups` ロックを手放し、
+        // スレッド生成 → `pending_detached` ロック取得・登録、という
+        // 2 段階に分かれていた。この間に別スレッドが `stop_all` を呼ぶと、
+        // `stop_all` 自身の `take_for_stop`(このインスタンスは既に
+        // `terminating` なのでスキップされる)にも、まだ push されていない
+        // `pending_detached`(この時点ではまだ空)にも、このインスタンスの
+        // kill 待ちが一切現れない -- `stop_all` はこの kill の完了を待たずに
+        // 戻ってしまう窓があった。
+        //
+        // `groups` ロックを `pending_detached` への push まで持ち越すことで、
+        // 「`take_for_stop` で `terminating` を立てる」→「バックグラウンド
+        // スレッドを立てる」→「`pending_detached` に登録する」を 1 つの
+        // 臨界区間にする。`stop_all` は `groups` ロックを取ってから
+        // (`take_for_stop` を試み、この呼び出しが `terminating` を立てた
+        // 後にしか `stop_all` の `take_for_stop` は走れない)`pending_detached`
+        // を見に行くので、`stop_all` が「`take_for_stop` にも
+        // `pending_detached` にも見えない」中間状態を観測することはもう
+        // ない: この呼び出しが先に完了していれば `pending_detached` に
+        // 載っており、まだなら `stop_all` 自身の `groups` ロック取得が
+        // ここでブロックされ、この呼び出しの完了後まで進めない。
+        //
+        // ロック順序は常に `groups` → `pending_detached` の一方向のみ
+        // (`stop_all` も同じ順序で取る。同時に両方を保持するのはこの関数と
+        // `stop_all` だけで、しかも同じ順序なので AB-BA デッドロックは
+        // 起こらない)。
+        let mut groups = self.lock();
+        let taken = match groups.get_mut(key) {
+            Some(group) => take_for_stop(group),
+            None => Vec::new(),
         };
         if taken.is_empty() {
             return;
