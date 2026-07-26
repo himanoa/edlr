@@ -8,12 +8,14 @@ use std::sync::{Arc, Mutex};
 
 use edlr_driver_process::{InstanceStatus, ProcessDriver, ProcessSpec};
 
+use crate::plugin::filesystem::{FilesystemConfig, FilesystemConfigError, FilesystemConfigStore};
+use crate::plugin::fs_runtime::{filesystem_json_string, FsRuntimeEntry};
 use crate::plugin::grants::{GrantState, GrantsError, GrantsStore};
 use crate::plugin::host::{capabilities_json_string, parse_capability_hosts, PluginHost};
 use crate::plugin::settings::SettingsStore;
 use crate::plugin::sidecar::{assign_ports, SidecarConfig, SidecarConfigError, SidecarConfigStore};
 use crate::plugin::sidecar_runtime::{implicit_http_hosts, sidecars_json_string, SidecarRuntimeEntry};
-use crate::plugin::{CapabilityRequest, Manifest, SettingsError, SidecarRequest};
+use crate::plugin::{CapabilityRequest, FilesystemRequest, Manifest, SettingsError, SidecarRequest};
 
 /// プラグイン 1 件の現在の駆動状態。
 #[derive(Debug, Clone, PartialEq)]
@@ -39,6 +41,12 @@ pub struct PluginEntry {
     /// `Registry::refresh_sidecar_runtime` がここを更新すると、次回以降の
     /// `driver-process.ensure-started` 呼び出しに再起動不要で反映される。
     pub sidecars_json: Arc<Mutex<String>>,
+    /// `HostCtx` と共有されるファイルアクセス承認状態・実パス JSON。形は
+    /// `fs_runtime::filesystem_json_string` を参照。
+    /// `Registry::refresh_filesystem_runtime` がここを更新すると、次回以降の
+    /// `driver-fs.*` 呼び出しに再起動不要で反映される。未承認のルートは
+    /// `path` を持たない(`fs_runtime` のドキュメント参照)。
+    pub filesystem_json: Arc<Mutex<String>>,
 }
 
 /// サイドカー 1 件分の現在状態(`Registry::sidecars` / `PluginInfo::sidecars` 用)。
@@ -49,6 +57,15 @@ pub struct SidecarInfo {
     pub instances: Vec<InstanceStatus>,
 }
 
+/// ファイルアクセスのルート 1 件分の現在状態
+/// (`Registry::filesystem` / `PluginInfo::filesystem` 用)。
+#[derive(Debug)]
+pub struct FilesystemInfo {
+    pub request: FilesystemRequest,
+    pub config: FilesystemConfig,
+    pub grant: GrantState,
+}
+
 /// RPC 応答用のプラグイン情報スナップショット。
 pub struct PluginInfo {
     pub manifest: Manifest,
@@ -57,6 +74,7 @@ pub struct PluginInfo {
     pub capability_requests: Vec<CapabilityRequest>,
     pub grant_state: GrantState,
     pub sidecars: Vec<SidecarInfo>,
+    pub filesystem: Vec<FilesystemInfo>,
 }
 
 /// `control_sidecar` が指定できる操作。
@@ -82,6 +100,12 @@ pub enum RegistryError {
     UnknownSidecar(String),
     /// サイドカー操作自体に関するエラー(未承認・未設定での `Start`/`Restart` など)。
     Sidecar(String),
+    /// `FilesystemConfigStore::update_and_effective` による検証・永続化エラー。
+    FilesystemConfig(FilesystemConfigError),
+    /// 指定された `name` のファイルアクセスルートが manifest に無い。
+    UnknownFilesystem(String),
+    /// ファイルアクセス承認自体に関するエラー(未設定ディレクトリでの承認など)。
+    Filesystem(String),
 }
 
 impl fmt::Display for RegistryError {
@@ -93,6 +117,9 @@ impl fmt::Display for RegistryError {
             RegistryError::SidecarConfig(e) => write!(f, "{e}"),
             RegistryError::UnknownSidecar(name) => write!(f, "unknown sidecar: {name}"),
             RegistryError::Sidecar(msg) => write!(f, "{msg}"),
+            RegistryError::FilesystemConfig(e) => write!(f, "{e}"),
+            RegistryError::UnknownFilesystem(name) => write!(f, "unknown filesystem root: {name}"),
+            RegistryError::Filesystem(msg) => write!(f, "{msg}"),
         }
     }
 }
@@ -113,6 +140,7 @@ pub struct Registry {
     settings_store: Arc<SettingsStore>,
     grants_store: Arc<GrantsStore>,
     sidecar_config_store: Arc<SidecarConfigStore>,
+    filesystem_config_store: Arc<FilesystemConfigStore>,
     /// サイドカープロセスを実際に所有するドライバ。`PluginHost` が全プラグ
     /// インで共有している 1 インスタンスをそのまま指す(`HostCtx` に配線
     /// されているものと同じ `Arc`)。`Registry` はここに直接
@@ -128,8 +156,8 @@ pub struct Registry {
     /// same plugin's capability at once).
     capabilities_lock: Arc<Mutex<()>>,
     /// `set_sidecar_config` / `set_sidecar_grant` が呼ぶ
-    /// `refresh_sidecar_runtime` の臨界区間(停止 → `sidecars_json` の作り
-    /// 直し → `capabilities_json` の作り直し)を **プラグイン ID ごとに**
+    /// `refresh_sidecar_runtime`(停止 → `sidecars_json` の作り直し →
+    /// `capabilities_json` の作り直し)の臨界区間を **プラグイン ID ごとに**
     /// 直列化するロックのマップ。id → 専用 `Arc<Mutex<()>>` を引く。
     ///
     /// なぜプラグイン単位にしたか: `refresh_sidecar_runtime` は同期版
@@ -148,22 +176,40 @@ pub struct Registry {
     /// 間は保持しない。したがってマップの Mutex 自体がボトルネックになる
     /// ことはない(id ごとの `Arc<Mutex<()>>` を作る/引くだけの一瞬)。
     ///
-    /// ロック取得順序は変更前と同じ一方向を保っている: `entries` は
-    /// 「manifest と共有ハンドルのクローンを取る」瞬間だけ握ってすぐ手放し
-    /// (この時点でマップの Mutex も id 別ロックもまだ取っていない)、その後
+    /// ロック取得順序は一方向を保っている: `entries` は「manifest と共有
+    /// ハンドルのクローンを取る」瞬間だけ握ってすぐ手放し(この時点でマップの
+    /// Mutex も id 別ロックもまだ取っていない)、その後
     /// `sidecar_runtime_lock_for(id)` でマップから id 別ロックを引いて
     /// (マップの Mutex は取得直後に手放す)、最後にその id 別ロックを取る。
-    /// id 別ロックの臨界区間の中で `capabilities_lock` を(id をまたいで
-    /// 共有される `capabilities_json` バッファのため)追加で取ることがある
+    /// id 別ロックの臨界区間の中で `capabilities_lock` を(id をまたいで共有
+    /// される `capabilities_json` バッファのため)追加で取ることがある
     /// (`refresh_sidecar_runtime` を参照)が、逆方向(`capabilities_lock` を
     /// 保持したまま id 別ロックやマップの Mutex を取る)は無い。
     /// `set_capabilities` は `capabilities_lock` だけを取り、id 別ロックにも
-    /// マップの Mutex にも触れない。したがって
-    /// 「entries → マップの Mutex → id 別ロック → capabilities_lock」の
-    /// 一方向のみが成立し、循環しないのでデッドロックしない(別プラグイン
-    /// 同士の `refresh_sidecar_runtime` が異なる id 別ロックを取り合っても、
-    /// 互いに待ち合う関係にはならない)。
+    /// マップの Mutex にも触れない。したがって「entries → マップの Mutex →
+    /// id 別ロック → capabilities_lock」の一方向のみが成立し、循環しないので
+    /// デッドロックしない。
     sidecar_runtime_locks: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
+    /// `set_filesystem_config` / `set_filesystem_grant` が呼ぶ
+    /// `refresh_filesystem_runtime`(`filesystem_json` の作り直し)の臨界
+    /// 区間を **プラグイン ID ごとに** 直列化するロックのマップ。
+    ///
+    /// **サイドカーとは別のマップにしてある。** かつては
+    /// `sidecar_runtime_locks` に相乗りしており、その根拠は「ファイルアクセス
+    /// 側の臨界区間はディスク読み書きだけで短いから相乗りしてよい」だったが、
+    /// 問題は逆向きだった: 長いのは**サイドカー側**で、`ProcessDriver::stop`
+    /// が SIGTERM を無視するサイドカー × インスタンス数だけブロックする間、
+    /// 同じプラグインのファイルアクセス承認取消がロック待ちで足止めされる。
+    /// その間 `filesystem_json` は古い `granted:true` と path を保持したまま
+    /// なので、ディスク上は取り消された承認でプラグインが読み書きを続けられて
+    /// しまう(fail-open。設計書の「承認・取消は即座に反映される」に反する)。
+    ///
+    /// 両者が扱う資源は独立している(プロセス起動 vs. ディレクトリアクセス)
+    /// ので、分けてもロック順序の一方向性は壊れない: どちらの臨界区間からも
+    /// もう一方のマップ・id 別ロックを取ることは無く、
+    /// `refresh_filesystem_runtime` は `capabilities_json` に触れないため
+    /// `capabilities_lock` も取らない。
+    filesystem_runtime_locks: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
     plugins_dir: PathBuf,
 }
 
@@ -174,6 +220,7 @@ impl Registry {
         settings_store: Arc<SettingsStore>,
         grants_store: Arc<GrantsStore>,
         sidecar_config_store: Arc<SidecarConfigStore>,
+        filesystem_config_store: Arc<FilesystemConfigStore>,
         process_driver: Arc<ProcessDriver>,
         plugins_dir: PathBuf,
     ) -> Self {
@@ -183,9 +230,11 @@ impl Registry {
             settings_store,
             grants_store,
             sidecar_config_store,
+            filesystem_config_store,
             process_driver,
             capabilities_lock: Arc::new(Mutex::new(())),
             sidecar_runtime_locks: Arc::new(Mutex::new(HashMap::new())),
+            filesystem_runtime_locks: Arc::new(Mutex::new(HashMap::new())),
             plugins_dir,
         }
     }
@@ -236,6 +285,7 @@ impl Registry {
                 let grant_state = self.grants_store.state(&manifest);
                 let capability_requests = manifest.capabilities.clone();
                 let sidecars = self.build_sidecar_infos(&manifest);
+                let filesystem = self.build_filesystem_infos(&manifest);
                 PluginInfo {
                     manifest,
                     state,
@@ -243,6 +293,7 @@ impl Registry {
                     capability_requests,
                     grant_state,
                     sidecars,
+                    filesystem,
                 }
             })
             .collect()
@@ -311,15 +362,49 @@ impl Registry {
         (info, runtime_entry)
     }
 
+    /// `manifest.filesystem` の宣言順に `FilesystemInfo` を組み立てる。
+    /// 設定(`FilesystemConfigStore`)・承認(`GrantsStore`)はディスクを読む
+    /// (`build_sidecar_infos` と同じ流儀。こちらはプロセス状態が無いので
+    /// `ProcessDriver::status` に相当する読み取りは無い)。
+    fn build_filesystem_infos(&self, manifest: &Manifest) -> Vec<FilesystemInfo> {
+        let configs = self.filesystem_config_store.effective(manifest);
+        manifest
+            .filesystem
+            .iter()
+            .map(|request| {
+                let config = configs
+                    .get(&request.name)
+                    .cloned()
+                    .unwrap_or_else(|| FilesystemConfig {
+                        path: String::new(),
+                    });
+                let grant = self.grants_store.filesystem_state(manifest, &request.name);
+                FilesystemInfo {
+                    request: request.clone(),
+                    config,
+                    grant,
+                }
+            })
+            .collect()
+    }
+
     /// `id` 用のサイドカー実行時ロック(`sidecar_runtime_locks`)を引く。
-    /// 無ければ作る。マップ自体を保護する `Mutex` は、id からロックの
-    /// `Arc` を引く/挿入する間だけ保持し、返した `Arc<Mutex<()>>` の
-    /// 実際の臨界区間(呼び出し側が別途 `.lock()` する)の間は保持しない。
+    /// 無ければ作る。マップ自体を保護する `Mutex` は、id からロックの `Arc`
+    /// を引く/挿入する間だけ保持し、返した `Arc<Mutex<()>>` の実際の臨界
+    /// 区間(呼び出し側が別途 `.lock()` する)の間は保持しない。
     fn sidecar_runtime_lock_for(&self, id: &str) -> Arc<Mutex<()>> {
-        let mut locks = self
-            .sidecar_runtime_locks
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        Self::lock_for(&self.sidecar_runtime_locks, id)
+    }
+
+    /// `id` 用のファイルアクセス実行時ロック(`filesystem_runtime_locks`)を
+    /// 引く。サイドカー側とは**別のマップ**であることが要点
+    /// (`filesystem_runtime_locks` のドキュメント参照)。
+    fn filesystem_runtime_lock_for(&self, id: &str) -> Arc<Mutex<()>> {
+        Self::lock_for(&self.filesystem_runtime_locks, id)
+    }
+
+    fn lock_for(map: &Mutex<HashMap<String, Arc<Mutex<()>>>>, id: &str) -> Arc<Mutex<()>> {
+        let mut locks = map.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         locks
             .entry(id.to_string())
             .or_insert_with(|| Arc::new(Mutex::new(())))
@@ -544,6 +629,161 @@ impl Registry {
     pub fn sidecars(&self, id: &str) -> Result<Vec<SidecarInfo>, RegistryError> {
         let manifest = self.find_manifest(id)?;
         Ok(self.build_sidecar_infos(&manifest))
+    }
+
+    /// `id` のプラグインの現在のファイルアクセス状態一覧(manifest の
+    /// `[[filesystem]]` 宣言順)を返す。
+    pub fn filesystem(&self, id: &str) -> Result<Vec<FilesystemInfo>, RegistryError> {
+        let manifest = self.find_manifest(id)?;
+        Ok(self.build_filesystem_infos(&manifest))
+    }
+
+    /// `id` のプラグインの `filesystem_json` 共有バッファの中身をそのまま
+    /// 返す(テスト用アクセサ)。`driver-fs.*` が実際に参照するのと同じ
+    /// 文字列(`fs_runtime::filesystem_json_string` の出力そのもの)。
+    pub fn filesystem_buffer(&self, id: &str) -> Result<String, RegistryError> {
+        let filesystem_json = {
+            let guard = self
+                .entries
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            guard
+                .iter()
+                .find(|entry| entry.manifest.id == id)
+                .map(|entry| entry.filesystem_json.clone())
+                .ok_or_else(|| RegistryError::UnknownPlugin(id.to_string()))?
+        };
+        let buffer = filesystem_json
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        Ok(buffer)
+    }
+
+    /// ファイルアクセスの設定変更・承認変更のあとに必ず呼ぶ内部ヘルパー。
+    ///
+    /// サイドカーと違い、ファイルアクセスには「止めるべきプロセス」が無い
+    /// ので、`refresh_sidecar_runtime` の手順 1(`ProcessDriver::stop`)に
+    /// 相当する処理は無い。`FilesystemConfigStore::effective` /
+    /// `GrantsStore::filesystem_state` の現在値から `filesystem_json` を
+    /// 作り直すだけ(未承認のルートは `path` を持たない -- `fs_runtime` の
+    /// ドキュメント参照)。それでも「永続化(呼び出し元で完了済み)」と
+    /// 「バッファへの反映」を同じ id 別ロックの臨界区間に収めるのは
+    /// `refresh_sidecar_runtime` と同じ理由: 2 つの同時呼び出し(例えば
+    /// 同じルートの設定変更と承認取消を 2 つの RPC クライアントがほぼ同時に
+    /// 行う)がディスクと共有バッファを食い違わせないようにするため。
+    ///
+    /// ロックは `filesystem_runtime_lock_for(id)` -- **サイドカーとは別の
+    /// マップ** から引く(`filesystem_runtime_locks` のドキュメント参照)。
+    /// 共有していた頃は、同じプラグインのサイドカー停止
+    /// (`ProcessDriver::stop`)が終わるまで承認取消がロック待ちになり、その
+    /// 間 `filesystem_json` が古い `granted:true` と path を持ち続けていた
+    /// (最大で `shutdown_grace` × インスタンス数の fail-open)。
+    /// 取得順序は既存の一方向(`entries` → マップの Mutex → id 別ロック)の
+    /// ままで、この関数は `capabilities_lock` を取らない(ファイルアクセスの
+    /// 承認は `capabilities_json` に影響しない)ため、`set_capabilities`/
+    /// `refresh_sidecar_runtime` との間に新たな循環は生じない。
+    fn refresh_filesystem_runtime(&self, id: &str) -> Result<Vec<FilesystemInfo>, RegistryError> {
+        let (manifest, filesystem_json) = {
+            let guard = self
+                .entries
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let entry = guard
+                .iter()
+                .find(|entry| entry.manifest.id == id)
+                .ok_or_else(|| RegistryError::UnknownPlugin(id.to_string()))?;
+            (entry.manifest.clone(), entry.filesystem_json.clone())
+        };
+
+        let runtime_lock = self.filesystem_runtime_lock_for(id);
+        let _runtime_guard = runtime_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let infos = self.build_filesystem_infos(&manifest);
+        let runtime_entries: Vec<FsRuntimeEntry> = infos
+            .iter()
+            .map(|info| FsRuntimeEntry {
+                name: info.request.name.clone(),
+                granted: info.grant.granted,
+                mode: info.request.mode.as_str().to_string(),
+                path: info.config.path.clone(),
+            })
+            .collect();
+        *filesystem_json
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+            filesystem_json_string(&runtime_entries);
+
+        Ok(infos)
+    }
+
+    /// `id` のプラグインの `name` ファイルアクセスルートの設定を検証・永続化
+    /// し(`FilesystemConfigStore::update_and_effective`)、稼働中プラグイン
+    /// が参照する `filesystem_json` を作り直してから最新の `FilesystemInfo`
+    /// 一覧を返す。検証に失敗した場合は何も変更されない。
+    ///
+    /// **承認は維持する**: パス自体は `Manifest::filesystem_fingerprint` に
+    /// 含まれない(fingerprint が変わるのは `name`/`reason`/`mode` のみ)ので、
+    /// ディレクトリを変更しても `GrantsStore` 上の承認は stale にならず、
+    /// 生きたまま新しいパスに追従する(ブリーフの
+    /// `changing_the_directory_takes_effect_without_reapproval` が検証する
+    /// 挙動)。
+    pub fn set_filesystem_config(
+        &self,
+        id: &str,
+        name: &str,
+        config: &FilesystemConfig,
+    ) -> Result<Vec<FilesystemInfo>, RegistryError> {
+        let manifest = self.find_manifest(id)?;
+        self.filesystem_config_store
+            .update_and_effective(&manifest, name, config)
+            .map_err(RegistryError::FilesystemConfig)?;
+        self.refresh_filesystem_runtime(id)
+    }
+
+    /// `id` のプラグインの `name` ファイルアクセスルートの承認/取消を
+    /// `GrantsStore` に永続化する。
+    ///
+    /// `granted == true` のとき、ディレクトリが未設定(空文字)のルートは
+    /// 拒否する(`RegistryError::Filesystem`)。UI 側は未設定の間チェック
+    /// ボックスを `disabled` にしているはずだが、それは UI 上の防御に過ぎ
+    /// ない -- RPC を直接叩けばこの検証を経由せずに「ユーザーがどこへの
+    /// アクセスかを一度も選んでいない」状態のルートを承認できてしまう。
+    /// `set_sidecar_grant` の `command` 未設定チェックと同じ理由・同じ
+    /// 場所(ストア/`Registry` 側)で強制し、UI・RPC 層では二重実装しない。
+    /// 取消は逆に常に許す -- ディレクトリを消した状態でも稼働中の承認を
+    /// 取り消せなければ fail-open になってしまうため。
+    pub fn set_filesystem_grant(
+        &self,
+        id: &str,
+        name: &str,
+        granted: bool,
+    ) -> Result<Vec<FilesystemInfo>, RegistryError> {
+        let manifest = self.find_manifest(id)?;
+        if manifest.filesystem_root(name).is_none() {
+            return Err(RegistryError::UnknownFilesystem(name.to_string()));
+        }
+
+        if granted {
+            let configs = self.filesystem_config_store.effective(&manifest);
+            let path_configured = configs
+                .get(name)
+                .map(|config| !config.path.is_empty())
+                .unwrap_or(false);
+            if !path_configured {
+                return Err(RegistryError::Filesystem(format!(
+                    "filesystem root {name} has no directory configured; cannot grant"
+                )));
+            }
+        }
+
+        self.grants_store
+            .set_filesystem(&manifest, name, granted)
+            .map_err(RegistryError::Grants)?;
+
+        self.refresh_filesystem_runtime(id)
     }
 
     /// サイドカーの設定変更・承認変更のあとに必ず呼ぶ内部ヘルパー。
@@ -951,6 +1191,8 @@ mod tests {
         let settings_store = Arc::new(SettingsStore::new(tmp.path().join("settings")));
         let grants_store = Arc::new(GrantsStore::new(tmp.path().join("grants")));
         let sidecar_config_store = Arc::new(SidecarConfigStore::new(tmp.path().join("settings")));
+        let filesystem_config_store =
+            Arc::new(FilesystemConfigStore::new(tmp.path().join("settings"), Vec::new()));
         let process_driver = Arc::new(ProcessDriver::new(
             Duration::from_millis(200),
             Duration::from_millis(0),
@@ -960,6 +1202,7 @@ mod tests {
             settings_store,
             grants_store,
             sidecar_config_store,
+            filesystem_config_store,
             process_driver,
             tmp.path().join("plugins"),
         )
@@ -1000,6 +1243,125 @@ mod tests {
         assert!(matches!(err, RegistryError::UnknownPlugin(id) if id == "does-not-exist"));
     }
 
+    fn manifest_with_filesystem(id: &str) -> Manifest {
+        Manifest {
+            id: id.to_string(),
+            name: id.to_string(),
+            version: "0.1.0".into(),
+            description: String::new(),
+            entry: "plugin.wasm".into(),
+            events: vec![],
+            settings: vec![],
+            capabilities: vec![],
+            sidecars: vec![],
+            filesystem: vec![crate::plugin::manifest::FilesystemRequest {
+                name: "exports".into(),
+                reason: "reason".into(),
+                mode: crate::plugin::manifest::FilesystemMode::ReadWrite,
+            }],
+        }
+    }
+
+    /// 承認取消は、同じプラグインのサイドカー停止の裏で待たされてはならない。
+    ///
+    /// `refresh_sidecar_runtime` は同期 `ProcessDriver::stop` を臨界区間に
+    /// 含み、SIGTERM を無視するサイドカー × インスタンス数だけブロックしうる。
+    /// ファイルアクセスがその id 別ロックを共有していると、その間
+    /// `filesystem_json` は古い `granted:true` と path を保持したままになり、
+    /// ディスク上は取り消された承認で読み書きが続く(fail-open)。
+    /// ここではサイドカー側の臨界区間をロックを掴んだまま模し、その間でも
+    /// ファイルアクセスの取消が共有バッファへ速やかに反映されることを見る。
+    #[test]
+    fn revoking_filesystem_access_is_not_blocked_by_a_sidecar_stop_in_progress() {
+        let host = Arc::new(PluginHost::new().expect("host should start"));
+        let tmp = tempfile::tempdir().unwrap();
+        let settings_store = Arc::new(SettingsStore::new(tmp.path().join("settings")));
+        let grants_store = Arc::new(GrantsStore::new(tmp.path().join("grants")));
+        let sidecar_config_store = Arc::new(SidecarConfigStore::new(tmp.path().join("settings")));
+        let filesystem_config_store = Arc::new(FilesystemConfigStore::new(
+            tmp.path().join("settings"),
+            Vec::new(),
+        ));
+        let process_driver = Arc::new(ProcessDriver::new(
+            Duration::from_millis(200),
+            Duration::from_millis(0),
+        ));
+        let registry = Registry::new(
+            host,
+            settings_store,
+            grants_store,
+            sidecar_config_store,
+            filesystem_config_store,
+            process_driver,
+            tmp.path().join("plugins"),
+        );
+
+        let manifest = manifest_with_filesystem("fs-plugin");
+        let filesystem_json = Arc::new(Mutex::new("[]".to_string()));
+        registry.push(PluginEntry {
+            manifest,
+            state: PluginState::Running,
+            settings_json: Arc::new(Mutex::new("{}".to_string())),
+            capabilities_json: Arc::new(Mutex::new(
+                crate::plugin::host::capabilities_json_string(&[]),
+            )),
+            sidecars_json: Arc::new(Mutex::new("[]".to_string())),
+            filesystem_json: filesystem_json.clone(),
+        });
+
+        let root = tmp.path().join("exports");
+        std::fs::create_dir(&root).unwrap();
+        registry
+            .set_filesystem_config(
+                "fs-plugin",
+                "exports",
+                &FilesystemConfig {
+                    path: root.to_string_lossy().to_string(),
+                },
+            )
+            .expect("configuring the directory should succeed");
+        registry
+            .set_filesystem_grant("fs-plugin", "exports", true)
+            .expect("granting should succeed");
+        let granted = crate::plugin::fs_runtime::parse_filesystem(
+            &filesystem_json.lock().unwrap().clone(),
+        );
+        assert!(granted["exports"].granted);
+        assert!(!granted["exports"].path.is_empty());
+
+        // サイドカー停止(`ProcessDriver::stop`)がまだ終わっていない状態を、
+        // その臨界区間で使われる id 別ロックを掴んだまま模す。
+        let sidecar_lock = registry.sidecar_runtime_lock_for("fs-plugin");
+        let sidecar_guard = sidecar_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let revoker = {
+            let registry = registry.clone();
+            thread::spawn(move || {
+                let _ = tx.send(registry.set_filesystem_grant("fs-plugin", "exports", false));
+            })
+        };
+
+        let result = rx
+            .recv_timeout(Duration::from_secs(3))
+            .expect("revoking filesystem access must not wait for the sidecar critical section");
+        result.expect("revoking should succeed");
+        revoker.join().expect("revoker thread should not panic");
+
+        let revoked = crate::plugin::fs_runtime::parse_filesystem(
+            &filesystem_json.lock().unwrap().clone(),
+        );
+        assert!(!revoked["exports"].granted);
+        assert_eq!(
+            revoked["exports"].path, "",
+            "a revoked root must not keep its path in the shared buffer"
+        );
+
+        drop(sidecar_guard);
+    }
+
     fn manifest_with_sidecar(id: &str, port: u16) -> Manifest {
         Manifest {
             id: id.to_string(),
@@ -1017,6 +1379,7 @@ mod tests {
                 port,
                 scalable: false,
             }],
+            filesystem: vec![],
         }
     }
 
@@ -1038,6 +1401,7 @@ mod tests {
                 crate::plugin::host::capabilities_json_string(&[]),
             )),
             sidecars_json: Arc::new(Mutex::new("[]".to_string())),
+            filesystem_json: Arc::new(Mutex::new("[]".to_string())),
         });
 
         let key = Registry::sidecar_key("sc-plugin", "tts");
@@ -1092,6 +1456,7 @@ mod tests {
                 crate::plugin::host::capabilities_json_string(&[]),
             )),
             sidecars_json: Arc::new(Mutex::new("[]".to_string())),
+            filesystem_json: Arc::new(Mutex::new("[]".to_string())),
         });
         registry
             .grants_store
@@ -1172,6 +1537,7 @@ mod tests {
                 crate::plugin::host::capabilities_json_string(&[]),
             )),
             sidecars_json: Arc::new(Mutex::new("[]".to_string())),
+            filesystem_json: Arc::new(Mutex::new("[]".to_string())),
         });
 
         registry
@@ -1271,6 +1637,7 @@ mod tests {
                 crate::plugin::host::capabilities_json_string(&[]),
             )),
             sidecars_json: Arc::new(Mutex::new("[]".to_string())),
+            filesystem_json: Arc::new(Mutex::new("[]".to_string())),
         });
 
         let result = registry.set_sidecar_grant("sc-plugin", "tts", true);
@@ -1324,6 +1691,7 @@ mod tests {
                 reason: "test".into(),
             }],
             sidecars: vec![],
+            filesystem: vec![],
         }
     }
 
@@ -1340,6 +1708,7 @@ mod tests {
             settings_json: Arc::new(Mutex::new("{}".to_string())),
             capabilities_json: capabilities_json.clone(),
             sidecars_json: Arc::new(Mutex::new("[]".to_string())),
+            filesystem_json: Arc::new(Mutex::new("[]".to_string())),
         });
 
         let state = registry
@@ -1393,6 +1762,8 @@ mod tests {
         let settings_store = Arc::new(SettingsStore::new(tmp.path().join("settings")));
         let grants_store = Arc::new(GrantsStore::new(tmp.path().join("grants")));
         let sidecar_config_store = Arc::new(SidecarConfigStore::new(tmp.path().join("settings")));
+        let filesystem_config_store =
+            Arc::new(FilesystemConfigStore::new(tmp.path().join("settings"), Vec::new()));
         let process_driver = Arc::new(ProcessDriver::new(
             Duration::from_millis(200),
             Duration::from_millis(0),
@@ -1402,6 +1773,7 @@ mod tests {
             settings_store,
             grants_store.clone(),
             sidecar_config_store,
+            filesystem_config_store,
             process_driver,
             tmp.path().join("plugins"),
         );
@@ -1416,6 +1788,7 @@ mod tests {
             settings_json: Arc::new(Mutex::new("{}".to_string())),
             capabilities_json: capabilities_json.clone(),
             sidecars_json: Arc::new(Mutex::new("[]".to_string())),
+            filesystem_json: Arc::new(Mutex::new("[]".to_string())),
         });
 
         const THREADS: usize = 16;

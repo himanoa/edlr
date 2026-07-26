@@ -1,4 +1,5 @@
 use clap::Parser;
+use edlr_core::plugin::filesystem::FilesystemConfigStore;
 use edlr_core::plugin::host::PluginHost;
 use edlr_core::plugin::sidecar::SidecarConfigStore;
 use edlr_core::plugin::{start_plugins, GrantsStore, SettingsStore};
@@ -111,14 +112,23 @@ async fn main() {
         Ok(host) => {
             tracing::info!(plugins_dir = %plugins_dir.display(), "starting plugins");
             let settings_store = SettingsStore::new(settings_dir.clone());
-            let grants_store = GrantsStore::new(grants_dir);
-            let sidecar_config_store = SidecarConfigStore::new(settings_dir);
+            let grants_store = GrantsStore::new(grants_dir.clone());
+            let sidecar_config_store = SidecarConfigStore::new(settings_dir.clone());
+            // edlr 自身の状態ディレクトリを承認先に選ばせない。ここでは
+            // 既定値ではなく、CLI(`--settings-dir` など)で上書きされた
+            // 実際のパスを渡す — そうしないと、既定と違う場所を使っている
+            // デーモンでその実際の場所が無防備になる。
+            let filesystem_config_store = FilesystemConfigStore::new(
+                settings_dir,
+                vec![grants_dir, plugins_dir.clone()],
+            );
             let plugins_dir_for_blocking = plugins_dir.clone();
             match tokio::task::spawn_blocking(move || {
                 start_plugins(
                     &plugins_dir_for_blocking,
                     settings_store,
                     sidecar_config_store,
+                    filesystem_config_store,
                     grants_store,
                     &router_for_plugins,
                     host,

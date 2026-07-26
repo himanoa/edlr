@@ -1,4 +1,6 @@
-use edlr_core::plugin::host::{HostCtx, PluginHost, PluginInstance, HTTP_MAX_BODY, HTTP_TIMEOUT};
+use edlr_core::plugin::host::{
+    HostCtx, PluginHost, PluginInstance, FS_LIST_LIMIT, FS_READ_LIMIT, HTTP_MAX_BODY, HTTP_TIMEOUT,
+};
 use edlr_driver_http::HttpDriver;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -69,11 +71,13 @@ fn ctx_with_capabilities(
             settings.clone(),
             capabilities.clone(),
             Arc::new(Mutex::new("[]".to_string())),
+            Arc::new(Mutex::new("[]".to_string())),
             test_http_driver(),
             Arc::new(edlr_driver_process::ProcessDriver::new(
                 std::time::Duration::from_secs(3),
                 std::time::Duration::from_secs(1),
             )),
+            Arc::new(edlr_driver_fs::FsDriver::new(FS_READ_LIMIT, FS_LIST_LIMIT)),
         ),
         settings,
         capabilities,

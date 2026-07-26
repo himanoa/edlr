@@ -13,6 +13,8 @@ let setCapabilitiesImpl: (params: unknown) => Promise<PluginInfo["capabilities"]
   Promise.resolve({ requests: [], granted: false, staleGrant: false });
 let setSidecarGrantImpl: (params: unknown) => Promise<{ sidecars: PluginInfo["sidecars"] }> = () =>
   Promise.resolve({ sidecars: [] });
+let setFilesystemGrantImpl: (params: unknown) => Promise<{ roots: PluginInfo["filesystem"] }> = () =>
+  Promise.resolve({ roots: [] });
 let instances: Array<{ close: ReturnType<typeof vi.fn> }> = [];
 
 vi.mock("../rpc", () => {
@@ -28,6 +30,7 @@ vi.mock("../rpc", () => {
         if (method === "plugins/set-settings") return setSettingsImpl(params);
         if (method === "plugins/set-capabilities") return setCapabilitiesImpl(params);
         if (method === "plugins/set-sidecar-grant") return setSidecarGrantImpl(params);
+        if (method === "plugins/set-filesystem-grant") return setFilesystemGrantImpl(params);
         return Promise.reject(new Error(`unexpected method: ${method}`));
       }
     },
@@ -49,6 +52,7 @@ function makePlugin(overrides: Partial<PluginInfo> = {}): PluginInfo {
     values: { enabled: true },
     capabilities: { requests: [], granted: false, staleGrant: false },
     sidecars: [],
+    filesystem: [],
     ...overrides,
   };
 }
@@ -68,6 +72,20 @@ function makeSidecar(overrides: Partial<PluginInfo["sidecars"][number]> = {}): P
   };
 }
 
+function makeFilesystemRoot(
+  overrides: Partial<PluginInfo["filesystem"][number]> = {},
+): PluginInfo["filesystem"][number] {
+  return {
+    name: "exports",
+    reason: "巡回した星系の一覧を CSV で書き出すため",
+    mode: "read-write",
+    granted: false,
+    staleGrant: false,
+    config: { path: "/home/u/exports" },
+    ...overrides,
+  };
+}
+
 beforeEach(() => {
   calls.length = 0;
   instances = [];
@@ -75,6 +93,7 @@ beforeEach(() => {
   setSettingsImpl = () => Promise.resolve({});
   setCapabilitiesImpl = () => Promise.resolve({ requests: [], granted: false, staleGrant: false });
   setSidecarGrantImpl = () => Promise.resolve({ sidecars: [] });
+  setFilesystemGrantImpl = () => Promise.resolve({ roots: [] });
 });
 
 afterEach(() => {
@@ -216,6 +235,35 @@ test("toggling sidecar approval calls plugins/set-sidecar-grant with the right p
   await waitFor(() => {
     const call = calls.find((c) => c.method === "plugins/set-sidecar-grant");
     expect(call?.params).toEqual({ plugin: "voice-notify", name: "tts", granted: true });
+  });
+
+  await waitFor(() => expect(toggle.checked).toBe(true));
+});
+
+test("shows the filesystem section for a plugin that declares filesystem roots", async () => {
+  const plugin = makePlugin({ filesystem: [makeFilesystemRoot()] });
+  listImpl = () => Promise.resolve({ pluginsDir: "/plugins", plugins: [plugin] });
+
+  render(<Plugins />);
+
+  expect(await screen.findByText(/CSV で書き出すため/)).toBeInTheDocument();
+});
+
+test("toggling filesystem approval calls plugins/set-filesystem-grant with the right params", async () => {
+  const plugin = makePlugin({ filesystem: [makeFilesystemRoot()] });
+  listImpl = () => Promise.resolve({ pluginsDir: "/plugins", plugins: [plugin] });
+  setFilesystemGrantImpl = () =>
+    Promise.resolve({ roots: [makeFilesystemRoot({ granted: true })] });
+
+  render(<Plugins />);
+  const toggle = (await screen.findByRole("checkbox", {
+    name: /このフォルダへのアクセスを承認する/,
+  })) as HTMLInputElement;
+  await userEvent.click(toggle);
+
+  await waitFor(() => {
+    const call = calls.find((c) => c.method === "plugins/set-filesystem-grant");
+    expect(call?.params).toEqual({ plugin: "voice-notify", name: "exports", granted: true });
   });
 
   await waitFor(() => expect(toggle.checked).toBe(true));

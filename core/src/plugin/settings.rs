@@ -245,6 +245,7 @@ mod tests {
             ],
             capabilities: vec![],
             sidecars: vec![],
+            filesystem: vec![],
         }
     }
 
@@ -492,6 +493,7 @@ mod tests {
                 .collect(),
             capabilities: vec![],
             sidecars: vec![],
+            filesystem: vec![],
         }
     }
 

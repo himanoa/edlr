@@ -47,6 +47,23 @@ export interface Sidecars {
   sidecars: Sidecar[];
 }
 
+export interface FilesystemConfig {
+  path: string;
+}
+
+export interface FilesystemRoot {
+  name: string;
+  reason: string;
+  mode: "read" | "read-write";
+  granted: boolean;
+  staleGrant: boolean;
+  config: FilesystemConfig;
+}
+
+export interface FilesystemRoots {
+  roots: FilesystemRoot[];
+}
+
 export interface PluginInfo {
   id: string;
   name: string;
@@ -58,6 +75,7 @@ export interface PluginInfo {
   values: Record<string, unknown>;
   capabilities: Capabilities;
   sidecars: Sidecar[];
+  filesystem: FilesystemRoot[];
 }
 
 export interface PluginsList {

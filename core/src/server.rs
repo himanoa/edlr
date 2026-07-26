@@ -122,6 +122,8 @@ pub fn handle_rpc(
                         ),
                     });
                     value["sidecars"] = sidecars_result_json(&info.sidecars)["sidecars"].clone();
+                    value["filesystem"] =
+                        filesystem_result_json(&info.filesystem)["roots"].clone();
                     match info.state {
                         crate::plugin::PluginState::Running => {
                             value["state"] = serde_json::json!("running");
@@ -231,6 +233,38 @@ pub fn handle_rpc(
                 .map_err(|e| e.to_string())?;
             Ok(sidecars_result_json(&sidecars))
         }
+        "plugins/get-filesystem" => {
+            let plugin = param_str(params, "plugin")?;
+            let roots = registry.filesystem(plugin).map_err(|e| e.to_string())?;
+            Ok(filesystem_result_json(&roots))
+        }
+        "plugins/set-filesystem-config" => {
+            let plugin = param_str(params, "plugin")?;
+            let name = param_str(params, "name")?;
+            let config: crate::plugin::FilesystemConfig = serde_json::from_value(
+                params
+                    .get("config")
+                    .cloned()
+                    .ok_or_else(|| "params.config must be an object".to_string())?,
+            )
+            .map_err(|e| format!("params.config is invalid: {e}"))?;
+            let roots = registry
+                .set_filesystem_config(plugin, name, &config)
+                .map_err(|e| e.to_string())?;
+            Ok(filesystem_result_json(&roots))
+        }
+        "plugins/set-filesystem-grant" => {
+            let plugin = param_str(params, "plugin")?;
+            let name = param_str(params, "name")?;
+            let granted = params
+                .get("granted")
+                .and_then(|v| v.as_bool())
+                .ok_or_else(|| "params.granted must be a bool".to_string())?;
+            let roots = registry
+                .set_filesystem_grant(plugin, name, granted)
+                .map_err(|e| e.to_string())?;
+            Ok(filesystem_result_json(&roots))
+        }
         other => Err(format!("unknown method: {other}")),
     }
 }
@@ -282,6 +316,25 @@ fn sidecars_result_json(sidecars: &[crate::plugin::SidecarInfo]) -> serde_json::
         })
         .collect();
     serde_json::json!({ "sidecars": items })
+}
+
+/// `get-filesystem` / `set-filesystem-*` の共通 result 形と、`plugins/list`
+/// の各要素の `filesystem` フィールドに使う JSON: `{ "roots": [...] }`。
+fn filesystem_result_json(roots: &[crate::plugin::FilesystemInfo]) -> serde_json::Value {
+    let items: Vec<serde_json::Value> = roots
+        .iter()
+        .map(|info| {
+            serde_json::json!({
+                "name": info.request.name,
+                "reason": info.request.reason,
+                "mode": info.request.mode.as_str(),
+                "granted": info.grant.granted,
+                "staleGrant": info.grant.stale,
+                "config": info.config,
+            })
+        })
+        .collect();
+    serde_json::json!({ "roots": items })
 }
 
 pub fn app(state: ServerState, ui_dir: Option<PathBuf>) -> axum::Router {

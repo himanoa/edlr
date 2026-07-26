@@ -19,6 +19,9 @@ mod bindings {
     });
 }
 
+use bindings::edlr::plugin::driver_fs::{
+    DriverError as WitFsError, Entry as WitFsEntry, Host as DriverFsHost,
+};
 use bindings::edlr::plugin::driver_http::{
     DriverError as WitDriverError, Host as DriverHttpHost, Request as WitRequest,
     Response as WitResponse,
@@ -55,6 +58,15 @@ pub use bindings::edlr::plugin::driver_http::{
     Response as WitHttpResponse,
 };
 
+/// Public re-exports of the generated `driver-fs` WIT types, for the same
+/// reason `driver-process`'s equivalents are re-exported above: in-tree
+/// consumers (this module's own unit tests) call
+/// `HostCtx::read`/`read_range`/`stat`/`list`/`write`/`append`/`delete`
+/// directly rather than through a full wasm round-trip.
+pub use bindings::edlr::plugin::driver_fs::{
+    DriverError as WitDriverFsError, Entry as WitFsDriverEntry, Host as WitDriverFsHost,
+};
+
 /// Interval between epoch ticks driven by the background ticker thread.
 const EPOCH_TICK_INTERVAL: Duration = Duration::from_millis(100);
 
@@ -87,6 +99,15 @@ const _: () = assert!(
 /// streaming read capped at this limit, not a trusted `Content-Length`
 /// header).
 pub const HTTP_MAX_BODY: usize = 8 * 1024 * 1024;
+
+/// `driver-fs` の 1 回の読み取り上限。`HTTP_MAX_BODY` と同値。ホスト側の
+/// バッファを無制限にしないためのもので、扱えるファイルサイズの上限では
+/// ない(超えるものは `stat` + `read-range` で分割して読む)。
+pub const FS_READ_LIMIT: usize = HTTP_MAX_BODY;
+
+/// `list` が返すエントリ数の上限。呼び出し期限(`CALL_DEADLINE`)を
+/// 食い潰さないための保護。
+pub const FS_LIST_LIMIT: usize = 10_000;
 
 /// サイドカー停止時、SIGTERM から SIGKILL へ昇格するまでの猶予。
 ///
@@ -152,6 +173,10 @@ pub struct HostCtx {
     /// `sidecar_runtime::sidecars_json_string` を参照。`capabilities_json`
     /// と同じく `Registry` が承認・設定変更のたびに上書きする。
     pub sidecars_json: Arc<Mutex<String>>,
+    /// ファイルシステムルートの承認状態と実パスの共有バッファ。形は
+    /// `fs_runtime::filesystem_json_string` を参照。`sidecars_json` と同じく
+    /// `Registry` が承認・設定変更のたびに上書きする。
+    pub filesystem_json: Arc<Mutex<String>>,
     /// The HTTP client used by `driver-http.send` once a call has passed
     /// the permission check above. Shared (via `Arc`) across every plugin
     /// instance the owning `PluginHost` loads -- see `PluginHost::new`,
@@ -164,6 +189,12 @@ pub struct HostCtx {
     /// プロセスは `<plugin-id>/<sidecar-name>` をキーに分離されるため、
     /// 共有していても他プラグインのプロセスには触れられない。
     process_driver: Arc<edlr_driver_process::ProcessDriver>,
+    /// 承認済みルート配下でのファイル操作を実際に行うドライバ。
+    /// `http_driver` / `process_driver` と同様、`PluginHost` が 1 つだけ
+    /// 持ち、全プラグインインスタンスで共有する。ルートの実パスは
+    /// `filesystem_json` から呼び出しごとに解決されるため、共有していても
+    /// 他プラグインのルートには触れられない。
+    fs_driver: Arc<edlr_driver_fs::FsDriver>,
     /// WASI state. The `plugin` world itself does not import WASI, but
     /// components built for the `wasm32-wasip2` target still import a
     /// baseline set of WASI interfaces (io, random, clocks, ...) from the
@@ -176,21 +207,26 @@ pub struct HostCtx {
 }
 
 impl HostCtx {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         plugin_id: String,
         settings_json: Arc<Mutex<String>>,
         capabilities_json: Arc<Mutex<String>>,
         sidecars_json: Arc<Mutex<String>>,
+        filesystem_json: Arc<Mutex<String>>,
         http_driver: Arc<edlr_driver_http::HttpDriver>,
         process_driver: Arc<edlr_driver_process::ProcessDriver>,
+        fs_driver: Arc<edlr_driver_fs::FsDriver>,
     ) -> HostCtx {
         HostCtx {
             plugin_id,
             settings_json,
             capabilities_json,
             sidecars_json,
+            filesystem_json,
             http_driver,
             process_driver,
+            fs_driver,
             // Deliberately empty sandbox default: no preopened directories,
             // no stdio, no network access, so a plugin can only interact
             // with the host through the `plugin` world's explicit imports.
@@ -462,6 +498,123 @@ impl DriverProcessHost for HostCtx {
     }
 }
 
+impl HostCtx {
+    /// `filesystem_json` から当該ルートの実パスと mode を解決する。
+    ///
+    /// `driver-http` / `driver-process` と同じく、判定材料は全て `HostCtx`
+    /// 側にあり、ゲストが渡すのはルート名と相対パスだけ。判定順は
+    /// `resolve_sidecar` と揃える:「存在するか」→「承認済みか」→
+    /// 「設定済みか」→(書き込み系なら)「mode が read-write か」。
+    fn resolve_root(&self, root: &str, need_write: bool) -> Result<std::path::PathBuf, WitFsError> {
+        let raw = self
+            .filesystem_json
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        let entries = crate::plugin::fs_runtime::parse_filesystem(&raw);
+
+        let Some(entry) = entries.get(root) else {
+            return Err(WitFsError::UnknownRoot(format!("no such root: {root}")));
+        };
+        if !entry.granted {
+            return Err(WitFsError::PermissionDenied(format!(
+                "filesystem root not granted: {root}"
+            )));
+        }
+        if entry.path.is_empty() {
+            return Err(WitFsError::NotConfigured(format!(
+                "root {root} has no directory configured"
+            )));
+        }
+        if need_write && entry.mode != "read-write" {
+            return Err(WitFsError::PermissionDenied(format!(
+                "root {root} is read-only"
+            )));
+        }
+        Ok(std::path::PathBuf::from(&entry.path))
+    }
+}
+
+/// `edlr_driver_fs::FsError` を WIT の `driver-fs.driver-error` variant へ写像する。
+fn to_wit_fs_error(e: edlr_driver_fs::FsError) -> WitFsError {
+    match e {
+        edlr_driver_fs::FsError::InvalidPath(m) => WitFsError::InvalidPath(m),
+        edlr_driver_fs::FsError::NotFound(m) => WitFsError::NotFound(m),
+        edlr_driver_fs::FsError::TooLarge(m) => WitFsError::TooLarge(m),
+        edlr_driver_fs::FsError::Io(m) => WitFsError::Io(m),
+    }
+}
+
+fn to_wit_fs_entry(entry: edlr_driver_fs::Entry) -> WitFsEntry {
+    WitFsEntry {
+        path: entry.path,
+        size: entry.size,
+        modified: entry.modified,
+    }
+}
+
+impl DriverFsHost for HostCtx {
+    /// `resolve_root` → `fs_driver` の対応メソッド呼び出し → `FsError` を
+    /// WIT の variant へ写像するだけ。パス検証・原子的書き込み・サイズ上限
+    /// はすべて `edlr_driver_fs::FsDriver` の責務で、ここでは持たない。
+    fn read(&mut self, root: String, path: String) -> Result<Vec<u8>, WitFsError> {
+        let root_path = self.resolve_root(&root, false)?;
+        self.fs_driver
+            .read(&root_path, &path)
+            .map_err(to_wit_fs_error)
+    }
+
+    fn read_range(
+        &mut self,
+        root: String,
+        path: String,
+        offset: u64,
+        len: u32,
+    ) -> Result<Vec<u8>, WitFsError> {
+        let root_path = self.resolve_root(&root, false)?;
+        self.fs_driver
+            .read_range(&root_path, &path, offset, len)
+            .map_err(to_wit_fs_error)
+    }
+
+    fn stat(&mut self, root: String, path: String) -> Result<WitFsEntry, WitFsError> {
+        let root_path = self.resolve_root(&root, false)?;
+        self.fs_driver
+            .stat(&root_path, &path)
+            .map(to_wit_fs_entry)
+            .map_err(to_wit_fs_error)
+    }
+
+    fn list(&mut self, root: String, prefix: String) -> Result<Vec<WitFsEntry>, WitFsError> {
+        let root_path = self.resolve_root(&root, false)?;
+        self.fs_driver
+            .list(&root_path, &prefix)
+            .map(|entries| entries.into_iter().map(to_wit_fs_entry).collect())
+            .map_err(to_wit_fs_error)
+    }
+
+    fn write(&mut self, root: String, path: String, bytes: Vec<u8>) -> Result<(), WitFsError> {
+        let root_path = self.resolve_root(&root, true)?;
+        self.fs_driver
+            .write(&root_path, &path, &bytes)
+            .map_err(to_wit_fs_error)
+    }
+
+    fn append(&mut self, root: String, path: String, bytes: Vec<u8>) -> Result<(), WitFsError> {
+        let root_path = self.resolve_root(&root, true)?;
+        self.fs_driver
+            .append(&root_path, &path, &bytes)
+            .map_err(to_wit_fs_error)
+    }
+
+    fn delete(&mut self, root: String, path: String) -> Result<(), WitFsError> {
+        let root_path = self.resolve_root(&root, true)?;
+        self.fs_driver
+            .delete(&root_path, &path)
+            .map_err(to_wit_fs_error)
+    }
+}
+
 /// Owns the wasmtime `Engine` and a background thread that periodically
 /// increments the engine's epoch counter, driving epoch-interruption-based
 /// call deadlines for every plugin instance loaded from this host.
@@ -479,6 +632,12 @@ pub struct PluginHost {
     /// this one driver across all plugins does not let one plugin observe or
     /// touch another's sidecars.
     process_driver: Arc<edlr_driver_process::ProcessDriver>,
+    /// The single `FsDriver` shared by every plugin instance this host
+    /// loads, mirroring `http_driver`/`process_driver` above. Root paths
+    /// are resolved per call from each plugin's own `filesystem_json`, so
+    /// sharing this one driver across all plugins does not let one plugin
+    /// reach another's roots.
+    fs_driver: Arc<edlr_driver_fs::FsDriver>,
 }
 
 impl PluginHost {
@@ -507,12 +666,14 @@ impl PluginHost {
             SIDECAR_SHUTDOWN_GRACE,
             SIDECAR_SPAWN_MIN_INTERVAL,
         ));
+        let fs_driver = Arc::new(edlr_driver_fs::FsDriver::new(FS_READ_LIMIT, FS_LIST_LIMIT));
 
         Ok(PluginHost {
             engine,
             ticker_stop,
             http_driver,
             process_driver,
+            fs_driver,
         })
     }
 
@@ -528,6 +689,13 @@ impl PluginHost {
     /// or otherwise touch any sidecar process.
     pub fn process_driver(&self) -> Arc<edlr_driver_process::ProcessDriver> {
         self.process_driver.clone()
+    }
+
+    /// Returns a clone of the shared `FsDriver` `Arc` for wiring into a new
+    /// plugin's `HostCtx`. Cloning an `Arc` is cheap; this does not touch
+    /// any file.
+    pub fn fs_driver(&self) -> Arc<edlr_driver_fs::FsDriver> {
+        self.fs_driver.clone()
     }
 
     pub fn load(&self, wasm_path: &Path, ctx: HostCtx) -> anyhow::Result<PluginInstance> {
@@ -633,17 +801,23 @@ mod tests {
         )
     }
 
+    fn test_fs_driver() -> Arc<edlr_driver_fs::FsDriver> {
+        Arc::new(edlr_driver_fs::FsDriver::new(FS_READ_LIMIT, FS_LIST_LIMIT))
+    }
+
     fn ctx(capabilities_json: &str) -> HostCtx {
         HostCtx::new(
             "test-plugin".to_string(),
             Arc::new(Mutex::new("{}".to_string())),
             Arc::new(Mutex::new(capabilities_json.to_string())),
             Arc::new(Mutex::new("[]".to_string())),
+            Arc::new(Mutex::new("[]".to_string())),
             test_http_driver(),
             Arc::new(edlr_driver_process::ProcessDriver::new(
                 SIDECAR_SHUTDOWN_GRACE,
                 SIDECAR_SPAWN_MIN_INTERVAL,
             )),
+            test_fs_driver(),
         )
     }
 
@@ -716,12 +890,134 @@ mod tests {
             Arc::new(Mutex::new("{}".to_string())),
             Arc::new(Mutex::new(capabilities_json_string(&[]))),
             Arc::new(Mutex::new(sidecars_json.to_string())),
+            Arc::new(Mutex::new("[]".to_string())),
             test_http_driver(),
             Arc::new(edlr_driver_process::ProcessDriver::new(
                 Duration::from_millis(200),
                 Duration::from_secs(1),
             )),
+            test_fs_driver(),
         )
+    }
+
+    fn fs_ctx(filesystem_json: &str) -> HostCtx {
+        HostCtx::new(
+            "test-plugin".to_string(),
+            Arc::new(Mutex::new("{}".to_string())),
+            Arc::new(Mutex::new(capabilities_json_string(&[]))),
+            Arc::new(Mutex::new("[]".to_string())),
+            Arc::new(Mutex::new(filesystem_json.to_string())),
+            test_http_driver(),
+            Arc::new(edlr_driver_process::ProcessDriver::new(
+                Duration::from_millis(200),
+                Duration::from_secs(1),
+            )),
+            test_fs_driver(),
+        )
+    }
+
+    fn fs_entry(granted: bool, mode: &str, path: &str) -> crate::plugin::fs_runtime::FsRuntimeEntry {
+        crate::plugin::fs_runtime::FsRuntimeEntry {
+            name: "exports".to_string(),
+            granted,
+            mode: mode.to_string(),
+            path: path.to_string(),
+        }
+    }
+
+    #[test]
+    fn fs_calls_without_grant_are_permission_denied() {
+        use crate::plugin::fs_runtime::filesystem_json_string;
+        let dir = tempfile::tempdir().unwrap();
+        let mut ctx = fs_ctx(&filesystem_json_string(&[fs_entry(
+            false,
+            "read-write",
+            &dir.path().to_string_lossy(),
+        )]));
+
+        let err = ctx
+            .read("exports".to_string(), "a.txt".to_string())
+            .expect_err("ungranted root must be denied");
+        assert!(matches!(err, WitFsError::PermissionDenied(_)));
+    }
+
+    #[test]
+    fn unknown_root_is_reported_as_such() {
+        use crate::plugin::fs_runtime::filesystem_json_string;
+        let dir = tempfile::tempdir().unwrap();
+        let mut ctx = fs_ctx(&filesystem_json_string(&[fs_entry(
+            true,
+            "read-write",
+            &dir.path().to_string_lossy(),
+        )]));
+
+        let err = ctx
+            .read("nope".to_string(), "a.txt".to_string())
+            .expect_err("unknown root");
+        assert!(matches!(err, WitFsError::UnknownRoot(_)));
+    }
+
+    #[test]
+    fn granted_but_unconfigured_root_is_not_configured() {
+        use crate::plugin::fs_runtime::filesystem_json_string;
+        let mut ctx = fs_ctx(&filesystem_json_string(&[fs_entry(true, "read-write", "")]));
+
+        let err = ctx
+            .read("exports".to_string(), "a.txt".to_string())
+            .expect_err("no directory configured");
+        assert!(matches!(err, WitFsError::NotConfigured(_)));
+    }
+
+    #[test]
+    fn read_mode_rejects_every_mutating_call() {
+        use crate::plugin::fs_runtime::filesystem_json_string;
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), b"x").unwrap();
+        let mut ctx = fs_ctx(&filesystem_json_string(&[fs_entry(
+            true,
+            "read",
+            &dir.path().to_string_lossy(),
+        )]));
+
+        assert!(ctx.read("exports".to_string(), "a.txt".to_string()).is_ok());
+        assert!(matches!(
+            ctx.write("exports".to_string(), "a.txt".to_string(), vec![1])
+                .expect_err("write under read mode"),
+            WitFsError::PermissionDenied(_)
+        ));
+        assert!(matches!(
+            ctx.append("exports".to_string(), "a.txt".to_string(), vec![1])
+                .expect_err("append under read mode"),
+            WitFsError::PermissionDenied(_)
+        ));
+        assert!(matches!(
+            ctx.delete("exports".to_string(), "a.txt".to_string())
+                .expect_err("delete under read mode"),
+            WitFsError::PermissionDenied(_)
+        ));
+    }
+
+    #[test]
+    fn granted_read_write_root_round_trips_and_still_refuses_escapes() {
+        use crate::plugin::fs_runtime::filesystem_json_string;
+        let dir = tempfile::tempdir().unwrap();
+        let mut ctx = fs_ctx(&filesystem_json_string(&[fs_entry(
+            true,
+            "read-write",
+            &dir.path().to_string_lossy(),
+        )]));
+
+        ctx.write("exports".to_string(), "a.txt".to_string(), b"hi".to_vec())
+            .expect("write");
+        assert_eq!(
+            ctx.read("exports".to_string(), "a.txt".to_string()).unwrap(),
+            b"hi".to_vec()
+        );
+        assert!(matches!(
+            ctx.read("exports".to_string(), "../secret".to_string())
+                .expect_err("escape attempt"),
+            WitFsError::InvalidPath(_)
+        ));
     }
 
     fn runtime_entry(granted: bool, command: &str) -> crate::plugin::sidecar_runtime::SidecarRuntimeEntry {
@@ -808,6 +1104,7 @@ mod tests {
             Arc::new(Mutex::new("{}".to_string())),
             Arc::new(Mutex::new(capabilities_json_string(&[]))),
             Arc::new(Mutex::new(sidecars_json)),
+            Arc::new(Mutex::new("[]".to_string())),
             test_http_driver(),
             // A grace period long enough that waiting it out synchronously
             // would trivially blow past both the assertion below and
@@ -816,6 +1113,7 @@ mod tests {
                 Duration::from_secs(2),
                 Duration::from_secs(1),
             )),
+            test_fs_driver(),
         );
 
         ctx.ensure_started("tts".to_string()).expect("start");

@@ -1211,6 +1211,7 @@ dependencies = [
  "axum",
  "clap",
  "edlr-config",
+ "edlr-driver-fs",
  "edlr-driver-http",
  "edlr-driver-process",
  "futures-util",
@@ -1234,6 +1235,14 @@ dependencies = [
 [[package]]
 name = "edlr-driver-channel"
 version = "0.1.0"
+
+[[package]]
+name = "edlr-driver-fs"
+version = "0.1.0"
+dependencies = [
+ "rustix",
+ "tempfile",
+]
 
 [[package]]
 name = "edlr-driver-http"

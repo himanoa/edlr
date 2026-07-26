@@ -1,4 +1,6 @@
 pub mod allowlist;
+pub mod filesystem;
+pub mod fs_runtime;
 pub mod grants;
 pub mod host;
 pub mod manifest;
@@ -8,14 +10,17 @@ pub mod settings;
 pub mod sidecar;
 pub mod sidecar_runtime;
 
+pub use filesystem::{FilesystemConfig, FilesystemConfigError, FilesystemConfigStore};
+pub use fs_runtime::{filesystem_json_string, parse_filesystem, FsRuntimeEntry};
 pub use grants::{GrantState, GrantsError, GrantsStore};
 pub use host::PluginHost;
 pub use manifest::{
-    load_manifest, matches_event, CapabilityRequest, Manifest, ManifestError, SettingField,
-    SidecarRequest,
+    load_manifest, matches_event, CapabilityRequest, FilesystemMode, FilesystemRequest, Manifest,
+    ManifestError, SettingField, SidecarRequest,
 };
 pub use registry::{
-    PluginEntry, PluginInfo, PluginState, Registry, RegistryError, SidecarAction, SidecarInfo,
+    FilesystemInfo, PluginEntry, PluginInfo, PluginState, Registry, RegistryError, SidecarAction,
+    SidecarInfo,
 };
 pub use runner::start_plugins;
 pub use settings::{SettingsError, SettingsStore};

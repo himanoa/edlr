@@ -52,11 +52,38 @@ interface driver-process {
   status: func(name: string) -> result<list<instance>, driver-error>;
 }
 
+interface driver-fs {
+  record entry {
+    path: string,            // ルートからの相対パス
+    size: u64,
+    modified: option<u64>,   // Unix epoch 秒。取得できなければ none
+  }
+
+  variant driver-error {
+    permission-denied(string),  // 未承認 / mode 違反
+    not-configured(string),     // ディレクトリ未設定
+    unknown-root(string),       // manifest にない root 名
+    invalid-path(string),       // 脱出を含む不正なパス
+    not-found(string),
+    too-large(string),
+    io(string),
+  }
+
+  read:       func(root: string, path: string) -> result<list<u8>, driver-error>;
+  read-range: func(root: string, path: string, offset: u64, len: u32) -> result<list<u8>, driver-error>;
+  stat:       func(root: string, path: string) -> result<entry, driver-error>;
+  %list:      func(root: string, prefix: string) -> result<list<entry>, driver-error>;
+  write:      func(root: string, path: string, bytes: list<u8>) -> result<_, driver-error>;
+  append:     func(root: string, path: string, bytes: list<u8>) -> result<_, driver-error>;
+  delete:     func(root: string, path: string) -> result<_, driver-error>;
+}
+
 world plugin {
   import host-log;
   import host-settings;
   import driver-http;
   import driver-process;
+  import driver-fs;
 
   record event {
     kind: string,               // "journal" | "status"

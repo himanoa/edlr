@@ -19,13 +19,18 @@ use std::process::Command;
 #[allow(unused_imports)]
 use std::sync::Arc;
 
+use edlr_core::plugin::filesystem::FilesystemConfigStore;
 use edlr_core::plugin::{GrantsStore, PluginHost, Registry, SettingsStore, SidecarConfigStore};
 use edlr_core::router::Router;
 
 pub struct Env {
     #[allow(dead_code)]
     pub registry: Registry,
-    _tmp: tempfile::TempDir,
+    /// テストが `env.tmp.path()` で参照する、`Registry` の各ストアが指す
+    /// tempdir。フィールドを保持しているだけで drop すると保存先ごと消える
+    /// (このフィールド自体は直接読まれなくても生存させる必要がある)。
+    #[allow(dead_code)]
+    pub tmp: tempfile::TempDir,
 }
 
 /// `examples/plugins/hello-logger` を `wasm32-wasip2` 向けにビルドし、
@@ -70,12 +75,13 @@ pub fn sidecar_env(name: &str, port: u16, scalable: bool) -> Env {
         &plugins_dir,
         SettingsStore::new(tmp.path().join("settings")),
         SidecarConfigStore::new(tmp.path().join("settings")),
+        FilesystemConfigStore::new(tmp.path().join("settings"), Vec::new()),
         GrantsStore::new(tmp.path().join("grants")),
         &router,
         PluginHost::new().expect("plugin host"),
     );
 
-    Env { registry, _tmp: tmp }
+    Env { registry, tmp }
 }
 
 /// 当該プラグインの `capabilities_json` が現在載せている実効許可ホスト。
@@ -106,12 +112,13 @@ pub fn two_plugin_sidecar_env(sidecar_name: &str, port_a: u16, port_b: u16) -> E
         &plugins_dir,
         SettingsStore::new(tmp.path().join("settings")),
         SidecarConfigStore::new(tmp.path().join("settings")),
+        FilesystemConfigStore::new(tmp.path().join("settings"), Vec::new()),
         GrantsStore::new(tmp.path().join("grants")),
         &router,
         PluginHost::new().expect("plugin host"),
     );
 
-    Env { registry, _tmp: tmp }
+    Env { registry, tmp }
 }
 
 #[allow(dead_code)]
@@ -128,4 +135,44 @@ fn write_sidecar_plugin(plugins_dir: &Path, plugin_id: &str, sidecar_name: &str,
         ),
     )
     .unwrap();
+}
+
+/// `[[filesystem]]`(`name = name`, `mode = mode`)を 1 件持つ `fs-plugin` の
+/// manifest を置いた plugins-dir でサーバを起動し、`Registry` を返す
+/// (`sidecar_env` と同じ流儀)。
+#[allow(dead_code)]
+pub fn filesystem_env(name: &str, mode: &str) -> Env {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let plugins_dir = tmp.path().join("plugins");
+    let plugin_dir = plugins_dir.join("fs-plugin");
+    std::fs::create_dir_all(&plugin_dir).unwrap();
+    std::fs::copy(valid_plugin_wasm(), plugin_dir.join("plugin.wasm")).unwrap();
+    std::fs::write(
+        plugin_dir.join("manifest.toml"),
+        format!(
+            "id = \"fs-plugin\"\nname = \"FS\"\nversion = \"0.1.0\"\nentry = \"plugin.wasm\"\n\n\
+             [[filesystem]]\nname = \"{name}\"\nreason = \"test filesystem\"\nmode = \"{mode}\"\n"
+        ),
+    )
+    .unwrap();
+
+    let router = Router::new(16);
+    let registry = edlr_core::plugin::start_plugins(
+        &plugins_dir,
+        SettingsStore::new(tmp.path().join("settings")),
+        SidecarConfigStore::new(tmp.path().join("settings")),
+        FilesystemConfigStore::new(tmp.path().join("settings"), Vec::new()),
+        GrantsStore::new(tmp.path().join("grants")),
+        &router,
+        PluginHost::new().expect("plugin host"),
+    );
+
+    Env { registry, tmp }
+}
+
+/// 当該プラグインの `filesystem_json` が現在載せている生の JSON 文字列
+/// (テスト用アクセサ。`Registry::filesystem_buffer` をそのまま呼ぶ)。
+#[allow(dead_code)]
+pub fn filesystem_buffer(registry: &Registry, id: &str) -> String {
+    registry.filesystem_buffer(id).unwrap_or_default()
 }
