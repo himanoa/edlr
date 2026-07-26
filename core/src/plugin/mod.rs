@@ -9,6 +9,7 @@ pub mod settings;
 pub use grants::{GrantState, GrantsError, GrantsStore};
 pub use manifest::{
     load_manifest, matches_event, CapabilityRequest, Manifest, ManifestError, SettingField,
+    SidecarRequest,
 };
 pub use registry::{PluginEntry, PluginInfo, PluginState, Registry, RegistryError};
 pub use runner::start_plugins;

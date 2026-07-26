@@ -322,6 +322,7 @@ mod tests {
             events: vec!["*".to_string()],
             settings: vec![],
             capabilities: vec![],
+            sidecars: vec![],
         }
     }
 

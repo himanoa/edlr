@@ -396,6 +396,7 @@ mod tests {
                 hosts: vec!["https://api.example.com".to_string()],
                 reason: "test".into(),
             }],
+            sidecars: vec![],
         }
     }
 

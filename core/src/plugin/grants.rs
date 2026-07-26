@@ -165,6 +165,7 @@ mod tests {
                 hosts: hosts.into_iter().map(String::from).collect(),
                 reason: "fetch data".into(),
             }],
+            sidecars: vec![],
         }
     }
 
@@ -178,6 +179,7 @@ mod tests {
             events: vec![],
             settings: vec![],
             capabilities: vec![],
+            sidecars: vec![],
         }
     }
 
