@@ -89,7 +89,14 @@ const _: () = assert!(
 pub const HTTP_MAX_BODY: usize = 8 * 1024 * 1024;
 
 /// サイドカー停止時、SIGTERM から SIGKILL へ昇格するまでの猶予。
-pub const SIDECAR_SHUTDOWN_GRACE: Duration = Duration::from_secs(3);
+///
+/// 値は `edlr_config::SIDECAR_SHUTDOWN_GRACE_SECS` から取る(ハードコードしない)。
+/// `ui/src-tauri` の `daemon::STOP_GRACE` はこの値(× 想定インスタンス数上限)を
+/// 超えることをコンパイル時アサーションで固定しているため、ここを直接
+/// `Duration::from_secs(3)` のように書き直すと、その関係が経由する共有定数の
+/// 意味が壊れる(2 つの crate の猶予が独立に変更されうる状態に戻ってしまう)。
+pub const SIDECAR_SHUTDOWN_GRACE: Duration =
+    Duration::from_secs(edlr_config::SIDECAR_SHUTDOWN_GRACE_SECS);
 
 /// 同一サイドカーの spawn 試行の最短間隔。プラグインがループで
 /// `ensure-started` を呼んでも spawn 嵐にならないための下限。

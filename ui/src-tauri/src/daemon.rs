@@ -7,11 +7,38 @@ use std::time::{Duration, Instant};
 pub const DAEMON_ADDR: &str = "127.0.0.1:8137";
 
 /// SIGTERM を送ってから SIGKILL へフォールバックするまでの既定の猶予。
-/// `core::plugin::host::SIDECAR_SHUTDOWN_GRACE` と同じ 3 秒に揃えてある
-/// (サイドカー自身の猶予とデーモンの猶予がずれると、デーモンより先に
-/// サイドカーだけが SIGKILL される/その逆、といった直感に反する挙動になる
-/// ため)。
-pub const STOP_GRACE: Duration = Duration::from_secs(3);
+///
+/// **`core::plugin::host::SIDECAR_SHUTDOWN_GRACE`(= サイドカー 1 インスタンス
+/// あたりの猶予)と同じ値にしてはいけない**。デーモンの `stop_all` は
+/// SIGTERM 無視の子がいる場合、インスタンスごとに逐次
+/// `SIDECAR_SHUTDOWN_GRACE_SECS` 秒ブロックしうる(`drivers/process` の
+/// `finish_stop` が `taken` を順に処理するため)ので、デーモン全体の後始末に
+/// かかる最悪時間は「1 インスタンス分の猶予」よりずっと長くなりうる。
+/// 以前はここが `SIDECAR_SHUTDOWN_GRACE` と同じ 3 秒になっていた
+/// (最終レビューで見つかった Critical な取りこぼし: SIGTERM を無視する
+/// サイドカーが 1 つあるだけで、Tauri がデーモンを SIGKILL するタイミングと
+/// デーモンがそのサイドカーへ `killpg(SIGKILL)` するタイミングがちょうど
+/// 競合し、インスタンスが 2 つ以上あれば確実に Tauri 側が先に負けて
+/// デーモンを道連れに殺してしまい、サイドカーが孤児として残っていた)。
+///
+/// `STOP_GRACE` はデーモン側の最悪ケース(`SIDECAR_SHUTDOWN_GRACE_SECS` ×
+/// `SIDECAR_SHUTDOWN_WORST_CASE_INSTANCES`、両方 `edlr_config` の共有定数)を
+/// **厳密に超える**必要がある。この関係は下のコンパイル時アサーションで
+/// 固定してある: どちらかの定数だけが将来変更されても、この関係が崩れれば
+/// ビルドが失敗する。デーモンが早く終了した場合、`stop_child_gracefully` は
+/// `try_wait` のポーリングで即座に戻る(この猶予いっぱい待つのは、デーモンが
+/// 本当にハングしている最悪ケースのみ)。
+pub const STOP_GRACE: Duration = Duration::from_secs(65);
+
+const _: () = assert!(
+    STOP_GRACE.as_secs()
+        > edlr_config::SIDECAR_SHUTDOWN_GRACE_SECS
+            * edlr_config::SIDECAR_SHUTDOWN_WORST_CASE_INSTANCES,
+    "STOP_GRACE must strictly exceed the daemon's worst-case sequential sidecar \
+     shutdown time (SIDECAR_SHUTDOWN_GRACE_SECS * SIDECAR_SHUTDOWN_WORST_CASE_INSTANCES, \
+     both in edlr_config) -- see STOP_GRACE's doc comment. If this fails after changing \
+     either constant, raise STOP_GRACE's literal value to restore the margin."
+);
 
 /// 子プロセスを SIGTERM で止め、`grace` 待って死ななければ SIGKILL に
 /// フォールバックする。`Child::kill()`(= SIGKILL)を無条件に呼ぶのは
@@ -101,6 +128,29 @@ mod tests {
     use super::*;
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
+
+    /// Regression test for a Critical finding from the re-review: `STOP_GRACE`
+    /// used to equal `SIDECAR_SHUTDOWN_GRACE` exactly, so a single
+    /// SIGTERM-ignoring sidecar could make Tauri SIGKILL the daemon at the
+    /// exact moment (or just before) the daemon itself escalated to
+    /// `killpg(SIGKILL)` on that sidecar -- with 2+ stubborn instances, Tauri
+    /// was guaranteed to lose the race and orphan them. This mirrors the
+    /// compile-time assertion next to `STOP_GRACE` in a form that shows up in
+    /// the test suite too, and pins the actual numbers rather than just the
+    /// relation, so a change to either shared constant is visible here.
+    #[test]
+    fn stop_grace_exceeds_the_daemons_worst_case_sequential_shutdown_time() {
+        let daemon_worst_case_secs = edlr_config::SIDECAR_SHUTDOWN_GRACE_SECS
+            * edlr_config::SIDECAR_SHUTDOWN_WORST_CASE_INSTANCES;
+        assert!(
+            STOP_GRACE.as_secs() > daemon_worst_case_secs,
+            "STOP_GRACE ({STOP_GRACE:?}) must strictly exceed the daemon's worst-case \
+             sequential sidecar shutdown time ({daemon_worst_case_secs}s = \
+             SIDECAR_SHUTDOWN_GRACE_SECS * SIDECAR_SHUTDOWN_WORST_CASE_INSTANCES); \
+             otherwise Tauri can SIGKILL the daemon before it has finished stopping \
+             every sidecar, orphaning any that ignore SIGTERM"
+        );
+    }
 
     #[test]
     fn daemon_running_detects_listener() {

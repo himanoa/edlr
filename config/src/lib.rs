@@ -6,6 +6,36 @@ use std::path::{Path, PathBuf};
 
 const PROTON_JOURNAL_DIR: &str = ".steam/steam/steamapps/compatdata/359320/pfx/drive_c/users/steamuser/Saved Games/Frontier Developments/Elite Dangerous";
 
+/// SIGTERM 送信から SIGKILL へ昇格するまでの、サイドカー 1 インスタンスあたりの
+/// 猶予(秒)。`edlr-core`(`plugin::host::SIDECAR_SHUTDOWN_GRACE`)と `edlr-ui`
+/// (`daemon::STOP_GRACE` の下限を決める根拠)の両方から参照する共有定数。
+///
+/// この値をここに 1 箇所だけ置くのは、Tauri 側がデーモンを止める猶予
+/// (`STOP_GRACE`)を、デーモン自身がサイドカーの後始末に使う猶予
+/// (`SIDECAR_SHUTDOWN_GRACE`)より確実に長く保つため。2 つの crate で
+/// 別々に定数を持っていると、片方だけ変更されたときに Tauri 側が
+/// デーモンより先にタイムアウトして SIGKILL してしまい、デーモンが
+/// サイドカーを killpg する前に道連れで消えてサイドカーが孤児として
+/// 残る、という Critical な取りこぼしが再発しうる(実際に最終レビューで
+/// 一度指摘された)。
+pub const SIDECAR_SHUTDOWN_GRACE_SECS: u64 = 3;
+
+/// デーモンの `stop_all`(`drivers/process::ProcessDriver::stop_all`)が
+/// 現実的に処理しうる、全プラグイン・全サイドカーの合計インスタンス数の
+/// 上限として運用上想定する値。
+///
+/// `stop_all` は SIGTERM 無視の子がいる場合、インスタンスごとに逐次
+/// `SIDECAR_SHUTDOWN_GRACE_SECS` 秒ブロックしうる(`finish_stop` が
+/// `taken` を順に処理するため)。したがってデーモン全体の後始末の最悪時間は
+/// おおよそ `SIDECAR_SHUTDOWN_GRACE_SECS * SIDECAR_SHUTDOWN_WORST_CASE_INSTANCES`
+/// に収まる、という前提を置く。実際の合計インスタンス数はユーザー設定
+/// (`replicas` の合計)次第で理論上はこれを超えうるが、edlr は小規模な
+/// ローカルプラグイン向けであり、それを大きく超える構成は非現実的とみなす。
+/// `ui/src-tauri/src/daemon.rs` の `STOP_GRACE` はこの想定を超えて初めて
+/// 「デーモンより先にタイムアウトしない」と言えるため、コンパイル時
+/// アサーションでこの関係を固定してある(`daemon.rs` を参照)。
+pub const SIDECAR_SHUTDOWN_WORST_CASE_INSTANCES: u64 = 20;
+
 /// 既知の Journal ディレクトリを探す。現状は Proton 既定パスのみ。
 pub fn default_journal_dir(home: &Path) -> Option<PathBuf> {
     let candidate = home.join(PROTON_JOURNAL_DIR);

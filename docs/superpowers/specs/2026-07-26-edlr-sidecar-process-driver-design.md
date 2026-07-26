@@ -193,6 +193,19 @@ SIGTERM を送って猶予を与えてから(応答が無ければ)SIGKILL に�
 外部から `SIGKILL` を直接送られた場合など、捕捉不可能な即死経路はこの保証の対象外のまま
 (設計上の既知の限界としてスコープ外に置く)。
 
+**再レビューで見つかった 2 回目の Critical**: 上記の Tauri 側の猶予(`STOP_GRACE`)を、
+デーモン側の 1 インスタンスあたりの猶予(`SIDECAR_SHUTDOWN_GRACE`、3 秒)と**同じ値**にしていた。
+デーモンの `stop_all` はインスタンスごとに逐次停止する(`finish_stop` が `taken` を順に処理する)
+ため、SIGTERM を無視するサイドカーが 1 つあるだけで、Tauri がデーモンを SIGKILL するタイミングと
+デーモンがそのサイドカーへ `killpg(SIGKILL)` するタイミングがちょうど競合し、インスタンスが
+2 つ以上あれば確実に Tauri 側が先に負けてデーモンを道連れに殺してしまい、サイドカーが孤児として
+残っていた。修正: `SIDECAR_SHUTDOWN_GRACE_SECS`(3)と、デーモンが現実的に処理しうる合計
+インスタンス数の上限として運用上想定する `SIDECAR_SHUTDOWN_WORST_CASE_INSTANCES`(20)を
+`edlr-config`(`edlr-core`/`edlr-ui` 両方が依存する共有 crate)の定数として 1 箇所に置き、
+Tauri 側の `STOP_GRACE`(65 秒、`ui/src-tauri/src/daemon.rs`)がその積(60 秒)を厳密に超えることを
+コンパイル時アサーションで固定した。どちらかの定数だけが将来変更されても、この関係が崩れれば
+ビルドが失敗する。
+
 ## RPC 追加
 
 既存の 3 メソッドと同じ `{"type":"rpc", "id":…, "method":…, "params":…}` 形式。

@@ -493,6 +493,18 @@ impl Registry {
         Ok(state)
     }
 
+    /// `id` のプラグインが現在 `Disabled` かどうか。未登録の id は `false`
+    /// (`control_sidecar` はこの手前で既に `find_manifest` を通しているので、
+    /// 未登録を別扱いする必要はない)。
+    fn is_disabled(&self, id: &str) -> bool {
+        self.entries
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .iter()
+            .find(|entry| entry.manifest.id == id)
+            .is_some_and(|entry| matches!(entry.state, PluginState::Disabled { .. }))
+    }
+
     /// `id` のプラグインの manifest クローンを返す(`entries` ロック保持は
     /// このルックアップの間だけ)。
     fn find_manifest(&self, id: &str) -> Result<Manifest, RegistryError> {
@@ -747,33 +759,20 @@ impl Registry {
     /// から `HostCtx::resolve_sidecar` が次に読むまで」の間だけで、次回の
     /// `ensure-started`/`status` 呼び出しでは新しい(取消済みの)状態が
     /// 見え、既に走っているインスタンスは UI から `stop` できる。
-    /// **TOCTOU 対策**: `Start`/`Restart` は `sidecar_runtime_lock_for(id)`
-    /// (`refresh_sidecar_runtime` -- `set_sidecar_config`/`set_sidecar_grant`
-    /// が呼ぶ -- と共有する、プラグイン単位のロック)を、承認・設定を読む
-    /// 前から `ensure_started` を呼び終えるまで保持する。これが無いと、
-    /// 「grant を読む」→「(ここで承認取消が割り込む)」→「その grant を
-    /// 信じて spawn する」という窓ができ、取消の裏で起動してしまう
-    /// (Important: 最終レビューで見つかった取りこぼし)。ロックを取ることで、
-    /// この関数と `refresh_sidecar_runtime` は互いに排他になり、
-    /// 「読んだ承認状態」と「実際に spawn する」の間に他の書き込みが
-    /// 挟まらないことを保証する。ロック取得順序は既存のドキュメント
-    /// (`sidecar_runtime_locks` を参照)のとおり一方向のまま
-    /// (`entries` → マップの Mutex → id 別ロック)であり、この関数は
-    /// `capabilities_lock` にも `sidecar_runtime_locks` のマップ自体にも
-    /// 触れないので新たな循環は生じない。
     ///
-    /// この対策はホスト起点(RPC/UI)の経路のみをカバーする。ゲスト
-    /// (wasm)からの `ensure-started` は `HostCtx::ensure_started`
-    /// (`host.rs`)経由で、こちらとは別に `sidecars_json` 共有バッファを
-    /// 直接読むだけなので同じレースが理論上は残る -- が、それは意図的:
-    /// ゲスト呼び出しにこの id 別ロックを取らせると、`refresh_sidecar_runtime`
-    /// が同じロックを持って `shutdown_grace`(既定 3 秒)まで `stop` を待つ
-    /// 間、`ensure-started` を呼んだプラグインのスレッドがブロックされ、
-    /// `PluginInstance::CALL_DEADLINE`(2 秒)を超えて trap してしまう。
-    /// ゲスト経路のレース窓は「取消が `sidecars_json` バッファに反映されて
-    /// から `HostCtx::resolve_sidecar` が次に読むまで」の間だけで、次回の
-    /// `ensure-started`/`status` 呼び出しでは新しい(取消済みの)状態が
-    /// 見え、既に走っているインスタンスは UI から `stop` できる。
+    /// **無効化されたプラグインは `Start`/`Restart` できない**(再レビューで
+    /// 見つかった Minor な取りこぼし): `set_disabled` はそのプラグインの
+    /// 全サイドカーを停止するが、`control_sidecar` が `PluginState` を見て
+    /// いなかったため、無効化後(あるいは並行中)に `sidecar-control` の
+    /// `start` が来ると、もう生きているプラグインスレッドが無いサイドカーが
+    /// 再び起動してしまっていた。この関数は `sidecar_runtime_lock_for(id)`
+    /// を取った**後**に現在の `PluginState` を読み、`Disabled` なら拒否する
+    /// -- `set_disabled` 自身もサイドカー停止の前に同じ id 別ロックを取る
+    /// ように直したので(`set_disabled` のドキュメント参照)、「状態を
+    /// `Disabled` にする」→「サイドカーを止める」という一連の操作と、この
+    /// 関数の「状態を読む」→「spawn する」は互いに排他になり、無効化の裏で
+    /// 起動してしまう窓は無い。`Stop` はプラグインの状態に関わらず常に許す
+    /// (止める操作を無効化状態で塞いではいけない)。
     pub fn control_sidecar(
         &self,
         id: &str,
@@ -795,6 +794,17 @@ impl Registry {
                 let _runtime_guard = runtime_lock
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+                // ロック保持中に読む: `set_disabled` も同じ id 別ロックを
+                // 取ってからサイドカーを止めるので、ここで見る状態は
+                // 「無効化処理が確定済みならその後の値」であることが保証
+                // される(無効化される前の "running" を信じて spawn する
+                // ことはない)。
+                if self.is_disabled(id) {
+                    return Err(RegistryError::Sidecar(format!(
+                        "plugin {id} is disabled"
+                    )));
+                }
 
                 if action == SidecarAction::Restart {
                     self.process_driver.stop(&key);
@@ -909,6 +919,19 @@ impl Registry {
         let Some(names) = sidecar_names else {
             return;
         };
+
+        // `entries` ロックを既に手放した後で `sidecar_runtime_lock_for(id)`
+        // を取る(ロック取得順序は他の箇所と同じ: `entries` → id 別ロック)。
+        // ここで id 別ロックを取ることで、`control_sidecar` の `Start`/
+        // `Restart`(こちらも同じロックを取ってから `PluginState` を読む)と
+        // 互いに排他になる -- 「状態を `Disabled` にする」→「サイドカーを
+        // 止める」の一連と、「(無効化前の)状態を読む」→「spawn する」が
+        // 交差して、無効化の裏でサイドカーが起動されたまま残ることはない
+        // (`control_sidecar` のドキュメント参照)。
+        let runtime_lock = self.sidecar_runtime_lock_for(id);
+        let _runtime_guard = runtime_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         for name in names {
             let key = Self::sidecar_key(id, &name);
             self.process_driver.stop(&key);
@@ -1046,6 +1069,76 @@ mod tests {
                 .map(|(_, s)| s.clone()),
             Some(PluginState::Disabled { .. })
         ));
+    }
+
+    /// Regression test for a re-review finding: `control_sidecar` used to
+    /// ignore `PluginState` entirely, so a `plugins/sidecar-control` `start`
+    /// arriving after (or racing with) `set_disabled` could bring a disabled
+    /// plugin's sidecar back to life even though nothing running could ever
+    /// stop it again -- the "disabled implies its sidecars stay stopped"
+    /// invariant `set_disabled` establishes didn't persist. `Start`/`Restart`
+    /// must now be rejected once the plugin is `Disabled`, while `Stop` must
+    /// remain unconditionally available (a stop action must never be blocked
+    /// by the plugin's own disabled state).
+    #[test]
+    fn control_sidecar_rejects_start_and_restart_once_the_plugin_is_disabled_but_allows_stop() {
+        let registry = empty_registry();
+        let manifest = manifest_with_sidecar("sc-plugin", 50930);
+        registry.push(PluginEntry {
+            manifest: manifest.clone(),
+            state: PluginState::Running,
+            settings_json: Arc::new(Mutex::new("{}".to_string())),
+            capabilities_json: Arc::new(Mutex::new(
+                crate::plugin::host::capabilities_json_string(&[]),
+            )),
+            sidecars_json: Arc::new(Mutex::new("[]".to_string())),
+        });
+        registry
+            .grants_store
+            .set_sidecar(&manifest, "tts", true)
+            .expect("grant should persist");
+        registry
+            .sidecar_config_store
+            .update_and_effective(
+                &manifest,
+                "tts",
+                &SidecarConfig {
+                    command: "/bin/sh".to_string(),
+                    args: vec!["-c".to_string(), "sleep 30".to_string()],
+                    port: 50930,
+                    replicas: 1,
+                },
+            )
+            .expect("config should persist");
+
+        registry.set_disabled("sc-plugin", "on-event trapped".to_string());
+
+        let start_result = registry.control_sidecar("sc-plugin", "tts", SidecarAction::Start);
+        match start_result {
+            Err(RegistryError::Sidecar(_)) => {}
+            _ => panic!("Start on a disabled plugin's sidecar must be rejected as RegistryError::Sidecar"),
+        }
+        let restart_result = registry.control_sidecar("sc-plugin", "tts", SidecarAction::Restart);
+        match restart_result {
+            Err(RegistryError::Sidecar(_)) => {}
+            _ => panic!("Restart on a disabled plugin's sidecar must be rejected as RegistryError::Sidecar"),
+        }
+
+        let key = Registry::sidecar_key("sc-plugin", "tts");
+        let spec = ProcessSpec {
+            command: PathBuf::from("/bin/sh"),
+            args: vec!["-c".to_string(), "sleep 30".to_string()],
+            ports: vec![50930],
+        };
+        assert!(
+            !registry.process_driver.status(&key, &spec)[0].running,
+            "rejected Start/Restart must not have spawned anything"
+        );
+
+        // Stop must remain available regardless of the disabled state.
+        registry
+            .control_sidecar("sc-plugin", "tts", SidecarAction::Stop)
+            .expect("Stop must never be blocked by the plugin's disabled state");
     }
 
     /// Regression test for the TOCTOU the security review flagged in

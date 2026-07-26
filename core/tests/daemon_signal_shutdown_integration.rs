@@ -14,6 +14,8 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 use tokio_tungstenite::tungstenite::Message;
 
+mod support;
+
 type Ws =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
@@ -23,10 +25,15 @@ const DAEMON_ADDR: &str = "127.0.0.1:58501";
 /// サイドカーに割り当てるポート。同様に他テストと衝突しない値。
 const SIDECAR_PORT: u16 = 58601;
 
+/// 実際にロード・init が成功する wasm を使う(`support::valid_plugin_wasm`
+/// 参照)。`control_sidecar` が `PluginState` を見るようになった(無効化
+/// されたプラグインの `start`/`restart` を拒否する)ため、以前のようにわざと
+/// 壊れた wasm を置いて `Disabled` のままにすると、この統合テストが
+/// (意図せず)サイドカーの起動そのものを検証できなくなってしまう。
 fn write_sidecar_plugin(plugins_dir: &Path) {
     let dir = plugins_dir.join("sc-plugin");
     fs::create_dir_all(&dir).unwrap();
-    fs::write(dir.join("plugin.wasm"), b"\0asm\x01\x00\x00\x00").unwrap();
+    fs::copy(support::valid_plugin_wasm(), dir.join("plugin.wasm")).unwrap();
     fs::write(
         dir.join("manifest.toml"),
         format!(
@@ -63,6 +70,24 @@ async fn recv_json(ws: &mut Ws) -> serde_json::Value {
         if let Message::Text(text) = msg {
             return serde_json::from_str(&text).expect("valid json");
         }
+    }
+}
+
+/// spawn したデーモンを `Drop` で確実に回収するガード。
+///
+/// この統合テストはアサーション失敗のたびに実プロセスを spawn する。
+/// ガード無しで途中のアサーションが panic すると、テスト末尾の
+/// `daemon.kill()`/`daemon.wait()` まで到達できず、デーモンが
+/// `DAEMON_ADDR`(固定ポート)を握ったまま生き残ってしまう -- 次にこの
+/// テストを実行したときに「新しいデーモンを spawn したつもりが、実際には
+/// 古い(既に消えた一時ディレクトリを指す)デーモンに接続してしまう」という、
+/// 原因の分かりにくい失敗を招く(このテストを書く過程で実際に踏んだ)。
+struct DaemonGuard(std::process::Child);
+
+impl Drop for DaemonGuard {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
     }
 }
 
@@ -111,21 +136,23 @@ async fn sigterm_to_daemon_stops_running_sidecars_including_grandchildren() {
         fs::set_permissions(&sidecar_script, fs::Permissions::from_mode(0o755)).unwrap();
     }
 
-    let mut daemon = Command::new(env!("CARGO_BIN_EXE_edlr"))
-        .arg("--journal-dir")
-        .arg(&journal_dir)
-        .arg("--listen")
-        .arg(DAEMON_ADDR)
-        .arg("--plugins-dir")
-        .arg(&plugins_dir)
-        .arg("--settings-dir")
-        .arg(&settings_dir)
-        .arg("--grants-dir")
-        .arg(&grants_dir)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("failed to spawn edlr daemon binary");
+    let mut daemon = DaemonGuard(
+        Command::new(env!("CARGO_BIN_EXE_edlr"))
+            .arg("--journal-dir")
+            .arg(&journal_dir)
+            .arg("--listen")
+            .arg(DAEMON_ADDR)
+            .arg("--plugins-dir")
+            .arg(&plugins_dir)
+            .arg("--settings-dir")
+            .arg(&settings_dir)
+            .arg("--grants-dir")
+            .arg(&grants_dir)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("failed to spawn edlr daemon binary"),
+    );
 
     for _ in 0..200 {
         if daemon_running(DAEMON_ADDR) {
@@ -197,14 +224,14 @@ async fn sigterm_to_daemon_stops_running_sidecars_including_grandchildren() {
         "grandchild should be alive before shutdown"
     );
 
-    // SAFETY: `daemon.id()` is our own spawned, not-yet-waited-on child.
-    let killed = unsafe { libc::kill(daemon.id() as libc::pid_t, libc::SIGTERM) };
+    // SAFETY: `daemon.0.id()` is our own spawned, not-yet-waited-on child.
+    let killed = unsafe { libc::kill(daemon.0.id() as libc::pid_t, libc::SIGTERM) };
     assert_eq!(killed, 0, "failed to send SIGTERM to daemon");
 
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut exited = false;
     while Instant::now() < deadline {
-        match daemon.try_wait() {
+        match daemon.0.try_wait() {
             Ok(Some(_)) => {
                 exited = true;
                 break;
@@ -222,6 +249,8 @@ async fn sigterm_to_daemon_stops_running_sidecars_including_grandchildren() {
         "grandchild {grandchild_pid} survived daemon SIGTERM; sidecars were orphaned"
     );
 
-    let _ = daemon.kill();
-    let _ = daemon.wait();
+    // `daemon` (the `DaemonGuard`) drops here, reaping the already-exited
+    // process; if any assertion above had panicked instead, the `Drop` impl
+    // still runs during unwinding and kills the daemon, so `DAEMON_ADDR`
+    // never stays occupied by a leaked process across test runs.
 }

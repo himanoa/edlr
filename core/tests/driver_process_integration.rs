@@ -8,8 +8,8 @@ use edlr_core::plugin::SidecarConfig;
 
 mod support;
 
-#[test]
-fn granting_a_sidecar_adds_its_ports_to_the_http_allowlist() {
+#[tokio::test]
+async fn granting_a_sidecar_adds_its_ports_to_the_http_allowlist() {
     let env = support::sidecar_env("tts", 50301, true);
 
     // 未承認では暗黙許可も無い。
@@ -55,8 +55,8 @@ fn granting_a_sidecar_adds_its_ports_to_the_http_allowlist() {
         .any(|h| h.contains("50301")));
 }
 
-#[test]
-fn revoking_a_grant_stops_running_instances() {
+#[tokio::test]
+async fn revoking_a_grant_stops_running_instances() {
     let env = support::sidecar_env("tts", 50311, false);
     env.registry
         .set_sidecar_config(
@@ -88,8 +88,8 @@ fn revoking_a_grant_stops_running_instances() {
     );
 }
 
-#[test]
-fn changing_the_config_stops_the_running_sidecar() {
+#[tokio::test]
+async fn changing_the_config_stops_the_running_sidecar() {
     let env = support::sidecar_env("tts", 50321, true);
     let config = SidecarConfig {
         command: "/bin/sh".into(),
@@ -119,8 +119,8 @@ fn changing_the_config_stops_the_running_sidecar() {
     );
 }
 
-#[test]
-fn stop_all_sidecars_leaves_nothing_running() {
+#[tokio::test]
+async fn stop_all_sidecars_leaves_nothing_running() {
     let env = support::sidecar_env("tts", 50331, false);
     env.registry
         .set_sidecar_config(
@@ -156,8 +156,8 @@ fn stop_all_sidecars_leaves_nothing_running() {
 ///
 /// タイミング依存のテストなので、実際の SIGTERM 無視プロセスの grace(3 秒、
 /// `SIDECAR_SHUTDOWN_GRACE`)に対して十分余裕を持たせた閾値(500ms)を使う。
-#[test]
-fn sidecar_operations_on_different_plugins_do_not_block_each_other() {
+#[tokio::test]
+async fn sidecar_operations_on_different_plugins_do_not_block_each_other() {
     let env = support::two_plugin_sidecar_env("tts", 50341, 50342);
 
     // plugin A: SIGTERM を無視する子を起動しておく。取消で `stop` が走ると
