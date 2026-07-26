@@ -99,8 +99,23 @@ pub fn resolve_existing(root: &Path, rel: &str) -> Result<PathBuf, FsError> {
 /// 書き込み先の親ディレクトリを解決する。無ければ 1 段ずつ作る。
 ///
 /// 1 段作るごとに配下チェックを行うため、途中のディレクトリがシンボリック
-/// リンクで外を指していればその時点で落ちる。戻り値は
-/// `(正規化済みの親ディレクトリ, ファイル名)`。
+/// リンクで外を指していればその時点で落ちる。失敗した場合、**この呼び出しが
+/// 作成したディレクトリだけ**を後始末する(逆順に `rmdir`。既存だったものは
+/// 一切触らない)。そうしないと、必ず失敗する要求を繰り返すだけでルート配下に
+/// 任意のディレクトリツリーを作れてしまう(ルート外へは出られないので
+/// Critical ではないが、望ましくない副作用)。
+///
+/// 戻り値は `(正規化済みの親ディレクトリ, ファイル名)`。
+///
+/// **`name`(ファイル名)は構文検証しか通っていない。** 親ディレクトリと違い、
+/// 最終要素がシンボリックリンクかどうかはここでは確認しない
+/// (「親を解決する」関数としての契約上、最終要素はまだ存在しないことが
+/// 前提のため)。呼び出し側が `parent.join(name)` を組み立てて
+/// `std::fs::write`/`OpenOptions` へそのまま渡すと、既存の
+/// `root/<name>` が外を指すシンボリックリンクだった場合にサンドボックスの
+/// 外へ書き込めてしまう。**実際のオープンは `O_NOFOLLOW`(または
+/// `openat2` の `RESOLVE_NO_SYMLINKS`)を使って `parent` に対する openat 相当で
+/// 行い、シンボリックリンクなら開かずに拒否すること。**
 pub fn resolve_parent(root: &Path, rel: &str) -> Result<(PathBuf, String), FsError> {
     let mut components = validate_relative(rel)?;
     let name = components
@@ -108,24 +123,57 @@ pub fn resolve_parent(root: &Path, rel: &str) -> Result<(PathBuf, String), FsErr
         .ok_or_else(|| FsError::InvalidPath("path must name a file".into()))?;
     let root = canonical_root(root)?;
 
+    let mut created: Vec<PathBuf> = Vec::new();
     let mut current = root.clone();
     for component in &components {
         current.push(component);
-        if !current.exists() {
-            std::fs::create_dir(&current).map_err(|e| FsError::Io(e.to_string()))?;
+
+        // まだ無ければ作る。「作ったかどうか」を覚えておき、後で失敗したら
+        // 自分が作った分だけ `rollback` で消す(元から存在したディレクトリは
+        // 消さない)。
+        let just_created = !current.exists();
+        if just_created {
+            if let Err(e) = std::fs::create_dir(&current) {
+                rollback(&created);
+                return Err(FsError::Io(e.to_string()));
+            }
         }
-        current = current
-            .canonicalize()
-            .map_err(|e| FsError::Io(e.to_string()))?;
-        ensure_inside(&root, &current)?;
-        if !current.is_dir() {
+
+        let canon = match current.canonicalize() {
+            Ok(c) => c,
+            Err(e) => {
+                rollback(&created);
+                return Err(FsError::Io(e.to_string()));
+            }
+        };
+        if let Err(e) = ensure_inside(&root, &canon) {
+            rollback(&created);
+            return Err(e);
+        }
+        if !canon.is_dir() {
+            rollback(&created);
             return Err(FsError::InvalidPath(format!(
                 "{component:?} is not a directory"
             )));
         }
+
+        current = canon;
+        if just_created {
+            created.push(current.clone());
+        }
     }
 
     Ok((current, name))
+}
+
+/// `resolve_parent` がこの呼び出しの途中で作成したディレクトリを、深い方から
+/// 順に取り除く。取り除けなくても(他プロセスとの競合など)無視する —
+/// ベストエフォートの後始末であり、これ自体が失敗要因になってはならない。
+/// 元から存在していたディレクトリはここには含まれないので、絶対に触らない。
+fn rollback(created: &[PathBuf]) {
+    for dir in created.iter().rev() {
+        let _ = std::fs::remove_dir(dir);
+    }
 }
 
 #[cfg(test)]
@@ -228,6 +276,87 @@ mod tests {
         let err = resolve_parent(dir.path(), "escape/evil.txt")
             .expect_err("writing through an escaping symlink must be rejected");
         assert!(matches!(err, FsError::InvalidPath(_)));
+    }
+
+    /// 途中まで新規ディレクトリを作ってから失敗するケース。
+    ///
+    /// シンボリックリンクによる脱出は、脱出用のリンクを新規作成される
+    /// ディレクトリの内側に事前配置できない(親がまだ無いので当然置けない)
+    /// ため、この呼び出しより前に成功したディレクトリ作成があった上で
+    /// さらに深い場所が失敗する状況を作れない。代わりに、1 段掘り進めて
+    /// 新規ディレクトリを 1 つ作った直後に、次の要素名を
+    /// `NAME_MAX`(255 バイト)超えにして `ENAMETOOLONG` で失敗させ、
+    /// 「既に成功して作ったディレクトリ」が後始末されることを確認する。
+    #[test]
+    fn resolve_parent_rolls_back_directories_it_created_before_failing() {
+        let dir = root();
+
+        // "a" は呼び出し前から存在する既存ディレクトリ。ロールバックで
+        // 消えてはいけない。
+        fs::create_dir(dir.path().join("a")).unwrap();
+
+        let too_long = "x".repeat(300);
+        let rel = format!("a/newdir/{too_long}/evil.txt");
+
+        let err = resolve_parent(dir.path(), &rel)
+            .expect_err("an overlong component must fail directory creation");
+        assert!(matches!(err, FsError::Io(_)));
+
+        // "newdir" はこの呼び出しが作って、同じ呼び出しの失敗で片付けた
+        // はずなので残っていない。
+        assert!(
+            !dir.path().join("a").join("newdir").exists(),
+            "resolve_parent must roll back directories it created before failing"
+        );
+        // "a" は呼び出し前から存在していたので消えていない。
+        assert!(
+            dir.path().join("a").exists(),
+            "resolve_parent must never remove a directory that pre-dates the call"
+        );
+    }
+
+    /// `ensure_inside` は `Path::starts_with`(コンポーネント単位の比較)を
+    /// 使っているため、`root` と `root-evil` のような文字列プレフィックスが
+    /// 一致するだけの兄弟ディレクトリへ誤って「配下」と判定しない。将来
+    /// 誰かが文字列比較へ書き換えてしまう回帰を防ぐための固定テスト。
+    #[test]
+    fn sibling_directory_with_a_prefix_matching_root_name_is_not_treated_as_inside() {
+        let dir = root();
+        let mut evil_name = dir.path().as_os_str().to_os_string();
+        evil_name.push("-evil");
+        let evil_path = PathBuf::from(evil_name);
+        fs::create_dir(&evil_path).expect("create sibling dir with prefix-colliding name");
+        fs::write(evil_path.join("secret"), b"secret").unwrap();
+        std::os::unix::fs::symlink(evil_path.join("secret"), dir.path().join("link")).unwrap();
+
+        let err = resolve_existing(dir.path(), "link")
+            .expect_err("a prefix-colliding sibling directory must not be treated as inside root");
+        assert!(matches!(err, FsError::InvalidPath(_)));
+
+        let _ = fs::remove_dir_all(&evil_path);
+    }
+
+    /// ルート**内**を指す相対シンボリックリンクは、`canonicalize` が解決した
+    /// 結果がそのままルート配下に留まるので拒否されない。これは意図的な
+    /// 仕様として固定する(次タスクの `openat2`/`RESOLVE_NO_SYMLINKS` 側の
+    /// 挙動と揃える必要がある)。
+    #[test]
+    fn relative_symlink_pointing_inside_the_root_resolves_ok() {
+        let dir = root();
+        fs::create_dir(dir.path().join("sub")).unwrap();
+        fs::write(dir.path().join("sub").join("target.txt"), b"hi").unwrap();
+        std::os::unix::fs::symlink(
+            Path::new("sub/target.txt"),
+            dir.path().join("link.txt"),
+        )
+        .unwrap();
+
+        let resolved = resolve_existing(dir.path(), "link.txt")
+            .expect("a symlink that stays inside the root must resolve, not be rejected");
+        assert_eq!(
+            resolved,
+            dir.path().canonicalize().unwrap().join("sub/target.txt")
+        );
     }
 
     /// ハードリンクは「別の inode を指すシンボリックリンク」ではなく、既に
