@@ -32,6 +32,7 @@ async fn routes_journal_and_status_events() {
         dir.path().to_path_buf(),
         router.clone(),
         Duration::from_millis(50),
+        None,
     ));
 
     append(
