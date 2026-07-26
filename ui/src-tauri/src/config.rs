@@ -38,6 +38,19 @@ pub fn load_from_env() -> LoadedConfig {
     }
 }
 
+use serde::Serialize;
+
+/// フロントエンドへ返す設定のスナップショット。
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfigDto {
+    pub journal_dir: Option<String>,
+    /// Tauri が spawn したデーモンを保持しているか。`false` の場合は
+    /// 外部起動のデーモンなので再起動できない(勝手に殺さない)。
+    pub daemon_managed: bool,
+    pub config_error: Option<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -61,5 +74,20 @@ mod tests {
     fn none_when_neither_set() {
         // None は「--journal-dir を渡さない」= デーモンの自動検出に委ねるを意味する
         assert_eq!(resolve_journal_dir(None, None), None);
+    }
+
+    #[test]
+    fn dto_serializes_to_camel_case() {
+        let dto = ConfigDto {
+            journal_dir: Some("/mnt/game/ED".to_string()),
+            daemon_managed: true,
+            config_error: None,
+        };
+
+        let json = serde_json::to_value(&dto).unwrap();
+
+        assert_eq!(json["journalDir"], "/mnt/game/ED");
+        assert_eq!(json["daemonManaged"], true);
+        assert!(json["configError"].is_null());
     }
 }
