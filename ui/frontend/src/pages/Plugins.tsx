@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from "react";
 import CapabilitySection from "../components/CapabilitySection";
 import PluginForm from "../components/PluginForm";
+import SidecarSection from "../components/SidecarSection";
 import { RpcClient } from "../rpc";
-import type { Capabilities, PluginInfo, PluginsList } from "../types/plugin";
+import type { Capabilities, PluginInfo, PluginsList, SidecarConfig, Sidecars } from "../types/plugin";
 import { defaultWsUrl } from "../ws";
 
 type Status = "loading" | "ready" | "error";
@@ -81,6 +82,49 @@ export default function Plugins() {
     );
   };
 
+  const handleSidecarConfig = (pluginId: string) => async (name: string, config: SidecarConfig) => {
+    const client = clientRef.current;
+    if (!client) throw new Error("RPC に接続されていません");
+    const updated = await client.call<Sidecars>("plugins/set-sidecar-config", {
+      plugin: pluginId,
+      name,
+      config,
+    });
+    if (!mountedRef.current) return;
+    setPlugins((prev) =>
+      prev.map((p) => (p.id === pluginId ? { ...p, sidecars: updated.sidecars } : p)),
+    );
+  };
+
+  const handleSidecarGrant = (pluginId: string) => async (name: string, granted: boolean) => {
+    const client = clientRef.current;
+    if (!client) throw new Error("RPC に接続されていません");
+    const updated = await client.call<Sidecars>("plugins/set-sidecar-grant", {
+      plugin: pluginId,
+      name,
+      granted,
+    });
+    if (!mountedRef.current) return;
+    setPlugins((prev) =>
+      prev.map((p) => (p.id === pluginId ? { ...p, sidecars: updated.sidecars } : p)),
+    );
+  };
+
+  const handleSidecarControl =
+    (pluginId: string) => async (name: string, action: "start" | "stop" | "restart") => {
+      const client = clientRef.current;
+      if (!client) throw new Error("RPC に接続されていません");
+      const updated = await client.call<Sidecars>("plugins/sidecar-control", {
+        plugin: pluginId,
+        name,
+        action,
+      });
+      if (!mountedRef.current) return;
+      setPlugins((prev) =>
+        prev.map((p) => (p.id === pluginId ? { ...p, sidecars: updated.sidecars } : p)),
+      );
+    };
+
   return (
     <section>
       <h1>Plugins</h1>
@@ -102,6 +146,12 @@ export default function Plugins() {
             <CapabilitySection
               capabilities={p.capabilities}
               onToggle={handleCapabilityToggle(p.id)}
+            />
+            <SidecarSection
+              sidecars={p.sidecars}
+              onConfigChange={handleSidecarConfig(p.id)}
+              onGrantChange={handleSidecarGrant(p.id)}
+              onControl={handleSidecarControl(p.id)}
             />
           </article>
         ))}

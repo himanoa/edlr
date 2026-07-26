@@ -11,6 +11,8 @@ let setSettingsImpl: (params: unknown) => Promise<Record<string, unknown>> = () 
   Promise.resolve({});
 let setCapabilitiesImpl: (params: unknown) => Promise<PluginInfo["capabilities"]> = () =>
   Promise.resolve({ requests: [], granted: false, staleGrant: false });
+let setSidecarGrantImpl: (params: unknown) => Promise<{ sidecars: PluginInfo["sidecars"] }> = () =>
+  Promise.resolve({ sidecars: [] });
 let instances: Array<{ close: ReturnType<typeof vi.fn> }> = [];
 
 vi.mock("../rpc", () => {
@@ -25,6 +27,7 @@ vi.mock("../rpc", () => {
         if (method === "plugins/list") return listImpl();
         if (method === "plugins/set-settings") return setSettingsImpl(params);
         if (method === "plugins/set-capabilities") return setCapabilitiesImpl(params);
+        if (method === "plugins/set-sidecar-grant") return setSidecarGrantImpl(params);
         return Promise.reject(new Error(`unexpected method: ${method}`));
       }
     },
@@ -45,6 +48,22 @@ function makePlugin(overrides: Partial<PluginInfo> = {}): PluginInfo {
     settings: [{ type: "boolean", key: "enabled", label: "有効", default: true }],
     values: { enabled: true },
     capabilities: { requests: [], granted: false, staleGrant: false },
+    sidecars: [],
+    ...overrides,
+  };
+}
+
+function makeSidecar(overrides: Partial<PluginInfo["sidecars"][number]> = {}): PluginInfo["sidecars"][number] {
+  return {
+    name: "tts",
+    reason: "音声合成エンジンをローカルで動かすため",
+    args: ["--port", "{port}"],
+    port: 50021,
+    scalable: true,
+    granted: false,
+    staleGrant: false,
+    config: { command: "/usr/bin/piper", args: ["--port", "{port}"], port: 50021, replicas: 1 },
+    instances: [],
     ...overrides,
   };
 }
@@ -55,6 +74,7 @@ beforeEach(() => {
   listImpl = () => Promise.resolve({ pluginsDir: "/plugins", plugins: [] });
   setSettingsImpl = () => Promise.resolve({});
   setCapabilitiesImpl = () => Promise.resolve({ requests: [], granted: false, staleGrant: false });
+  setSidecarGrantImpl = () => Promise.resolve({ sidecars: [] });
 });
 
 afterEach(() => {
@@ -171,4 +191,32 @@ test("toggling capability approval calls plugins/set-capabilities and updates th
 
   await waitFor(() => expect(toggle.checked).toBe(true));
   expect(screen.queryByText(/未承認/)).not.toBeInTheDocument();
+});
+
+test("shows the sidecar section for a plugin that declares sidecars", async () => {
+  const plugin = makePlugin({ sidecars: [makeSidecar()] });
+  listImpl = () => Promise.resolve({ pluginsDir: "/plugins", plugins: [plugin] });
+
+  render(<Plugins />);
+
+  expect(await screen.findByText(/音声合成エンジン/)).toBeInTheDocument();
+});
+
+test("toggling sidecar approval calls plugins/set-sidecar-grant with the right params", async () => {
+  const plugin = makePlugin({ sidecars: [makeSidecar()] });
+  listImpl = () => Promise.resolve({ pluginsDir: "/plugins", plugins: [plugin] });
+  setSidecarGrantImpl = () => Promise.resolve({ sidecars: [makeSidecar({ granted: true })] });
+
+  render(<Plugins />);
+  const toggle = (await screen.findByRole("checkbox", {
+    name: /このサイドカーを承認する/,
+  })) as HTMLInputElement;
+  await userEvent.click(toggle);
+
+  await waitFor(() => {
+    const call = calls.find((c) => c.method === "plugins/set-sidecar-grant");
+    expect(call?.params).toEqual({ plugin: "voice-notify", name: "tts", granted: true });
+  });
+
+  await waitFor(() => expect(toggle.checked).toBe(true));
 });
