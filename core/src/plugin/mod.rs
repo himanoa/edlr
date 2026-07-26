@@ -5,6 +5,7 @@ pub mod manifest;
 pub mod registry;
 pub mod runner;
 pub mod settings;
+pub mod sidecar;
 
 pub use grants::{GrantState, GrantsError, GrantsStore};
 pub use manifest::{
@@ -14,3 +15,4 @@ pub use manifest::{
 pub use registry::{PluginEntry, PluginInfo, PluginState, Registry, RegistryError};
 pub use runner::start_plugins;
 pub use settings::{SettingsError, SettingsStore};
+pub use sidecar::{assign_ports, SidecarConfig, SidecarConfigError, SidecarConfigStore};
