@@ -116,6 +116,10 @@ pub fn handle_rpc(
                         "description": info.manifest.description,
                         "settings": info.manifest.settings,
                         "values": info.values,
+                        "capabilities": capabilities_result_json(
+                            &info.capability_requests,
+                            &info.grant_state,
+                        ),
                     });
                     match info.state {
                         crate::plugin::PluginState::Running => {
@@ -156,8 +160,45 @@ pub fn handle_rpc(
                 .map_err(|e| e.to_string())?;
             Ok(serde_json::Value::Object(updated))
         }
+        "plugins/get-capabilities" => {
+            let plugin = params
+                .get("plugin")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| "params.plugin must be a string".to_string())?;
+            let (requests, grant_state) =
+                registry.capabilities(plugin).map_err(|e| e.to_string())?;
+            Ok(capabilities_result_json(&requests, &grant_state))
+        }
+        "plugins/set-capabilities" => {
+            let plugin = params
+                .get("plugin")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| "params.plugin must be a string".to_string())?;
+            let granted = params
+                .get("granted")
+                .and_then(|v| v.as_bool())
+                .ok_or_else(|| "params.granted must be a bool".to_string())?;
+            let grant_state = registry
+                .set_capabilities(plugin, granted)
+                .map_err(|e| e.to_string())?;
+            let (requests, _) = registry.capabilities(plugin).map_err(|e| e.to_string())?;
+            Ok(capabilities_result_json(&requests, &grant_state))
+        }
         other => Err(format!("unknown method: {other}")),
     }
+}
+
+/// `get-capabilities`/`set-capabilities` の result と `plugins/list` の各要素の
+/// `capabilities` フィールドに使う共通の JSON 形: `{ requests, granted, staleGrant }`。
+fn capabilities_result_json(
+    requests: &[crate::plugin::CapabilityRequest],
+    grant_state: &crate::plugin::GrantState,
+) -> serde_json::Value {
+    serde_json::json!({
+        "requests": requests,
+        "granted": grant_state.granted,
+        "staleGrant": grant_state.stale,
+    })
 }
 
 pub fn app(state: ServerState, ui_dir: Option<PathBuf>) -> axum::Router {

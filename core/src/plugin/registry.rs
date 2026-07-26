@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 use crate::plugin::grants::{GrantState, GrantsError, GrantsStore};
 use crate::plugin::host::{capabilities_json_string, PluginHost};
 use crate::plugin::settings::SettingsStore;
-use crate::plugin::{Manifest, SettingsError};
+use crate::plugin::{CapabilityRequest, Manifest, SettingsError};
 
 /// プラグイン 1 件の現在の駆動状態。
 #[derive(Debug, Clone, PartialEq)]
@@ -36,6 +36,8 @@ pub struct PluginInfo {
     pub manifest: Manifest,
     pub state: PluginState,
     pub values: serde_json::Map<String, serde_json::Value>,
+    pub capability_requests: Vec<CapabilityRequest>,
+    pub grant_state: GrantState,
 }
 
 /// `Registry` の値アクセス系メソッドが返しうるエラー。
@@ -145,13 +147,31 @@ impl Registry {
             .into_iter()
             .map(|(manifest, state)| {
                 let values = self.settings_store.effective(&manifest);
+                let grant_state = self.grants_store.state(&manifest);
+                let capability_requests = manifest.capabilities.clone();
                 PluginInfo {
                     manifest,
                     state,
                     values,
+                    capability_requests,
+                    grant_state,
                 }
             })
             .collect()
+    }
+
+    /// `id` のプラグインの capability 要求一覧と現在の承認状態を返す。
+    ///
+    /// `values`/`set_values` と同様、`entries` ロックは manifest のクローン
+    /// 取得のみに使い、ロックを解放してから `GrantsStore::state`(ディスク
+    /// 読み取り)を呼ぶ。
+    pub fn capabilities(
+        &self,
+        id: &str,
+    ) -> Result<(Vec<CapabilityRequest>, GrantState), RegistryError> {
+        let manifest = self.find_manifest(id)?;
+        let grant_state = self.grants_store.state(&manifest);
+        Ok((manifest.capabilities.clone(), grant_state))
     }
 
     /// `id` のプラグインの effective settings(`SettingsStore` 由来)を返す。
