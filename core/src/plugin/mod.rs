@@ -1,4 +1,5 @@
 pub mod allowlist;
+pub mod filesystem;
 pub mod grants;
 pub mod host;
 pub mod manifest;
@@ -8,6 +9,7 @@ pub mod settings;
 pub mod sidecar;
 pub mod sidecar_runtime;
 
+pub use filesystem::{FilesystemConfig, FilesystemConfigError, FilesystemConfigStore};
 pub use grants::{GrantState, GrantsError, GrantsStore};
 pub use host::PluginHost;
 pub use manifest::{
