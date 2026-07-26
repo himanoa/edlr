@@ -144,7 +144,11 @@ function SidecarCard({
           type="checkbox"
           aria-label="このサイドカーを承認する"
           checked={sidecar.granted}
-          disabled={command === "" || grantSaving}
+          // `checked` と同じ理由で、`disabled` もローカルの未保存入力
+          // (`command` state)ではなくサーバが確認済みの `sidecar.config.command`
+          // で判定する。保存前の入力だけでトグルが有効になると、承認した対象
+          // (サーバ側の command)と実際に走るプログラムがずれてしまう。
+          disabled={sidecar.config.command === "" || grantSaving}
           onChange={(e) => handleGrant(e.target.checked)}
         />
         {grantSaving && (

@@ -70,6 +70,19 @@ describe("SidecarSection", () => {
     expect(onGrantChange).toHaveBeenCalledWith("tts", true);
   });
 
+  it("keeps the grant toggle disabled while an executable path is only typed but not saved", async () => {
+    render(
+      <SidecarSection
+        sidecars={[sidecar()]}
+        onConfigChange={noop}
+        onGrantChange={noop}
+        onControl={noop}
+      />,
+    );
+    await userEvent.type(screen.getByLabelText(/実行ファイル/), "/usr/bin/piper");
+    expect(screen.getByRole("checkbox", { name: /このサイドカーを承認する/ })).toBeDisabled();
+  });
+
   it("warns that the sidecar runs outside the sandbox", () => {
     render(
       <SidecarSection
