@@ -1,11 +1,12 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod daemon;
+mod config;
 
 use std::path::PathBuf;
 
 /// 未起動ならデーモンを spawn して Child を返す。起動済み・失敗時は None。
-fn autostart_daemon() -> Option<std::process::Child> {
+fn autostart_daemon(config_journal_dir: Option<PathBuf>) -> Option<std::process::Child> {
     if daemon::daemon_running(daemon::DAEMON_ADDR) {
         eprintln!(
             "edlr daemon already running on {}; leaving it alone",
@@ -34,7 +35,10 @@ fn autostart_daemon() -> Option<std::process::Child> {
         );
         return None;
     };
-    let journal_dir = std::env::var_os("EDLR_JOURNAL_DIR").map(PathBuf::from);
+    let journal_dir = config::resolve_journal_dir(
+        std::env::var_os("EDLR_JOURNAL_DIR").map(PathBuf::from),
+        config_journal_dir,
+    );
     match daemon::spawn_daemon(&bin, journal_dir.as_deref()) {
         Ok(child) => {
             eprintln!(
@@ -54,7 +58,11 @@ fn autostart_daemon() -> Option<std::process::Child> {
 fn main() {
     // ウィンドウを出してフロントエンドを表示する薄い皮 + デーモンの道連れ起動。
     // 既に起動済みのデーモンには spawn も kill もしない。
-    let mut child = autostart_daemon();
+    let loaded = config::load_from_env();
+    if let Some(error) = &loaded.error {
+        eprintln!("failed to load {}: {error}", loaded.path.display());
+    }
+    let mut child = autostart_daemon(loaded.config.journal_dir.clone());
     let app = match tauri::Builder::default().build(tauri::generate_context!()) {
         Ok(app) => app,
         Err(e) => {

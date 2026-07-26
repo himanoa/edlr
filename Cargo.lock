@@ -1244,6 +1244,7 @@ dependencies = [
 name = "edlr-ui"
 version = "0.1.0"
 dependencies = [
+ "edlr-config",
  "tauri",
  "tauri-build",
  "tempfile",

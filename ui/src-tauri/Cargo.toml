@@ -7,6 +7,7 @@ edition = "2021"
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+edlr-config = { path = "../../config" }
 tauri = { version = "2", features = [] }
 
 [dev-dependencies]
