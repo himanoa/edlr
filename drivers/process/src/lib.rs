@@ -89,6 +89,13 @@ impl ProcessDriver {
 
     /// 生きていないインスタンスだけを spawn し、直後の状態を返す。
     /// 既に全て生きていればレート制限にも掛からず、そのまま成功する。
+    ///
+    /// `spec.ports` の構成が現在のインスタンス列と食い違っていて、かつ
+    /// このキーの `stop`/`stop_all` がまだ進行中(古いプロセスがどれかの
+    /// ポートを離す前)の場合、再構築は次回の呼び出しへ遅延される
+    /// (`align_instances` を参照)。この場合戻り値は `spec.ports` ではなく
+    /// 古いインスタンス列の実際の状態を返す — 新しいポート構成をまだ
+    /// `running` だと偽って報告することはない。
     pub fn ensure_started(
         &self,
         key: &str,
@@ -242,6 +249,25 @@ fn align_instances(group: &mut Group, spec: &ProcessSpec) {
             .zip(spec.ports.iter())
             .all(|(instance, port)| instance.port == *port);
     if same {
+        return;
+    }
+
+    // A concurrent `stop`/`stop_all` may already have detached one of these
+    // instances' `Child` (see `take_for_stop`) and be killing it *outside*
+    // this lock (see `finish_stop`) -- that's precisely how round 1 of this
+    // review avoided holding `groups` for the whole SIGTERM grace period.
+    // While that's in flight, `instance.child` is `None` but the real OS
+    // process behind it may still be alive and still bound to
+    // `instance.port`. If we rebuilt here we could spawn a brand new
+    // process onto that same port before the old one actually released it
+    // (a transient port collision/bind failure). So: while any instance in
+    // this group is `terminating`, leave `group.instances` untouched and
+    // defer the rebuild entirely -- the caller keeps seeing the *old*
+    // instance list (with its real running/exited state) instead of the
+    // new `spec.ports`. Once `finish_stop` clears `terminating`, the next
+    // `ensure_started` call for this key will see `same == false` again and
+    // actually perform the rebuild.
+    if group.instances.iter().any(|instance| instance.terminating) {
         return;
     }
 
@@ -623,5 +649,82 @@ mod tests {
         );
 
         driver.stop("p/live");
+    }
+
+    #[test]
+    fn ensure_started_defers_rebuild_while_stop_is_still_in_flight() {
+        // grace を長めにし、SIGTERM を無視する子を使うことで、`stop()` の
+        // 裏側の `finish_stop` がまだ SIGKILL に昇格していない(= 古い
+        // プロセスがまだ生きてポートを握っている)ウィンドウを作る。
+        let driver = ProcessDriver::new(Duration::from_secs(2), Duration::from_millis(0));
+        let old_spec = ProcessSpec {
+            command: PathBuf::from("/bin/sh"),
+            args: vec!["-c".to_string(), "trap '' TERM; sleep 30".to_string()],
+            ports: vec![50130],
+        };
+        let new_spec = sleep_spec(vec![50131]);
+
+        driver
+            .ensure_started("p/reconfig", &old_spec)
+            .expect("start old");
+
+        let driver = std::sync::Arc::new(driver);
+        let stopper = {
+            let driver = std::sync::Arc::clone(&driver);
+            std::thread::spawn(move || {
+                driver.stop("p/reconfig");
+            })
+        };
+
+        // stop() が take_for_stop で子を切り離し(同時に terminating =
+        // true を立てる)まで待つ。status() の running は「child を持って
+        // いるか」そのものを見ているので、これが false になった瞬間が
+        // ちょうど terminating が立った瞬間と一致する — 固定 sleep より
+        // 確実にタイミングを合わせられる。SIGTERM は無視されるので、
+        // ここではまだ実プロセスは生きたままの想定(grace は 2 秒)。
+        let mut detached = false;
+        for _ in 0..200 {
+            if !driver
+                .status("p/reconfig", &old_spec)
+                .iter()
+                .all(|i| i.running)
+            {
+                detached = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(detached, "stop() should have detached the child within 2s");
+
+        // 古いプロセスがまだ生きている(SIGTERM 無視・grace 内)間に、別の
+        // ポート構成で ensure_started を呼ぶ。ここで align_instances が
+        // 素直に作り直すと、まだポートを握っているかもしれない旧プロセスと
+        // 新プロセスが競合しうる。再構築は次回呼び出しへ遅延され、戻り値は
+        // 旧構成の実際の状態(new_spec の port を running として誤報しない)
+        // であるべき。
+        let mid = driver
+            .ensure_started("p/reconfig", &new_spec)
+            .expect("ensure_started must not fail while a rebuild is deferred");
+        assert_eq!(
+            mid.iter().map(|i| i.port).collect::<Vec<_>>(),
+            vec![50130],
+            "rebuild must be deferred while the old instance is still terminating; \
+             the new port set must not be reported as active"
+        );
+
+        stopper.join().expect("stop thread should not panic");
+
+        // finish_stop が完了して terminating が解除された後は、次の
+        // ensure_started で実際に新しい構成へ再構築されるべき。
+        let after = driver
+            .ensure_started("p/reconfig", &new_spec)
+            .expect("start new");
+        assert_eq!(
+            after.iter().map(|i| i.port).collect::<Vec<_>>(),
+            vec![50131]
+        );
+        assert!(after.iter().all(|i| i.running));
+
+        driver.stop("p/reconfig");
     }
 }
