@@ -109,9 +109,39 @@ impl Dir {
         }
     }
 
-    /// 読み取り用に開く。ディレクトリにも使える(`stat` 用)。
+    /// 読み取り用に**通常ファイルだけ**を開く。
+    ///
+    /// `O_NONBLOCK` を付けて開き、`fstat` で通常ファイルでなければ拒否する。
+    /// ルート内に FIFO があると `open(O_RDONLY)` は writer が現れるまで返らず
+    /// (`O_NOFOLLOW` / `RESOLVE_NO_SYMLINKS` は FIFO を止めない)、ホスト
+    /// 呼び出し中はエポック割り込みが効かないので、プラグイン専用スレッドが
+    /// 恒久的に固まってしまう。FIFO・デバイス・ソケット・ディレクトリは
+    /// この機能で読む対象ではないので、まとめて `InvalidPath` にする。
+    ///
+    /// 判定は「開いた後の fd」に対する `fstat` で行う。開く前に `statat` で
+    /// 確かめると、確かめた相手と開く相手が別物になりうる(TOCTOU)。
+    /// 通常ファイルと確認できたら `O_NONBLOCK` は落とす — Linux は通常
+    /// ファイルに対してこのフラグを無視するが、以後の `read` の意味論を
+    /// 普通のファイルと完全に同じに保つため。
     pub fn open_read(&self, name: &str) -> Result<File, FsError> {
-        exists_is_impossible(self.open_with(name, OFlags::RDONLY, false))
+        let file = exists_is_impossible(self.open_with(
+            name,
+            OFlags::RDONLY | OFlags::NONBLOCK,
+            false,
+        ))?;
+
+        let stat = rustix::fs::fstat(&file).map_err(|e| errno_to_error(e, name))?;
+        if FileType::from_raw_mode(stat.st_mode as rustix::fs::RawMode) != FileType::RegularFile {
+            return Err(FsError::InvalidPath(format!(
+                "{name:?} is not a regular file"
+            )));
+        }
+
+        // ベストエフォート。失敗しても通常ファイルなら挙動は変わらない。
+        if let Ok(flags) = rustix::fs::fcntl_getfl(&file) {
+            let _ = rustix::fs::fcntl_setfl(&file, flags - OFlags::NONBLOCK);
+        }
+        Ok(file)
     }
 
     /// 新規作成専用に開く。tmp ファイル用。
@@ -181,6 +211,13 @@ impl Dir {
                 // UTF-8 でない名前は相対パスとして返せないので列挙しない。
                 Err(_) => continue,
             };
+            // 列挙した名前は、そのまま他の操作(`read` など)に渡せなければ
+            // ならない。バックスラッシュや制御文字を含む名前は
+            // `path::validate_relative` が拒否するので、列挙もしない —
+            // 「`list` の結果は常に他の操作で使える」という契約を保つため。
+            if !path::is_valid_component(&name) {
+                continue;
+            }
 
             let stat = match rustix::fs::statat(&self.fd, name.as_str(), AtFlags::SYMLINK_NOFOLLOW)
             {

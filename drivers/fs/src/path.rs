@@ -53,6 +53,15 @@ pub fn validate_relative(rel: &str) -> Result<Vec<String>, FsError> {
     Ok(components)
 }
 
+/// パス要素 1 つが [`validate_relative`] の規則を満たすか。
+///
+/// `list` が列挙した名前を篩うために使う。「列挙された名前はそのまま他の
+/// 操作へ渡せる」という契約を、規則を二重に書かずに保つため
+/// (`validate_relative` そのものに通し、要素が 1 つだけであることも確認する)。
+pub fn is_valid_component(name: &str) -> bool {
+    matches!(validate_relative(name), Ok(components) if components.len() == 1)
+}
+
 /// `root` を正規化する。設定時に一度だけ行い、以後の比較の基準にする。
 pub fn canonical_root(root: &Path) -> Result<PathBuf, FsError> {
     root.canonicalize()

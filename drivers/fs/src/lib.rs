@@ -42,6 +42,15 @@ use std::time::UNIX_EPOCH;
 /// 深さで止める(スタックの深さと、同時に保持する fd 数の上限でもある)。
 pub const MAX_LIST_DEPTH: usize = 64;
 
+/// [`FsDriver::list`] が 1 回の呼び出しで見てよいディレクトリエントリの総数。
+///
+/// `list_limit` は「返す通常ファイルの数」しか数えないので、サブディレクトリ・
+/// シンボリックリンク・FIFO だけでできた巨大ツリーは上限に一度も触れないまま
+/// 全走査されてしまう(しかも 1 エントリごとに `statat` を発行する)。
+/// プラグイン自身が `write` を繰り返すだけでこの状態を作れるので、返却数とは
+/// **別に**走査量の予算を持つ。超えたら `too-large`。
+pub const MAX_LIST_SCAN: usize = 100_000;
+
 /// 1 ファイル分のメタデータ。
 #[derive(Debug, Clone, PartialEq)]
 pub struct Entry {
@@ -63,6 +72,7 @@ pub struct Entry {
 pub struct FsDriver {
     read_limit: usize,
     list_limit: usize,
+    scan_limit: usize,
 }
 
 impl FsDriver {
@@ -70,7 +80,15 @@ impl FsDriver {
         FsDriver {
             read_limit,
             list_limit,
+            scan_limit: MAX_LIST_SCAN,
         }
+    }
+
+    /// 走査予算([`MAX_LIST_SCAN`])を差し替える。テストと、将来ホスト側から
+    /// 調整したくなった場合のため。
+    pub fn with_scan_limit(mut self, scan_limit: usize) -> FsDriver {
+        self.scan_limit = scan_limit;
+        self
     }
 
     pub fn read(&self, root: &Path, rel: &str) -> Result<Vec<u8>, FsError> {
@@ -184,18 +202,24 @@ impl FsDriver {
         let base = openat::Dir::open(root, prefix)?;
 
         let mut entries = Vec::new();
-        self.walk(&base, prefix, 0, &mut entries)?;
+        let mut scanned = 0usize;
+        self.walk(&base, prefix, 0, &mut entries, &mut scanned)?;
         Ok(entries)
     }
 
     /// [`FsDriver::list`] の再帰本体。`dir` の fd は再帰の間だけ生きており、
     /// 子から戻った時点で `drop` される。
+    ///
+    /// `scanned` は「見たディレクトリエントリの総数」。返す通常ファイルだけを
+    /// 数える `list_limit` と違い、ディレクトリ・シンボリックリンク・FIFO も
+    /// 数える([`MAX_LIST_SCAN`] 参照)。
     fn walk(
         &self,
         dir: &openat::Dir,
         dir_path: &str,
         depth: usize,
         entries: &mut Vec<Entry>,
+        scanned: &mut usize,
     ) -> Result<(), FsError> {
         if depth >= MAX_LIST_DEPTH {
             return Err(FsError::TooLarge(format!(
@@ -207,6 +231,14 @@ impl FsDriver {
         // 間このディレクトリの dirent ストリームを開いたままにしないため。
         let mut subdirectories = Vec::new();
         for item in dir.entries()? {
+            *scanned += 1;
+            if *scanned > self.scan_limit {
+                return Err(FsError::TooLarge(format!(
+                    "walked more than {} directory entries under {dir_path:?}",
+                    self.scan_limit
+                )));
+            }
+
             let relative = if dir_path.is_empty() {
                 item.name.clone()
             } else {
@@ -242,7 +274,7 @@ impl FsDriver {
             // 開くまでにリンクへ差し替えられていれば `None` になって
             // 読み飛ばされる。
             if let Some(child) = dir.open_dir(&name)? {
-                self.walk(&child, &relative, depth + 1, entries)?;
+                self.walk(&child, &relative, depth + 1, entries, scanned)?;
                 // ここで `child` が drop され、次の兄弟を開く前に fd が返る。
             }
         }
@@ -255,24 +287,18 @@ impl FsDriver {
     /// tmp は `O_CREAT | O_EXCL | O_NOFOLLOW` で作る。tmp 名を先回りして
     /// シンボリックリンクとして置かれても、リンクを辿って書くことはない
     /// (同じディレクトリへ書ける別プロセスからの古典的な攻撃)。
+    ///
+    /// tmp 名は呼び出しごとに一意なので([`tmp_name`])、居座りが起きるのは
+    /// 「攻撃者がその一意な名前を当てて先回りした」場合だけ。その場合は
+    /// 素直に失敗させる(消して作り直すと、同一パスへの並行 `write` 同士が
+    /// 互いの tmp を消し合う競合をわざわざ作ってしまう)。
     pub fn write(&self, root: &Path, rel: &str, bytes: &[u8]) -> Result<(), FsError> {
         let (dir, name) = self.locate_for_write(root, rel)?;
         let tmp = tmp_name(&name);
 
-        let mut file = match dir.create_new(&tmp)? {
-            Some(file) => file,
-            None => {
-                // tmp の名前に既に何かが居座っている(前回の異常終了の残骸、
-                // あるいは攻撃者が先回りして置いたシンボリックリンク)。
-                // `unlink` はリンクを辿らずエントリ自体を取り除くので、
-                // 消してから作り直す。消した直後にまた置かれたら、
-                // `O_EXCL` がもう一度弾くので素直に失敗させる。
-                dir.unlink(&tmp)?;
-                dir.create_new(&tmp)?.ok_or_else(|| {
-                    FsError::Io(format!("{tmp} was recreated while writing {rel}"))
-                })?
-            }
-        };
+        let mut file = dir
+            .create_new(&tmp)?
+            .ok_or_else(|| FsError::Io(format!("{tmp} already exists while writing {rel}")))?;
 
         if let Err(e) = file.write_all(bytes) {
             drop(file);
@@ -339,8 +365,19 @@ fn split_parent(rel: &str) -> Result<(String, String), FsError> {
 
 /// 原子的書き込みで使う tmp の名前。同じディレクトリの中に作るので
 /// `rename` が同一ファイルシステム内に収まる。
+///
+/// **呼び出しごとに一意でなければならない。** pid だけだと、同じプロセス内の
+/// 2 スレッド(同じディレクトリを共有する 2 プラグイン、あるいは 1 プラグイン
+/// の再入)が同一パスへ `write` したときに同じ tmp 名を奪い合い、片方の
+/// `rename` が ENOENT で落ちる — しかも `write` が `not-found` を返すという、
+/// WIT の意味論としても誤った結果になる。プロセス内で単調増加するカウンタを
+/// 足して、その競合ごと無くす。
 fn tmp_name(name: &str) -> String {
-    format!(".{name}.tmp.{}", std::process::id())
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!(".{name}.tmp.{}.{seq}", std::process::id())
 }
 
 fn modified_secs(meta: &std::fs::Metadata) -> Option<u64> {
@@ -547,6 +584,10 @@ mod tests {
     /// 同じディレクトリに書ける第三者が tmp の名前を先回りしてシンボリック
     /// リンクとして置いた場合。tmp を `O_CREAT | O_EXCL | O_NOFOLLOW` で
     /// 作らないと、ここでルート外へ本文が書き出されてしまう。
+    ///
+    /// tmp 名は呼び出しごとに一意なので、攻撃者はまず名前を当てられない。
+    /// それでも当てられた場合(このテストは次に使われる連番を先読みして
+    /// 当てにいく)、`O_EXCL | O_NOFOLLOW` がリンクを開くことを拒む。
     #[test]
     fn a_pre_planted_symlink_at_the_temp_name_cannot_be_written_through() {
         let dir = tempfile::tempdir().unwrap();
@@ -555,8 +596,18 @@ mod tests {
         fs::write(&victim, b"original").unwrap();
         let d = driver();
 
-        // 攻撃者が tmp の名前を先取りしてルート外を指すリンクを置く。
-        std::os::unix::fs::symlink(&victim, dir.path().join(tmp_name("target.txt"))).unwrap();
+        // 攻撃者がこれから使われうる tmp 名を先取りしてルート外を指すリンクを
+        // 置く。連番は他のテストと共有のカウンタなので、この後に使われる値を
+        // 幅を持たせて狙う(1 本でも当たれば `O_EXCL` 経路が実際に踏まれる)。
+        let probe = tmp_name("target.txt");
+        let (prefix, seq) = probe.rsplit_once('.').unwrap();
+        let seq: u64 = seq.parse().unwrap();
+        let planted: Vec<std::path::PathBuf> = (1..=8)
+            .map(|i| dir.path().join(format!("{prefix}.{}", seq + i)))
+            .collect();
+        for link in &planted {
+            std::os::unix::fs::symlink(&victim, link).unwrap();
+        }
 
         let _ = d.write(dir.path(), "target.txt", b"overwritten");
 
@@ -565,14 +616,23 @@ mod tests {
             b"original",
             "the temp file must never be opened through a symlink"
         );
-        // 仕掛けられたリンクは(取り除かれたにせよ)残っていてはならない。
-        assert!(
-            dir.path()
-                .join(tmp_name("target.txt"))
-                .symlink_metadata()
-                .is_err(),
-            "the planted symlink must not survive the write"
-        );
+        // 仕掛けられたリンクは辿られないだけでなく、辿らずに書き潰されても
+        // いないこと(リンクのまま残っているのが正しい)。
+        for link in &planted {
+            assert!(
+                link.symlink_metadata().unwrap().file_type().is_symlink(),
+                "{link:?} must still be the planted symlink"
+            );
+        }
+    }
+
+    /// tmp 名は呼び出しごとに一意であること。I3 の回帰ガード
+    /// (pid だけだと同一プロセス内の 2 スレッドが衝突する)。
+    #[test]
+    fn temp_names_are_unique_per_call() {
+        let names: std::collections::HashSet<String> =
+            (0..1000).map(|_| tmp_name("x.bin")).collect();
+        assert_eq!(names.len(), 1000, "temp names must be unique per call");
     }
 
     /// `append` も同じ。確認してから開くのでは間に合わないので、
@@ -710,6 +770,162 @@ mod tests {
             "list held {peak} fds (baseline {baseline}) while walking {WIDTH} sibling \
              directories; it must not open one per sibling"
         );
+    }
+
+    /// ルート内に FIFO があっても、`read` / `stat` がブロックしてはならない。
+    ///
+    /// `open(O_RDONLY)` は writer が現れるまで返らないので、`O_NONBLOCK` 無しで
+    /// 開くとプラグイン専用スレッドが恒久的に固まる(ホスト呼び出し中は
+    /// エポック割り込みが効かない)。FIFO はプラグイン自身では作れないが、
+    /// 承認したディレクトリに外部の主体が置くことはできる。
+    #[test]
+    fn a_fifo_inside_the_root_is_refused_instead_of_blocking() {
+        let dir = tempfile::tempdir().unwrap();
+        make_fifo(&dir.path().join("pipe"));
+
+        let root = dir.path().to_path_buf();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let d = FsDriver::new(READ_LIMIT, 10_000);
+            let read = d.read(&root, "pipe").map(|b| b.len());
+            let stat = d.stat(&root, "pipe").map(|e| e.size);
+            let _ = tx.send((read, stat));
+        });
+
+        let (read, stat) = rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("read/stat on a FIFO must not block");
+        assert!(read.is_err(), "read on a FIFO must fail, got {read:?}");
+        assert!(stat.is_err(), "stat on a FIFO must fail, got {stat:?}");
+    }
+
+    /// `list_limit` は「返す通常ファイルの数」しか数えないので、ディレクトリや
+    /// FIFO しか含まないツリーはいくら大きくても上限に触れない。走査した
+    /// エントリの総数にも予算を持たせ、超えたら打ち切ること。
+    #[test]
+    fn a_huge_tree_without_files_is_cut_off_by_the_scan_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = FsDriver::new(READ_LIMIT, 10_000).with_scan_limit(16);
+
+        // 通常ファイルを 1 つも含まないツリー。`list_limit` は決して発火しない。
+        for i in 0..64 {
+            fs::create_dir(dir.path().join(format!("d{i:03}"))).unwrap();
+        }
+
+        let err = d
+            .list(dir.path(), "")
+            .expect_err("a huge file-less tree must be cut off by the scan budget");
+        assert!(matches!(err, FsError::TooLarge(_)), "got {err:?}");
+
+        // 予算の内側は通ること(予算が実質ゼロになっていないこと)。
+        let small = tempfile::tempdir().unwrap();
+        d.write(small.path(), "a.txt", b"x").unwrap();
+        assert_eq!(d.list(small.path(), "").unwrap().len(), 1);
+    }
+
+    /// 同一パスへの並行 `write` は、どれも失敗してはならない。
+    ///
+    /// tmp 名にプロセス内で一意な要素が無いと、同じディレクトリを共有する
+    /// 2 スレッドが同じ tmp を奪い合い、片方の `rename` が ENOENT
+    /// (= `not-found`)で落ちる。`write` が `not-found` を返すのは WIT の
+    /// 意味論としても誤り。
+    #[test]
+    fn concurrent_writes_to_the_same_path_all_succeed_and_never_interleave() {
+        const SIZE: usize = 4 * 1024 * 1024;
+        const ROUNDS: usize = 40;
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+
+        let handles: Vec<_> = [b'a', b'b']
+            .into_iter()
+            .map(|byte| {
+                let root = root.clone();
+                let barrier = std::sync::Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    let d = FsDriver::new(READ_LIMIT, 10_000);
+                    let payload = vec![byte; SIZE];
+                    barrier.wait();
+                    let mut errors = Vec::new();
+                    for _ in 0..ROUNDS {
+                        if let Err(e) = d.write(&root, "x.bin", &payload) {
+                            errors.push(e.to_string());
+                        }
+                    }
+                    errors
+                })
+            })
+            .collect();
+
+        let errors: Vec<String> = handles
+            .into_iter()
+            .flat_map(|h| h.join().expect("writer thread should not panic"))
+            .collect();
+        assert!(
+            errors.is_empty(),
+            "{} of {} concurrent writes failed: {:?}",
+            errors.len(),
+            2 * ROUNDS,
+            &errors[..errors.len().min(3)]
+        );
+
+        // 最終内容はどちらかの書き手の完全な内容であること(混ざっていない)。
+        let final_bytes = driver().read(dir.path(), "x.bin").unwrap();
+        assert_eq!(final_bytes.len(), SIZE);
+        let first = final_bytes[0];
+        assert!(first == b'a' || first == b'b');
+        assert!(
+            final_bytes.iter().all(|b| *b == first),
+            "the surviving file mixes bytes from both writers"
+        );
+
+        // tmp の残骸が無いこと。
+        let leftovers: Vec<_> = fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|name| name != "x.bin")
+            .collect();
+        assert!(leftovers.is_empty(), "unexpected leftovers: {leftovers:?}");
+    }
+
+    /// `list` が返す名前は、必ず他の操作にもそのまま渡せること。
+    ///
+    /// バックスラッシュ・制御文字を含む名前は `path::validate_relative` が
+    /// 拒否するので、列挙しておきながら `read` できない、という不整合になる。
+    #[test]
+    fn list_only_returns_names_the_other_operations_accept() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = driver();
+        d.write(dir.path(), "ok.txt", b"x").unwrap();
+        fs::write(dir.path().join("we\\ird"), b"x").unwrap();
+        fs::write(dir.path().join("new\nline"), b"x").unwrap();
+
+        let listed: Vec<String> = d
+            .list(dir.path(), "")
+            .unwrap()
+            .into_iter()
+            .map(|e| e.path)
+            .collect();
+
+        assert_eq!(listed, vec!["ok.txt".to_string()]);
+        for name in &listed {
+            d.read(dir.path(), name)
+                .unwrap_or_else(|e| panic!("list returned {name:?} but read refused it: {e}"));
+        }
+    }
+
+    fn make_fifo(path: &Path) {
+        use rustix::fs::{FileType, Mode};
+        rustix::fs::mknodat(
+            rustix::fs::CWD,
+            path,
+            FileType::Fifo,
+            Mode::from_bits_truncate(0o644),
+            0,
+        )
+        .expect("mkfifo");
     }
 
     /// 深すぎるツリーは再帰が止まらないので、深さの上限で拒否する。
