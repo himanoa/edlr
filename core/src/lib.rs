@@ -1,4 +1,4 @@
-pub mod config;
+pub use edlr_config as config;
 pub mod event;
 pub mod journal;
 pub mod monitor;
