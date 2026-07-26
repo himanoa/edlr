@@ -1,4 +1,4 @@
-package edlr:plugin@0.1.0;
+package edlr:plugin@0.2.0;
 
 interface host-log {
   enum level { debug, info, warn, error }
@@ -90,6 +90,7 @@ world plugin {
     timestamp: option<string>,
     name: option<string>,       // journal イベント名
     payload-json: string,       // raw JSON
+    replay: bool,                // デーモンが動き出す前に既に書かれていたイベント
   }
 
   export init: func();

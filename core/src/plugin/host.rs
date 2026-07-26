@@ -766,12 +766,14 @@ impl PluginInstance {
         timestamp: Option<&str>,
         name: Option<&str>,
         payload_json: &str,
+        replay: bool,
     ) -> anyhow::Result<()> {
         let event = WitEvent {
             kind: kind.to_string(),
             timestamp: timestamp.map(|s| s.to_string()),
             name: name.map(|s| s.to_string()),
             payload_json: payload_json.to_string(),
+            replay,
         };
         self.store
             .set_epoch_deadline(deadline_ticks(Self::CALL_DEADLINE));

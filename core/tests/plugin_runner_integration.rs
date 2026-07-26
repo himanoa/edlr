@@ -144,6 +144,7 @@ async fn hello_logger_stays_running_and_busy_loop_gets_disabled_after_publish() 
         timestamp: "2026-07-25T00:00:00Z".to_string(),
         event: "FSDJump".to_string(),
         raw: serde_json::json!({}),
+        replay: false,
     });
 
     let deadline = Instant::now() + Duration::from_secs(15);
@@ -298,6 +299,7 @@ async fn init_failure_registers_disabled_and_starts_no_event_task() {
         timestamp: "2026-07-25T00:00:00Z".to_string(),
         event: "FSDJump".to_string(),
         raw: serde_json::json!({}),
+        replay: false,
     });
 
     tokio::time::sleep(Duration::from_millis(500)).await;

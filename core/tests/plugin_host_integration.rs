@@ -122,7 +122,7 @@ fn on_event_ok() {
 
     instance.call_init().expect("call_init should succeed");
     instance
-        .call_on_event("journal", None, Some("FSDJump"), "{}")
+        .call_on_event("journal", None, Some("FSDJump"), "{}", false)
         .expect("call_on_event should succeed");
 }
 
@@ -134,13 +134,13 @@ fn on_event_ok_after_settings_swap() {
 
     instance.call_init().expect("call_init should succeed");
     instance
-        .call_on_event("journal", None, Some("FSDJump"), "{}")
+        .call_on_event("journal", None, Some("FSDJump"), "{}", false)
         .expect("first call_on_event should succeed");
 
     *settings.lock().unwrap() = r#"{"enabled": false}"#.to_string();
 
     instance
-        .call_on_event("journal", None, Some("FSDJump"), "{}")
+        .call_on_event("journal", None, Some("FSDJump"), "{}", false)
         .expect("call_on_event after settings swap should succeed");
 }
 
@@ -161,7 +161,7 @@ fn busy_loop_on_event_hits_deadline() {
     let (mut instance, _settings) = load(&host, &wasm, r#"{}"#);
 
     let start = Instant::now();
-    let result = instance.call_on_event("journal", None, Some("FSDJump"), "{}");
+    let result = instance.call_on_event("journal", None, Some("FSDJump"), "{}", false);
     let elapsed = start.elapsed();
 
     assert!(result.is_err(), "busy loop call should trap/err");
@@ -191,7 +191,7 @@ fn memory_hog_on_event_hits_memory_limit() {
     instance.call_init().expect("call_init should succeed");
 
     let start = Instant::now();
-    let result = instance.call_on_event("journal", None, Some("FSDJump"), "{}");
+    let result = instance.call_on_event("journal", None, Some("FSDJump"), "{}", false);
     let elapsed = start.elapsed();
 
     assert!(
@@ -219,7 +219,7 @@ fn http_caller_on_event_does_not_trap_when_ungranted() {
 
     instance.call_init().expect("call_init should succeed");
     instance
-        .call_on_event("journal", None, Some("FSDJump"), "{}")
+        .call_on_event("journal", None, Some("FSDJump"), "{}", false)
         .expect("on-event should not trap when the capability is ungranted");
 }
 
@@ -245,7 +245,7 @@ fn http_caller_on_event_does_not_trap_when_granted_for_allowed_host() {
 
     instance.call_init().expect("call_init should succeed");
     instance
-        .call_on_event("journal", None, Some("FSDJump"), "{}")
+        .call_on_event("journal", None, Some("FSDJump"), "{}", false)
         .expect("on-event should not trap once permission checks pass");
 }
 
@@ -262,6 +262,6 @@ fn http_caller_on_event_does_not_trap_when_granted_for_other_host() {
 
     instance.call_init().expect("call_init should succeed");
     instance
-        .call_on_event("journal", None, Some("FSDJump"), "{}")
+        .call_on_event("journal", None, Some("FSDJump"), "{}", false)
         .expect("on-event should not trap when granted for an unrelated host");
 }

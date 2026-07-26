@@ -207,6 +207,7 @@ fn journal(name: &str) -> Event {
         timestamp: "2026-07-26T12:00:00Z".into(),
         event: name.into(),
         raw: serde_json::json!({"timestamp": "2026-07-26T12:00:00Z", "event": name}),
+        replay: false,
     }
 }
 
