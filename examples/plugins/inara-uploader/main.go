@@ -6,13 +6,13 @@
 //     そのため送信は「イベントを受け取ったついでに」行う。最後のイベントから
 //     ゲーム終了までの間に溜まったぶんは、Journal の `Shutdown` イベントで
 //     まとめて送る。
-//   - プラグインには永続ストレージが無い(`host-settings` は読み取り専用)。
-//     そのため「どこまで送ったか」を再起動をまたいで覚えられない。デーモン
-//     再起動時に Journal を先頭から読み直す edlr の挙動と組み合わさると
-//     二重送信になるため、既定では**プラグイン起動時刻より古いイベントを
-//     送らない**(`uploadHistorical` で変更可)。
+//   - edlr は Journal の読み取り位置を永続化しており、デーモン再起動をまたいで
+//     続きから配信する。デーモンが動き出す前に既に書かれていたイベントには
+//     `event.replay` が立つが、重複配信は起きないので既定ではこれも送る
+//     (`uploadHistorical = false` にすると、デーモンが止まっていた間の
+//     イベントは送られない)。
 //
-// どちらも詳細は README.md の「不足している実装」を参照。
+// 詳細は README.md の「不足している実装」を参照。
 package main
 
 import (
@@ -23,6 +23,7 @@ import (
 	hostlog "github.com/himanoa/edlr/examples/plugins/inara-uploader/gen/edlr/plugin/host-log"
 	hostsettings "github.com/himanoa/edlr/examples/plugins/inara-uploader/gen/edlr/plugin/host-settings"
 	plugin "github.com/himanoa/edlr/examples/plugins/inara-uploader/gen/edlr/plugin/plugin"
+	settingspkg "github.com/himanoa/edlr/examples/plugins/inara-uploader/settings"
 )
 
 // appName / appVersion は INARA のヘッダに載せるクライアント識別子。
@@ -35,23 +36,14 @@ const (
 // 送信できないまま無制限にメモリを食うのを防ぐための保険。
 const maxQueued = 200
 
-// settings は manifest の `[[settings]]` に対応する。値は毎イベント
-// `host-settings.get-all` から読み直すので、UI での変更は次のイベントから効く。
-type settings struct {
-	Enabled          bool
-	APIKey           string
-	CommanderName    string
-	IsBeingDeveloped bool
-	BatchSize        int
-	MinIntervalSec   int
-	UploadHistorical bool
-	DryRun           bool
-}
+// settings の実体は `settings` パッケージにある。main は `//go:wasmimport` を
+// 含むため `go test` でリンクできず、設定の解釈だけを別パッケージへ出してある。
+type settings = settingspkg.Settings
 
 // state はプラグインのプロセス内状態。永続化はされない。
 type state struct {
-	// startedAt は init() が呼ばれた時刻。これより古い Journal イベントは
-	// 既定では「過去に送信済みのはず」として捨てる(README の replay 節)。
+	// startedAt は init() が呼ばれた時刻。ログ表示にのみ使う
+	// (replay の判定はホストから渡る event.replay を使う)。
 	startedAt time.Time
 
 	commanderName string
@@ -118,11 +110,11 @@ func onEvent(ev plugin.Event) {
 	// (リプレイ中の LoadGame からでも名前は学習してよい)。
 	learnIdentity(name, payload)
 
-	if !cfg.UploadHistorical && isReplay(timestamp, st.startedAt) {
+	if !cfg.UploadHistorical && ev.Replay {
 		st.skippedOld++
 		if st.skippedOld == 1 || st.skippedOld%100 == 0 {
 			logf(hostlog.LevelInfo,
-				"skipping %d journal event(s) older than plugin start (set uploadHistorical to send them)",
+				"skipping %d replayed journal event(s) (set uploadHistorical to send them)",
 				st.skippedOld)
 		}
 		return
@@ -218,23 +210,6 @@ func flush(cfg settings) {
 	logResult(result, len(batch))
 }
 
-// isReplay は、イベントのタイムスタンプがプラグイン起動より前かどうかを返す。
-//
-// edlr の Journal tailer はデーモン起動時に現行 Journal ファイルを先頭から
-// 読み直すため、この判定が無いと再起動のたびに同じイベントを INARA へ
-// 送ってしまう。パースできないタイムスタンプは「新しい」側に倒す
-// (送らないより送るほうがマシ、かつ握り潰しを避ける)。
-func isReplay(timestamp string, startedAt time.Time) bool {
-	if timestamp == "" {
-		return false
-	}
-	t, err := time.Parse(time.RFC3339, timestamp)
-	if err != nil {
-		return false
-	}
-	return t.Before(startedAt)
-}
-
 func learnIdentity(name string, payload map[string]any) {
 	switch name {
 	case "Commander", "LoadGame":
@@ -251,43 +226,7 @@ func learnIdentity(name string, payload map[string]any) {
 }
 
 func loadSettings() settings {
-	cfg := settings{
-		Enabled:          true,
-		IsBeingDeveloped: true,
-		BatchSize:        10,
-		MinIntervalSec:   60,
-	}
-
-	var raw map[string]any
-	if err := json.Unmarshal([]byte(hostsettings.GetAll()), &raw); err != nil {
-		return cfg
-	}
-
-	if v, ok := raw["enabled"].(bool); ok {
-		cfg.Enabled = v
-	}
-	if v, ok := raw["apiKey"].(string); ok {
-		cfg.APIKey = v
-	}
-	if v, ok := raw["commanderName"].(string); ok {
-		cfg.CommanderName = v
-	}
-	if v, ok := raw["isBeingDeveloped"].(bool); ok {
-		cfg.IsBeingDeveloped = v
-	}
-	if v, ok := raw["batchSize"].(float64); ok && v >= 1 {
-		cfg.BatchSize = int(v)
-	}
-	if v, ok := raw["minIntervalSeconds"].(float64); ok && v >= 0 {
-		cfg.MinIntervalSec = int(v)
-	}
-	if v, ok := raw["uploadHistorical"].(bool); ok {
-		cfg.UploadHistorical = v
-	}
-	if v, ok := raw["dryRun"].(bool); ok {
-		cfg.DryRun = v
-	}
-	return cfg
+	return settingspkg.Parse(hostsettings.GetAll())
 }
 
 func logf(level hostlog.Level, format string, args ...any) {

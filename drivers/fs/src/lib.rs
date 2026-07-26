@@ -400,7 +400,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let d = driver();
 
-        d.write(dir.path(), "notes/state.json", b"{\"seen\":1}").unwrap();
+        d.write(dir.path(), "notes/state.json", b"{\"seen\":1}")
+            .unwrap();
         let got = d.read(dir.path(), "notes/state.json").unwrap();
 
         assert_eq!(got, b"{\"seen\":1}");
@@ -444,7 +445,10 @@ mod tests {
 
         assert_eq!(d.read_range(dir.path(), "a.txt", 2, 3).unwrap(), b"234");
         assert_eq!(d.read_range(dir.path(), "a.txt", 8, 100).unwrap(), b"89");
-        assert!(d.read_range(dir.path(), "a.txt", 50, 10).unwrap().is_empty());
+        assert!(d
+            .read_range(dir.path(), "a.txt", 50, 10)
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
@@ -454,10 +458,14 @@ mod tests {
         d.write(dir.path(), "big.bin", &[7u8; 64]).unwrap();
 
         assert!(matches!(
-            d.read(dir.path(), "big.bin").expect_err("over the read limit"),
+            d.read(dir.path(), "big.bin")
+                .expect_err("over the read limit"),
             FsError::TooLarge(_)
         ));
-        assert_eq!(d.read_range(dir.path(), "big.bin", 0, 16).unwrap().len(), 16);
+        assert_eq!(
+            d.read_range(dir.path(), "big.bin", 0, 16).unwrap().len(),
+            16
+        );
         assert!(matches!(
             d.read_range(dir.path(), "big.bin", 0, 17)
                 .expect_err("range longer than the limit"),
@@ -728,7 +736,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let d = driver();
         for i in 0..WIDTH {
-            d.write(dir.path(), &format!("d{i:04}/x.txt"), b"x").unwrap();
+            d.write(dir.path(), &format!("d{i:04}/x.txt"), b"x")
+                .unwrap();
         }
 
         let baseline = open_fds();
@@ -815,7 +824,10 @@ mod tests {
         let result = rx
             .recv_timeout(std::time::Duration::from_secs(5))
             .expect("append to a FIFO must not block");
-        assert!(result.is_err(), "append to a FIFO must fail, got {result:?}");
+        assert!(
+            result.is_err(),
+            "append to a FIFO must fail, got {result:?}"
+        );
     }
 
     /// 走査予算は、1 ディレクトリを読み終えてからではなく**読みながら**

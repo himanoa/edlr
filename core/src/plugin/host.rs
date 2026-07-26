@@ -766,12 +766,14 @@ impl PluginInstance {
         timestamp: Option<&str>,
         name: Option<&str>,
         payload_json: &str,
+        replay: bool,
     ) -> anyhow::Result<()> {
         let event = WitEvent {
             kind: kind.to_string(),
             timestamp: timestamp.map(|s| s.to_string()),
             name: name.map(|s| s.to_string()),
             payload_json: payload_json.to_string(),
+            replay,
         };
         self.store
             .set_epoch_deadline(deadline_ticks(Self::CALL_DEADLINE));
@@ -834,7 +836,10 @@ mod tests {
     fn capabilities_json_string_carries_the_effective_hosts() {
         let json = capabilities_json_string(&["https://api.example.com".to_string()]);
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed["hosts"], serde_json::json!(["https://api.example.com"]));
+        assert_eq!(
+            parsed["hosts"],
+            serde_json::json!(["https://api.example.com"])
+        );
     }
 
     #[test]
@@ -849,7 +854,7 @@ mod tests {
     #[test]
     fn send_granted_but_disallowed_host_is_permission_denied() {
         let mut ctx = ctx(&capabilities_json_string(&[
-            "https://api.example.com".to_string(),
+            "https://api.example.com".to_string()
         ]));
 
         let err = ctx
@@ -916,7 +921,11 @@ mod tests {
         )
     }
 
-    fn fs_entry(granted: bool, mode: &str, path: &str) -> crate::plugin::fs_runtime::FsRuntimeEntry {
+    fn fs_entry(
+        granted: bool,
+        mode: &str,
+        path: &str,
+    ) -> crate::plugin::fs_runtime::FsRuntimeEntry {
         crate::plugin::fs_runtime::FsRuntimeEntry {
             name: "exports".to_string(),
             granted,
@@ -1010,7 +1019,8 @@ mod tests {
         ctx.write("exports".to_string(), "a.txt".to_string(), b"hi".to_vec())
             .expect("write");
         assert_eq!(
-            ctx.read("exports".to_string(), "a.txt".to_string()).unwrap(),
+            ctx.read("exports".to_string(), "a.txt".to_string())
+                .unwrap(),
             b"hi".to_vec()
         );
         assert!(matches!(
@@ -1020,7 +1030,10 @@ mod tests {
         ));
     }
 
-    fn runtime_entry(granted: bool, command: &str) -> crate::plugin::sidecar_runtime::SidecarRuntimeEntry {
+    fn runtime_entry(
+        granted: bool,
+        command: &str,
+    ) -> crate::plugin::sidecar_runtime::SidecarRuntimeEntry {
         crate::plugin::sidecar_runtime::SidecarRuntimeEntry {
             name: "tts".to_string(),
             granted,

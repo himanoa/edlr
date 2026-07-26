@@ -41,7 +41,9 @@ pub enum FilesystemConfigError {
 impl fmt::Display for FilesystemConfigError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            FilesystemConfigError::UnknownRoot(name) => write!(f, "unknown filesystem root: {name}"),
+            FilesystemConfigError::UnknownRoot(name) => {
+                write!(f, "unknown filesystem root: {name}")
+            }
             FilesystemConfigError::NotAbsolute(name) => {
                 write!(f, "filesystem root {name} must be an absolute path")
             }
@@ -49,7 +51,10 @@ impl fmt::Display for FilesystemConfigError {
                 write!(f, "filesystem root {name} must be an existing directory")
             }
             FilesystemConfigError::ProtectedDirectory(name) => {
-                write!(f, "filesystem root {name} may not point at a protected directory")
+                write!(
+                    f,
+                    "filesystem root {name} may not point at a protected directory"
+                )
             }
             FilesystemConfigError::Io(e) => write!(f, "failed to write filesystem config: {e}"),
             FilesystemConfigError::Serialize(e) => {
@@ -165,10 +170,13 @@ impl FilesystemConfigStore {
             .filesystem
             .iter()
             .map(|request| {
-                let config = saved
-                    .get(&request.name)
-                    .cloned()
-                    .unwrap_or_else(|| FilesystemConfig { path: String::new() });
+                let config =
+                    saved
+                        .get(&request.name)
+                        .cloned()
+                        .unwrap_or_else(|| FilesystemConfig {
+                            path: String::new(),
+                        });
                 let config = match self.validate_path(&request.name, &config.path) {
                     Ok(()) => config,
                     Err(e) => {
@@ -179,7 +187,9 @@ impl FilesystemConfigStore {
                             "stored filesystem directory is no longer acceptable ({e}); \
                              treating it as unset"
                         );
-                        FilesystemConfig { path: String::new() }
+                        FilesystemConfig {
+                            path: String::new(),
+                        }
                     }
                 };
                 (request.name.clone(), config)
@@ -257,7 +267,9 @@ fn best_effort_absolute(path: &std::path::Path) -> PathBuf {
     let mut remainder = Vec::new();
     let mut current = path;
     while let Some(parent) = current.parent() {
-        let Some(name) = current.file_name() else { break };
+        let Some(name) = current.file_name() else {
+            break;
+        };
         remainder.push(name.to_os_string());
         if let Ok(canonical) = parent.canonicalize() {
             let mut resolved = canonical;
@@ -277,7 +289,10 @@ fn is_system_protected(canonical: &std::path::Path) -> bool {
         "/", "/home", "/etc", "/usr", "/var", "/boot", "/dev", "/proc", "/sys", "/root", "/bin",
         "/sbin", "/lib",
     ];
-    if PROTECTED.iter().any(|p| canonical == std::path::Path::new(p)) {
+    if PROTECTED
+        .iter()
+        .any(|p| canonical == std::path::Path::new(p))
+    {
         return true;
     }
     // ユーザーのホームディレクトリ「そのもの」も拒否する。`canonicalize()` 済み
@@ -392,7 +407,9 @@ mod tests {
                 .update_and_effective(
                     &manifest,
                     "exports",
-                    &FilesystemConfig { path: path.to_string() },
+                    &FilesystemConfig {
+                        path: path.to_string(),
+                    },
                 )
                 .expect_err("a protected directory must be rejected");
             assert!(
@@ -414,17 +431,24 @@ mod tests {
             .update_and_effective(
                 &manifest,
                 "exports",
-                &FilesystemConfig { path: target.to_string_lossy().to_string() },
+                &FilesystemConfig {
+                    path: target.to_string_lossy().to_string(),
+                },
             )
             .unwrap();
 
         let _ = store.update_and_effective(
             &manifest,
             "exports",
-            &FilesystemConfig { path: "/etc".to_string() },
+            &FilesystemConfig {
+                path: "/etc".to_string(),
+            },
         );
 
-        assert_eq!(store.effective(&manifest)["exports"].path, target.to_string_lossy());
+        assert_eq!(
+            store.effective(&manifest)["exports"].path,
+            target.to_string_lossy()
+        );
     }
 
     #[test]
@@ -439,7 +463,13 @@ mod tests {
         assert_eq!(store.effective(&manifest)["exports"].path, "");
         assert!(matches!(
             store
-                .update_and_effective(&manifest, "nope", &FilesystemConfig { path: "/tmp".into() })
+                .update_and_effective(
+                    &manifest,
+                    "nope",
+                    &FilesystemConfig {
+                        path: "/tmp".into()
+                    }
+                )
                 .expect_err("unknown root"),
             FilesystemConfigError::UnknownRoot(_)
         ));
@@ -467,10 +497,8 @@ mod tests {
         for dir in [&settings, &grants, &plugins] {
             std::fs::create_dir_all(dir).unwrap();
         }
-        let store = FilesystemConfigStore::new(
-            settings.clone(),
-            vec![grants.clone(), plugins.clone()],
-        );
+        let store =
+            FilesystemConfigStore::new(settings.clone(), vec![grants.clone(), plugins.clone()]);
         let manifest = manifest_with(vec![request("exports")]);
 
         for path in [
@@ -521,10 +549,7 @@ mod tests {
         let grants = tmp.path().join("state").join("grants");
         let existing_parent = tmp.path().join("state");
         std::fs::create_dir(&existing_parent).unwrap();
-        let store = FilesystemConfigStore::new(
-            tmp.path().join("settings"),
-            vec![grants.clone()],
-        );
+        let store = FilesystemConfigStore::new(tmp.path().join("settings"), vec![grants.clone()]);
         let manifest = manifest_with(vec![request("exports")]);
 
         // `grants` 自体はまだ無いので、その祖先(存在する)を選んで昇格を狙う。
@@ -553,17 +578,16 @@ mod tests {
     #[test]
     fn a_relative_state_directory_path_is_still_protected() {
         let cwd = std::env::current_dir().unwrap();
-        let relative_root = PathBuf::from(format!("edlr-fs-protection-test-{}", std::process::id()));
+        let relative_root =
+            PathBuf::from(format!("edlr-fs-protection-test-{}", std::process::id()));
         let relative_grants = relative_root.join("grants");
         let absolute_grants = cwd.join(&relative_grants);
         // ストア構築時点では、祖先も含めて 1 つも存在しない。
         assert!(!cwd.join(&relative_root).exists());
 
         let tmp = tempfile::tempdir().unwrap();
-        let store = FilesystemConfigStore::new(
-            tmp.path().join("settings"),
-            vec![relative_grants.clone()],
-        );
+        let store =
+            FilesystemConfigStore::new(tmp.path().join("settings"), vec![relative_grants.clone()]);
         let manifest = manifest_with(vec![request("exports")]);
 
         // 起動後にディレクトリができてから、ユーザーがそれを選ぶ。
@@ -631,7 +655,9 @@ mod tests {
             .update_and_effective(
                 &manifest,
                 "exports",
-                &FilesystemConfig { path: "/etc/".to_string() },
+                &FilesystemConfig {
+                    path: "/etc/".to_string(),
+                },
             )
             .expect_err("/etc/ must be rejected just like /etc");
         assert!(matches!(err, FilesystemConfigError::ProtectedDirectory(_)));
@@ -647,7 +673,9 @@ mod tests {
             .update_and_effective(
                 &manifest,
                 "exports",
-                &FilesystemConfig { path: "/etc/../etc".to_string() },
+                &FilesystemConfig {
+                    path: "/etc/../etc".to_string(),
+                },
             )
             .expect_err("/etc/../etc must canonicalize to /etc and be rejected");
         assert!(matches!(err, FilesystemConfigError::ProtectedDirectory(_)));
@@ -665,7 +693,9 @@ mod tests {
             .update_and_effective(
                 &manifest,
                 "exports",
-                &FilesystemConfig { path: link.to_string_lossy().to_string() },
+                &FilesystemConfig {
+                    path: link.to_string_lossy().to_string(),
+                },
             )
             .expect_err("a symlink resolving to /etc must be rejected");
         assert!(matches!(err, FilesystemConfigError::ProtectedDirectory(_)));

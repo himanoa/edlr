@@ -14,8 +14,12 @@ use crate::plugin::grants::{GrantState, GrantsError, GrantsStore};
 use crate::plugin::host::{capabilities_json_string, parse_capability_hosts, PluginHost};
 use crate::plugin::settings::SettingsStore;
 use crate::plugin::sidecar::{assign_ports, SidecarConfig, SidecarConfigError, SidecarConfigStore};
-use crate::plugin::sidecar_runtime::{implicit_http_hosts, sidecars_json_string, SidecarRuntimeEntry};
-use crate::plugin::{CapabilityRequest, FilesystemRequest, Manifest, SettingsError, SidecarRequest};
+use crate::plugin::sidecar_runtime::{
+    implicit_http_hosts, sidecars_json_string, SidecarRuntimeEntry,
+};
+use crate::plugin::{
+    CapabilityRequest, FilesystemRequest, Manifest, SettingsError, SidecarRequest,
+};
 
 /// プラグイン 1 件の現在の駆動状態。
 #[derive(Debug, Clone, PartialEq)]
@@ -319,7 +323,8 @@ impl Registry {
                     .cloned()
                     .unwrap_or_else(|| SidecarConfig::from_request(request));
                 let grant = self.grants_store.sidecar_state(manifest, &request.name);
-                self.sidecar_info_and_entry(manifest, request, config, grant).0
+                self.sidecar_info_and_entry(manifest, request, config, grant)
+                    .0
             })
             .collect()
     }
@@ -372,12 +377,13 @@ impl Registry {
             .filesystem
             .iter()
             .map(|request| {
-                let config = configs
-                    .get(&request.name)
-                    .cloned()
-                    .unwrap_or_else(|| FilesystemConfig {
-                        path: String::new(),
-                    });
+                let config =
+                    configs
+                        .get(&request.name)
+                        .cloned()
+                        .unwrap_or_else(|| FilesystemConfig {
+                            path: String::new(),
+                        });
                 let grant = self.grants_store.filesystem_state(manifest, &request.name);
                 FilesystemInfo {
                     request: request.clone(),
@@ -561,13 +567,14 @@ impl Registry {
         } else {
             Vec::new()
         };
-        let sidecar_entries: Vec<SidecarRuntimeEntry> = crate::plugin::sidecar_runtime::parse_sidecars(
-            &sidecars_json
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner()),
-        )
-        .into_values()
-        .collect();
+        let sidecar_entries: Vec<SidecarRuntimeEntry> =
+            crate::plugin::sidecar_runtime::parse_sidecars(
+                &sidecars_json
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner()),
+            )
+            .into_values()
+            .collect();
         effective_hosts.extend(implicit_http_hosts(&sidecar_entries));
 
         let capabilities_json_string = capabilities_json_string(&effective_hosts);
@@ -850,7 +857,9 @@ impl Registry {
         };
 
         let runtime_lock = self.sidecar_runtime_lock_for(id);
-        let _runtime_guard = runtime_lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _runtime_guard = runtime_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
 
         for name in stop_names {
             let key = Self::sidecar_key(&manifest.id, name);
@@ -890,7 +899,8 @@ impl Registry {
             hosts.extend(implicit_http_hosts(&runtime_entries));
             *capabilities_json
                 .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner()) = capabilities_json_string(&hosts);
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+                capabilities_json_string(&hosts);
         }
 
         Ok(infos)
@@ -1041,9 +1051,7 @@ impl Registry {
                 // される(無効化される前の "running" を信じて spawn する
                 // ことはない)。
                 if self.is_disabled(id) {
-                    return Err(RegistryError::Sidecar(format!(
-                        "plugin {id} is disabled"
-                    )));
+                    return Err(RegistryError::Sidecar(format!("plugin {id} is disabled")));
                 }
 
                 if action == SidecarAction::Restart {
@@ -1145,15 +1153,18 @@ impl Registry {
                 .entries
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            guard.iter_mut().find(|entry| entry.manifest.id == id).map(|entry| {
-                entry.state = PluginState::Disabled { reason };
-                entry
-                    .manifest
-                    .sidecars
-                    .iter()
-                    .map(|s| s.name.clone())
-                    .collect()
-            })
+            guard
+                .iter_mut()
+                .find(|entry| entry.manifest.id == id)
+                .map(|entry| {
+                    entry.state = PluginState::Disabled { reason };
+                    entry
+                        .manifest
+                        .sidecars
+                        .iter()
+                        .map(|s| s.name.clone())
+                        .collect()
+                })
         };
 
         let Some(names) = sidecar_names else {
@@ -1191,8 +1202,10 @@ mod tests {
         let settings_store = Arc::new(SettingsStore::new(tmp.path().join("settings")));
         let grants_store = Arc::new(GrantsStore::new(tmp.path().join("grants")));
         let sidecar_config_store = Arc::new(SidecarConfigStore::new(tmp.path().join("settings")));
-        let filesystem_config_store =
-            Arc::new(FilesystemConfigStore::new(tmp.path().join("settings"), Vec::new()));
+        let filesystem_config_store = Arc::new(FilesystemConfigStore::new(
+            tmp.path().join("settings"),
+            Vec::new(),
+        ));
         let process_driver = Arc::new(ProcessDriver::new(
             Duration::from_millis(200),
             Duration::from_millis(0),
@@ -1302,9 +1315,9 @@ mod tests {
             manifest,
             state: PluginState::Running,
             settings_json: Arc::new(Mutex::new("{}".to_string())),
-            capabilities_json: Arc::new(Mutex::new(
-                crate::plugin::host::capabilities_json_string(&[]),
-            )),
+            capabilities_json: Arc::new(Mutex::new(crate::plugin::host::capabilities_json_string(
+                &[],
+            ))),
             sidecars_json: Arc::new(Mutex::new("[]".to_string())),
             filesystem_json: filesystem_json.clone(),
         });
@@ -1323,9 +1336,8 @@ mod tests {
         registry
             .set_filesystem_grant("fs-plugin", "exports", true)
             .expect("granting should succeed");
-        let granted = crate::plugin::fs_runtime::parse_filesystem(
-            &filesystem_json.lock().unwrap().clone(),
-        );
+        let granted =
+            crate::plugin::fs_runtime::parse_filesystem(&filesystem_json.lock().unwrap().clone());
         assert!(granted["exports"].granted);
         assert!(!granted["exports"].path.is_empty());
 
@@ -1350,9 +1362,8 @@ mod tests {
         result.expect("revoking should succeed");
         revoker.join().expect("revoker thread should not panic");
 
-        let revoked = crate::plugin::fs_runtime::parse_filesystem(
-            &filesystem_json.lock().unwrap().clone(),
-        );
+        let revoked =
+            crate::plugin::fs_runtime::parse_filesystem(&filesystem_json.lock().unwrap().clone());
         assert!(!revoked["exports"].granted);
         assert_eq!(
             revoked["exports"].path, "",
@@ -1397,9 +1408,9 @@ mod tests {
             manifest: manifest.clone(),
             state: PluginState::Running,
             settings_json: Arc::new(Mutex::new("{}".to_string())),
-            capabilities_json: Arc::new(Mutex::new(
-                crate::plugin::host::capabilities_json_string(&[]),
-            )),
+            capabilities_json: Arc::new(Mutex::new(crate::plugin::host::capabilities_json_string(
+                &[],
+            ))),
             sidecars_json: Arc::new(Mutex::new("[]".to_string())),
             filesystem_json: Arc::new(Mutex::new("[]".to_string())),
         });
@@ -1452,9 +1463,9 @@ mod tests {
             manifest: manifest.clone(),
             state: PluginState::Running,
             settings_json: Arc::new(Mutex::new("{}".to_string())),
-            capabilities_json: Arc::new(Mutex::new(
-                crate::plugin::host::capabilities_json_string(&[]),
-            )),
+            capabilities_json: Arc::new(Mutex::new(crate::plugin::host::capabilities_json_string(
+                &[],
+            ))),
             sidecars_json: Arc::new(Mutex::new("[]".to_string())),
             filesystem_json: Arc::new(Mutex::new("[]".to_string())),
         });
@@ -1481,12 +1492,16 @@ mod tests {
         let start_result = registry.control_sidecar("sc-plugin", "tts", SidecarAction::Start);
         match start_result {
             Err(RegistryError::Sidecar(_)) => {}
-            _ => panic!("Start on a disabled plugin's sidecar must be rejected as RegistryError::Sidecar"),
+            _ => panic!(
+                "Start on a disabled plugin's sidecar must be rejected as RegistryError::Sidecar"
+            ),
         }
         let restart_result = registry.control_sidecar("sc-plugin", "tts", SidecarAction::Restart);
         match restart_result {
             Err(RegistryError::Sidecar(_)) => {}
-            _ => panic!("Restart on a disabled plugin's sidecar must be rejected as RegistryError::Sidecar"),
+            _ => panic!(
+                "Restart on a disabled plugin's sidecar must be rejected as RegistryError::Sidecar"
+            ),
         }
 
         let key = Registry::sidecar_key("sc-plugin", "tts");
@@ -1533,9 +1548,9 @@ mod tests {
             manifest: manifest.clone(),
             state: PluginState::Running,
             settings_json: Arc::new(Mutex::new("{}".to_string())),
-            capabilities_json: Arc::new(Mutex::new(
-                crate::plugin::host::capabilities_json_string(&[]),
-            )),
+            capabilities_json: Arc::new(Mutex::new(crate::plugin::host::capabilities_json_string(
+                &[],
+            ))),
             sidecars_json: Arc::new(Mutex::new("[]".to_string())),
             filesystem_json: Arc::new(Mutex::new("[]".to_string())),
         });
@@ -1593,7 +1608,10 @@ mod tests {
         }
         revoker.join().expect("revoker thread should not panic");
 
-        let disk_granted = registry.grants_store.sidecar_state(&manifest, "tts").granted;
+        let disk_granted = registry
+            .grants_store
+            .sidecar_state(&manifest, "tts")
+            .granted;
         let key = Registry::sidecar_key("sc-plugin", "tts");
         let running = registry
             .process_driver
@@ -1633,9 +1651,9 @@ mod tests {
             manifest: manifest.clone(),
             state: PluginState::Running,
             settings_json: Arc::new(Mutex::new("{}".to_string())),
-            capabilities_json: Arc::new(Mutex::new(
-                crate::plugin::host::capabilities_json_string(&[]),
-            )),
+            capabilities_json: Arc::new(Mutex::new(crate::plugin::host::capabilities_json_string(
+                &[],
+            ))),
             sidecars_json: Arc::new(Mutex::new("[]".to_string())),
             filesystem_json: Arc::new(Mutex::new("[]".to_string())),
         });
@@ -1643,10 +1661,15 @@ mod tests {
         let result = registry.set_sidecar_grant("sc-plugin", "tts", true);
         match result {
             Err(RegistryError::Sidecar(_)) => {}
-            _ => panic!("granting with no command configured must be rejected as RegistryError::Sidecar"),
+            _ => panic!(
+                "granting with no command configured must be rejected as RegistryError::Sidecar"
+            ),
         }
         assert!(
-            !registry.grants_store.sidecar_state(&manifest, "tts").granted,
+            !registry
+                .grants_store
+                .sidecar_state(&manifest, "tts")
+                .granted,
             "a rejected grant must not be persisted"
         );
 
@@ -1674,7 +1697,12 @@ mod tests {
         registry
             .set_sidecar_grant("sc-plugin", "tts", true)
             .expect("granting with a configured command must succeed");
-        assert!(registry.grants_store.sidecar_state(&manifest, "tts").granted);
+        assert!(
+            registry
+                .grants_store
+                .sidecar_state(&manifest, "tts")
+                .granted
+        );
     }
 
     fn manifest_with_http_capability(id: &str) -> Manifest {
@@ -1762,8 +1790,10 @@ mod tests {
         let settings_store = Arc::new(SettingsStore::new(tmp.path().join("settings")));
         let grants_store = Arc::new(GrantsStore::new(tmp.path().join("grants")));
         let sidecar_config_store = Arc::new(SidecarConfigStore::new(tmp.path().join("settings")));
-        let filesystem_config_store =
-            Arc::new(FilesystemConfigStore::new(tmp.path().join("settings"), Vec::new()));
+        let filesystem_config_store = Arc::new(FilesystemConfigStore::new(
+            tmp.path().join("settings"),
+            Vec::new(),
+        ));
         let process_driver = Arc::new(ProcessDriver::new(
             Duration::from_millis(200),
             Duration::from_millis(0),

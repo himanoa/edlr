@@ -196,7 +196,10 @@ mod tests {
 
     #[test]
     fn plain_relative_paths_are_accepted() {
-        assert_eq!(validate_relative("a.txt").unwrap(), vec!["a.txt".to_string()]);
+        assert_eq!(
+            validate_relative("a.txt").unwrap(),
+            vec!["a.txt".to_string()]
+        );
         assert_eq!(
             validate_relative("logs/2026-07.csv").unwrap(),
             vec!["logs".to_string(), "2026-07.csv".to_string()]
@@ -206,17 +209,17 @@ mod tests {
     #[test]
     fn syntactically_dangerous_paths_are_rejected() {
         for bad in [
-            "",                 // 空
-            "/etc/passwd",      // 絶対パス
-            "../secret",        // 親へ
-            "a/../../secret",   // 途中で親へ
-            "./a",              // カレント
-            "a/./b",            // 途中にカレント
-            "a//b",             // 空要素
-            "a/",               // 末尾スラッシュ
-            "a\\b",             // バックスラッシュ
-            "a\0b",             // NUL
-            "a\nb",             // 制御文字
+            "",               // 空
+            "/etc/passwd",    // 絶対パス
+            "../secret",      // 親へ
+            "a/../../secret", // 途中で親へ
+            "./a",            // カレント
+            "a/./b",          // 途中にカレント
+            "a//b",           // 空要素
+            "a/",             // 末尾スラッシュ
+            "a\\b",           // バックスラッシュ
+            "a\0b",           // NUL
+            "a\nb",           // 制御文字
         ] {
             assert!(
                 validate_relative(bad).is_err(),
@@ -354,11 +357,8 @@ mod tests {
         let dir = root();
         fs::create_dir(dir.path().join("sub")).unwrap();
         fs::write(dir.path().join("sub").join("target.txt"), b"hi").unwrap();
-        std::os::unix::fs::symlink(
-            Path::new("sub/target.txt"),
-            dir.path().join("link.txt"),
-        )
-        .unwrap();
+        std::os::unix::fs::symlink(Path::new("sub/target.txt"), dir.path().join("link.txt"))
+            .unwrap();
 
         let resolved = resolve_existing(dir.path(), "link.txt")
             .expect("a symlink that stays inside the root must resolve, not be rejected");
@@ -395,16 +395,16 @@ mod tests {
 
         let err = resolve_existing(dir.path(), &long_name)
             .expect_err("an overlong path component must not resolve successfully");
-        assert!(matches!(err, FsError::NotFound(_) | FsError::InvalidPath(_) | FsError::Io(_)));
+        assert!(matches!(
+            err,
+            FsError::NotFound(_) | FsError::InvalidPath(_) | FsError::Io(_)
+        ));
     }
 
     /// 末尾のドット(`"a."`)は `.` コンポーネントそのものではないので、
     /// 普通のファイル名として構文検証を通るべき(過剰に弾かない)。
     #[test]
     fn trailing_dot_in_a_filename_is_a_plain_component_not_a_dot_component() {
-        assert_eq!(
-            validate_relative("a.").unwrap(),
-            vec!["a.".to_string()]
-        );
+        assert_eq!(validate_relative("a.").unwrap(), vec!["a.".to_string()]);
     }
 }

@@ -25,9 +25,10 @@ pub fn event_to_ws_json(event: &Event) -> String {
             timestamp,
             event,
             raw,
+            replay,
         } => serde_json::json!({
             "type": "event", "kind": "journal",
-            "timestamp": timestamp, "event": event, "raw": raw,
+            "timestamp": timestamp, "event": event, "raw": raw, "replay": replay,
         })
         .to_string(),
         Event::Status { raw } => {
@@ -122,8 +123,7 @@ pub fn handle_rpc(
                         ),
                     });
                     value["sidecars"] = sidecars_result_json(&info.sidecars)["sidecars"].clone();
-                    value["filesystem"] =
-                        filesystem_result_json(&info.filesystem)["roots"].clone();
+                    value["filesystem"] = filesystem_result_json(&info.filesystem)["roots"].clone();
                     match info.state {
                         crate::plugin::PluginState::Running => {
                             value["state"] = serde_json::json!("running");
@@ -480,6 +480,33 @@ async fn handle_client_message(state: &ServerState, text: &str) -> Option<String
         }
     };
     Some(response.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ws_json_carries_replay_for_journal_events_and_never_for_status() {
+        let journal = Event::Journal {
+            timestamp: "2026-07-27T12:00:00Z".into(),
+            event: "FSDJump".into(),
+            raw: serde_json::json!({"event": "FSDJump"}),
+            replay: true,
+        };
+        let parsed: serde_json::Value = serde_json::from_str(&event_to_ws_json(&journal)).unwrap();
+        assert_eq!(parsed["replay"], serde_json::json!(true));
+
+        let status = Event::Status {
+            raw: serde_json::json!({"Flags": 1}),
+        };
+        let parsed: serde_json::Value = serde_json::from_str(&event_to_ws_json(&status)).unwrap();
+        assert_eq!(
+            parsed.get("replay"),
+            None,
+            "status is a snapshot of the present; it has no replay notion"
+        );
+    }
 }
 
 #[cfg(test)]

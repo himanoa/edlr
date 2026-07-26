@@ -332,9 +332,11 @@ impl ProcessDriver {
                 // 丸ごと作り直していたら、そこの `terminating` は初期値の
                 // `false` に戻っているので一致せず、書き戻しをスキップする
                 // (別物のインスタンスを誤って更新しない)。
-                if let Some(instance) = group.instances.iter_mut().find(|i| {
-                    i.index == taken.index && i.port == taken.port && i.terminating
-                }) {
+                if let Some(instance) = group
+                    .instances
+                    .iter_mut()
+                    .find(|i| i.index == taken.index && i.port == taken.port && i.terminating)
+                {
                     instance.exit_code = exit_code;
                     instance.terminating = false;
                 }
@@ -614,7 +616,9 @@ mod tests {
             ports: vec![50100],
         };
 
-        driver.ensure_started("p/quick", &spec).expect("first start");
+        driver
+            .ensure_started("p/quick", &spec)
+            .expect("first start");
         // 終了を待ってから再度 ensure_started する。
         std::thread::sleep(Duration::from_millis(200));
 
@@ -852,7 +856,10 @@ mod tests {
             std::env::temp_dir().join(format!("edlr-stop-detached-test-{}", std::process::id()));
         let _ = std::fs::remove_file(&tmp);
 
-        let driver = Arc::new(ProcessDriver::new(Duration::from_secs(2), Duration::from_millis(0)));
+        let driver = Arc::new(ProcessDriver::new(
+            Duration::from_secs(2),
+            Duration::from_millis(0),
+        ));
         let stubborn_spec = ProcessSpec {
             command: PathBuf::from("/bin/sh"),
             args: vec![
@@ -975,7 +982,10 @@ mod tests {
             std::env::temp_dir().join(format!("edlr-stop-all-race-test-{}", std::process::id()));
         let _ = std::fs::remove_file(&tmp);
 
-        let driver = Arc::new(ProcessDriver::new(Duration::from_secs(2), Duration::from_millis(0)));
+        let driver = Arc::new(ProcessDriver::new(
+            Duration::from_secs(2),
+            Duration::from_millis(0),
+        ));
         let stubborn_spec = ProcessSpec {
             command: PathBuf::from("/bin/sh"),
             args: vec![

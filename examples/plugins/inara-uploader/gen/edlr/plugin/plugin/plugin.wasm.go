@@ -2,7 +2,7 @@
 
 package plugin
 
-// This file contains wasmimport and wasmexport declarations for "edlr:plugin@0.1.0".
+// This file contains wasmimport and wasmexport declarations for "edlr:plugin@0.2.0".
 
 //go:wasmexport init
 //export init
@@ -13,8 +13,8 @@ func wasmexport_Init() {
 
 //go:wasmexport on-event
 //export on-event
-func wasmexport_OnEvent(ev0 *uint8, ev1 uint32, ev2 uint32, ev3 *uint8, ev4 uint32, ev5 uint32, ev6 *uint8, ev7 uint32, ev8 *uint8, ev9 uint32) {
-	ev := lift_Event((*uint8)(ev0), (uint32)(ev1), (uint32)(ev2), (*uint8)(ev3), (uint32)(ev4), (uint32)(ev5), (*uint8)(ev6), (uint32)(ev7), (*uint8)(ev8), (uint32)(ev9))
+func wasmexport_OnEvent(ev0 *uint8, ev1 uint32, ev2 uint32, ev3 *uint8, ev4 uint32, ev5 uint32, ev6 *uint8, ev7 uint32, ev8 *uint8, ev9 uint32, ev10 uint32) {
+	ev := lift_Event((*uint8)(ev0), (uint32)(ev1), (uint32)(ev2), (*uint8)(ev3), (uint32)(ev4), (uint32)(ev5), (*uint8)(ev6), (uint32)(ev7), (*uint8)(ev8), (uint32)(ev9), (uint32)(ev10))
 	Exports.OnEvent(ev)
 	return
 }

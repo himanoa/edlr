@@ -794,6 +794,7 @@ default = "x"
             timestamp: "2026-07-25T00:00:00Z".into(),
             event: name.into(),
             raw: serde_json::json!({}),
+            replay: false,
         }
     }
 

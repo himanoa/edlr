@@ -2,8 +2,8 @@
 
 package hostlog
 
-// This file contains wasmimport and wasmexport declarations for "edlr:plugin@0.1.0".
+// This file contains wasmimport and wasmexport declarations for "edlr:plugin@0.2.0".
 
-//go:wasmimport edlr:plugin/host-log@0.1.0 log
+//go:wasmimport edlr:plugin/host-log@0.2.0 log
 //go:noescape
 func wasmimport_Log(level0 uint32, message0 *uint8, message1 uint32)

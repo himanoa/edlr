@@ -74,7 +74,8 @@ fn hello_logger_registry() -> (tempfile::TempDir, Registry) {
     let settings_store = SettingsStore::new(tmp.path().join("settings"));
     let grants_store = GrantsStore::new(tmp.path().join("grants"));
     let sidecar_config_store = SidecarConfigStore::new(tmp.path().join("settings"));
-    let filesystem_config_store = FilesystemConfigStore::new(tmp.path().join("settings"), Vec::new());
+    let filesystem_config_store =
+        FilesystemConfigStore::new(tmp.path().join("settings"), Vec::new());
     let router = Router::new(16);
     let host = PluginHost::new().expect("host should start");
 
@@ -141,7 +142,8 @@ fn http_caller_registry() -> (tempfile::TempDir, Registry) {
     let settings_store = SettingsStore::new(tmp.path().join("settings"));
     let grants_store = GrantsStore::new(tmp.path().join("grants"));
     let sidecar_config_store = SidecarConfigStore::new(tmp.path().join("settings"));
-    let filesystem_config_store = FilesystemConfigStore::new(tmp.path().join("settings"), Vec::new());
+    let filesystem_config_store =
+        FilesystemConfigStore::new(tmp.path().join("settings"), Vec::new());
     let router = Router::new(16);
     let host = PluginHost::new().expect("host should start");
 
@@ -207,6 +209,7 @@ fn journal(name: &str) -> Event {
         timestamp: "2026-07-26T12:00:00Z".into(),
         event: name.into(),
         raw: serde_json::json!({"timestamp": "2026-07-26T12:00:00Z", "event": name}),
+        replay: false,
     }
 }
 
@@ -708,10 +711,7 @@ async fn sidecar_rpc_round_trip() {
         )
         .await
         .expect("set-sidecar-grant should succeed");
-    assert_eq!(
-        granted["sidecars"][0]["granted"],
-        serde_json::json!(true)
-    );
+    assert_eq!(granted["sidecars"][0]["granted"], serde_json::json!(true));
 
     let started = env
         .call(

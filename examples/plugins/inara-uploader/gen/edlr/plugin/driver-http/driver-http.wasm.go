@@ -6,8 +6,8 @@ import (
 	"go.bytecodealliance.org/cm"
 )
 
-// This file contains wasmimport and wasmexport declarations for "edlr:plugin@0.1.0".
+// This file contains wasmimport and wasmexport declarations for "edlr:plugin@0.2.0".
 
-//go:wasmimport edlr:plugin/driver-http@0.1.0 send
+//go:wasmimport edlr:plugin/driver-http@0.2.0 send
 //go:noescape
 func wasmimport_Send(req0 *uint8, req1 uint32, req2 *uint8, req3 uint32, req4 *[2]string, req5 uint32, req6 uint32, req7 *uint8, req8 uint32, result *cm.Result[ResponseShape, Response, DriverError])

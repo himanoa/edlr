@@ -1,6 +1,15 @@
 use super::discovery::{latest_journal, next_journal_after};
+use super::position::Position;
 use std::io::{self, Read, Seek, SeekFrom};
 use std::path::PathBuf;
+
+/// tail で読み取った 1 行と、その行がデーモン起動前に既に書かれていたか。
+#[derive(Debug, Clone, PartialEq)]
+pub struct JournalLine {
+    pub text: String,
+    /// デーモンが動き出す前に既にファイルへ書かれていた行。
+    pub replay: bool,
+}
 
 /// Journal ディレクトリを tail する。position 追跡により読み取りは冪等。
 pub struct JournalTailer {
@@ -8,22 +17,77 @@ pub struct JournalTailer {
     current: Option<PathBuf>,
     pos: u64,
     partial: String,
+    /// 最初の poll を終えたか。起動直後の 1 回目で読み切った分までを
+    /// `replay` とし、それ以降の追記を live とするための境界。
+    caught_up: bool,
 }
 
 impl JournalTailer {
     pub fn new(dir: PathBuf) -> Self {
+        Self::resume_from(dir, None)
+    }
+
+    /// 保存された `Position` から読み始める。`position` が `None` なら
+    /// 最新の Journal を先頭から読む(従来の `new` と同じ挙動)。
+    ///
+    /// ここではファイルの存在確認をしない。指すファイルが既に消えている
+    /// 場合の復旧(次のファイルへ進む、無ければ最新へフォールバック)は
+    /// `poll` のローテーション処理に任せる。
+    pub fn resume_from(dir: PathBuf, position: Option<Position>) -> Self {
+        let (current, pos) = match position {
+            Some(p) => (Some(dir.join(&p.file)), p.offset),
+            None => (None, 0),
+        };
         Self {
             dir,
-            current: None,
-            pos: 0,
+            current,
+            pos,
             partial: String::new(),
+            caught_up: false,
         }
+    }
+
+    /// 保存すべき位置(最後の完全な行の直後)。まだ何も読んでいなければ `None`。
+    ///
+    /// `pos` は読み込んだバイト数ぶん進んでおり、行の途中で切れた分は
+    /// `partial` にメモリ上で保持している。`pos` をそのまま保存すると、
+    /// 再起動時に `partial` が失われ、その行が頭を欠いた状態で読まれて
+    /// しまう(パーサが警告して捨てる = イベントが 1 つ消える)。
+    pub fn position(&self) -> Option<Position> {
+        let current = self.current.as_ref()?;
+        let file = current.file_name()?.to_str()?.to_string();
+        Some(Position {
+            file,
+            offset: self.pos - self.partial.len() as u64,
+        })
     }
 
     /// 追記された完全な行を返す。新しい Journal が現れたら旧ファイルを読み切って切り替える。
     /// 複数回転がある場合は順番に全ファイルを読む。
-    pub fn poll(&mut self) -> io::Result<Vec<String>> {
+    pub fn poll(&mut self) -> io::Result<Vec<JournalLine>> {
         let mut lines = Vec::new();
+
+        // 現在のファイルが既に無くなっている場合、次のファイルへ進む。
+        //
+        // 次が無いときのフォールバック(最新ファイル)は、それが**消えたファイル
+        // より厳密に新しいときだけ**採る。より古いファイルへ巻き戻すと、そこから
+        // ローテーションのループが前へ歩いてディレクトリ全体を先頭から読み直し、
+        // しかも `caught_up` が既に true なので全てが `replay = false`(= 今
+        // 起きたイベント)として再配信されてしまう。新しいファイルが現れるまでは
+        // 現在位置を据え置き、次の poll で再試行する。
+        if let Some(cur) = &self.current {
+            if !cur.is_file() {
+                let next = match next_journal_after(&self.dir, cur)? {
+                    Some(next) => Some(next),
+                    None => latest_journal(&self.dir)?.filter(|latest| latest > cur),
+                };
+                if let Some(next) = next {
+                    self.current = Some(next);
+                    self.pos = 0;
+                    self.partial.clear();
+                }
+            }
+        }
 
         // 現在のファイルから読む
         if let Some(cur) = self.current.clone() {
@@ -38,9 +102,19 @@ impl JournalTailer {
 
         // 次のファイルを探して順番に読む
         loop {
-            let latest = latest_journal(&self.dir)?;
+            let latest = match latest_journal(&self.dir) {
+                Ok(latest) => latest,
+                Err(e) => {
+                    return Self::interrupted(lines, e, "failed to scan the journal directory")
+                }
+            };
             let next = if let Some(cur) = &self.current {
-                next_journal_after(&self.dir, cur)?
+                match next_journal_after(&self.dir, cur) {
+                    Ok(next) => next,
+                    Err(e) => {
+                        return Self::interrupted(lines, e, "failed to scan the journal directory")
+                    }
+                }
             } else {
                 latest.clone()
             };
@@ -52,14 +126,10 @@ impl JournalTailer {
                 self.partial.clear();
 
                 if let Err(e) = self.read_new(&next_path, &mut lines) {
-                    // 新ファイルの読み取り失敗
-                    if lines.is_empty() {
-                        // 行がまだ収集されていなければエラー返す
-                        return Err(e);
-                    }
-                    // 行が収集済みならば警告して返す
-                    tracing::warn!("failed to read rotated journal: {}", e);
-                    return Ok(lines);
+                    // 新ファイルの読み取り失敗。ここで先へ進むと、このファイルは
+                    // 二度と読まれない(current は既に進んでいる)ので、必ず
+                    // ここで打ち切って次の poll で同じファイルを読み直す。
+                    return Self::interrupted(lines, e, "failed to read rotated journal");
                 }
             } else {
                 // これ以上新しいファイルなし → 完了
@@ -67,13 +137,38 @@ impl JournalTailer {
             }
         }
 
+        self.caught_up = true;
         Ok(lines)
     }
 
-    fn read_new(&mut self, path: &std::path::Path, lines: &mut Vec<String>) -> io::Result<()> {
+    /// poll の途中で走査・読み取りが失敗したときの打ち切り。
+    ///
+    /// 既に読んだ行がある場合は、それを捨てずに返す。捨ててしまうと `self.pos`
+    /// だけが進んでいるため、その行は(動き続けるデーモンでは)二度と配信されない。
+    /// `caught_up` はここでは立てない — まだ追いつけていないので、残りは次の
+    /// poll で `replay` として読む。
+    fn interrupted(
+        lines: Vec<JournalLine>,
+        e: io::Error,
+        what: &str,
+    ) -> io::Result<Vec<JournalLine>> {
+        if lines.is_empty() {
+            return Err(e);
+        }
+        tracing::warn!("{what}: {e}; returning the lines read so far");
+        Ok(lines)
+    }
+
+    fn read_new(&mut self, path: &std::path::Path, lines: &mut Vec<JournalLine>) -> io::Result<()> {
         let mut file = match std::fs::File::open(path) {
             Ok(f) => f,
-            Err(_) => return Ok(()), // 消えた/一時的に開けない → 次回リトライ
+            // 消えたファイルは飛ばしてよい(ローテーション処理が次へ進める)。
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+            // 一時的に開けないだけ(EACCES / EMFILE など)の場合は握り潰さない。
+            // ローテーションのループは既に current をこのファイルへ進めているため、
+            // Ok を返すとそのままさらに次のファイルへ進み、このファイルの内容が
+            // 恒久的にスキップされてしまう。
+            Err(e) => return Err(e),
         };
         let len = file.metadata()?.len();
         if len < self.pos {
@@ -93,7 +188,10 @@ impl JournalTailer {
             let line: String = self.partial.drain(..=nl).collect();
             let line = line.trim_end();
             if !line.is_empty() {
-                lines.push(line.to_string());
+                lines.push(JournalLine {
+                    text: line.to_string(),
+                    replay: !self.caught_up,
+                });
             }
         }
         Ok(())
@@ -115,18 +213,23 @@ mod tests {
         f.write_all(s.as_bytes()).unwrap();
     }
 
+    /// `JournalLine` の列から `text` だけ取り出す(既存テストの比較を簡潔にする)。
+    fn texts(lines: Vec<JournalLine>) -> Vec<String> {
+        lines.into_iter().map(|l| l.text).collect()
+    }
+
     #[test]
     fn reads_only_appended_complete_lines() {
         let dir = tempfile::tempdir().unwrap();
         let j = dir.path().join("Journal.2026-07-25T120000.01.log");
         append(&j, "line1\nline2\n");
         let mut t = JournalTailer::new(dir.path().to_path_buf());
-        assert_eq!(t.poll().unwrap(), vec!["line1", "line2"]);
-        assert_eq!(t.poll().unwrap(), Vec::<String>::new()); // 追記なし → 空
+        assert_eq!(texts(t.poll().unwrap()), vec!["line1", "line2"]);
+        assert_eq!(texts(t.poll().unwrap()), Vec::<String>::new()); // 追記なし → 空
         append(&j, "line3\npart"); // 書きかけ行は返さない
-        assert_eq!(t.poll().unwrap(), vec!["line3"]);
+        assert_eq!(texts(t.poll().unwrap()), vec!["line3"]);
         append(&j, "ial\n"); // 書きかけの続き
-        assert_eq!(t.poll().unwrap(), vec!["partial"]);
+        assert_eq!(texts(t.poll().unwrap()), vec!["partial"]);
     }
 
     #[test]
@@ -135,11 +238,11 @@ mod tests {
         let old = dir.path().join("Journal.2026-07-25T120000.01.log");
         append(&old, "old1\n");
         let mut t = JournalTailer::new(dir.path().to_path_buf());
-        assert_eq!(t.poll().unwrap(), vec!["old1"]);
+        assert_eq!(texts(t.poll().unwrap()), vec!["old1"]);
         append(&old, "old2\n"); // 新ファイル出現と同時に旧ファイルにも追記済みのケース
         let new = dir.path().join("Journal.2026-07-25T130000.01.log");
         append(&new, "new1\n");
-        assert_eq!(t.poll().unwrap(), vec!["old2", "new1"]);
+        assert_eq!(texts(t.poll().unwrap()), vec!["old2", "new1"]);
     }
 
     #[test]
@@ -148,16 +251,16 @@ mod tests {
         let j = dir.path().join("Journal.2026-07-25T120000.01.log");
         append(&j, "aaaa\nbbbb\n");
         let mut t = JournalTailer::new(dir.path().to_path_buf());
-        t.poll().unwrap();
+        texts(t.poll().unwrap());
         std::fs::write(&j, "cc\n").unwrap(); // 短縮
-        assert_eq!(t.poll().unwrap(), vec!["cc"]);
+        assert_eq!(texts(t.poll().unwrap()), vec!["cc"]);
     }
 
     #[test]
     fn empty_dir_yields_nothing() {
         let dir = tempfile::tempdir().unwrap();
         let mut t = JournalTailer::new(dir.path().to_path_buf());
-        assert_eq!(t.poll().unwrap(), Vec::<String>::new());
+        assert_eq!(texts(t.poll().unwrap()), Vec::<String>::new());
     }
 
     #[test]
@@ -166,7 +269,7 @@ mod tests {
         let old = dir.path().join("Journal.2026-07-25T100000.01.log");
         append(&old, "old_line1\n");
         let mut t = JournalTailer::new(dir.path().to_path_buf());
-        assert_eq!(t.poll().unwrap(), vec!["old_line1"]);
+        assert_eq!(texts(t.poll().unwrap()), vec!["old_line1"]);
 
         // 次回のpoll前に2つの新ファイルを作成
         append(&old, "old_line2\n"); // 旧ファイルにもさらに追記
@@ -177,7 +280,7 @@ mod tests {
 
         // 次のpollで全ファイルを順番に読む
         assert_eq!(
-            t.poll().unwrap(),
+            texts(t.poll().unwrap()),
             vec!["old_line2", "mid_line1", "new_line1"]
         );
     }
@@ -196,7 +299,7 @@ mod tests {
         let mut lines = Vec::new();
         t.read_new(&j, &mut lines).unwrap();
         assert_eq!(t.pos, 6);
-        assert_eq!(lines, vec!["hello"]);
+        assert_eq!(texts(lines), vec!["hello"]);
 
         append(&j, "world\n"); // さらに6バイト追記(合計12バイト)
         let mut lines2 = Vec::new();
@@ -205,7 +308,7 @@ mod tests {
         // len() をそのまま使う実装でも今回はたまたま一致してしまうが、
         // 「pos は読んだバイト数の積み上げ」という不変条件をここで固定する。
         assert_eq!(t.pos, 12);
-        assert_eq!(lines2, vec!["world"]);
+        assert_eq!(texts(lines2), vec!["world"]);
     }
 
     /// ファイルが複数回のポーリングをまたいで少しずつ追記される場合でも、
@@ -218,15 +321,15 @@ mod tests {
         let mut t = JournalTailer::new(dir.path().to_path_buf());
 
         let mut all = Vec::new();
-        all.extend(t.poll().unwrap());
+        all.extend(texts(t.poll().unwrap()));
         append(&j, "b\n");
-        all.extend(t.poll().unwrap());
+        all.extend(texts(t.poll().unwrap()));
         append(&j, "c\n");
-        all.extend(t.poll().unwrap());
+        all.extend(texts(t.poll().unwrap()));
 
         assert_eq!(all, vec!["a", "b", "c"]);
         // 追記がない状態でさらに poll しても重複しない
-        assert_eq!(t.poll().unwrap(), Vec::<String>::new());
+        assert_eq!(texts(t.poll().unwrap()), Vec::<String>::new());
     }
 
     /// 現在ファイルの読み取りが失敗し続けても、ローテーション探索処理へ
@@ -238,7 +341,7 @@ mod tests {
         let old = dir.path().join("Journal.2026-07-25T100000.01.log");
         append(&old, "old1\n");
         let mut t = JournalTailer::new(dir.path().to_path_buf());
-        assert_eq!(t.poll().unwrap(), vec!["old1"]);
+        assert_eq!(texts(t.poll().unwrap()), vec!["old1"]);
 
         // 現在ファイルを削除して同名のディレクトリに置き換える → 以後の読み取りは
         // 「ディレクトリを read しようとしてエラー」になる。
@@ -250,6 +353,253 @@ mod tests {
 
         // 現在ファイル(ディレクトリ)の読み取りに失敗しても、poll は
         // エラーを返さずローテーション探索を継続し、新ファイルの行を返す。
-        assert_eq!(t.poll().unwrap(), vec!["new1"]);
+        assert_eq!(texts(t.poll().unwrap()), vec!["new1"]);
+    }
+
+    #[test]
+    fn resumes_from_a_saved_position_without_re_reading() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("Journal.2026-07-27T120000.01.log");
+        append(&path, "{\"a\":1}\n{\"b\":2}\n");
+
+        let mut first = JournalTailer::resume_from(dir.path().to_path_buf(), None);
+        let lines = first.poll().unwrap();
+        assert_eq!(lines.len(), 2);
+        let saved = first.position().expect("position after reading");
+
+        append(&path, "{\"c\":3}\n");
+
+        let mut second = JournalTailer::resume_from(dir.path().to_path_buf(), Some(saved));
+        let lines = second.poll().unwrap();
+        assert_eq!(lines.len(), 1, "must not re-read what was already consumed");
+        assert!(lines[0].text.contains("\"c\""));
+    }
+
+    #[test]
+    fn the_saved_position_never_includes_a_partial_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("Journal.2026-07-27T120000.01.log");
+        append(&path, "{\"a\":1}\n{\"partial\":");
+
+        let mut tailer = JournalTailer::resume_from(dir.path().to_path_buf(), None);
+        let lines = tailer.poll().unwrap();
+        assert_eq!(lines.len(), 1);
+        let saved = tailer.position().expect("position");
+
+        // 途中で切れた行を書き足してから、保存位置で再開する。
+        append(&path, "2}\n");
+        let mut resumed = JournalTailer::resume_from(dir.path().to_path_buf(), Some(saved));
+        let lines = resumed.poll().unwrap();
+
+        assert_eq!(lines.len(), 1);
+        assert_eq!(
+            lines[0].text, "{\"partial\":2}",
+            "resuming must not lose the head of a line that was incomplete"
+        );
+    }
+
+    #[test]
+    fn everything_read_in_the_first_poll_is_replay_and_later_appends_are_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("Journal.2026-07-27T120000.01.log");
+        append(&path, "{\"a\":1}\n{\"b\":2}\n");
+
+        let mut tailer = JournalTailer::resume_from(dir.path().to_path_buf(), None);
+        let first = tailer.poll().unwrap();
+        assert!(
+            first.iter().all(|l| l.replay),
+            "pre-existing lines are replay"
+        );
+
+        append(&path, "{\"c\":3}\n");
+        let second = tailer.poll().unwrap();
+        assert!(
+            second.iter().all(|l| !l.replay),
+            "lines appended after startup are live"
+        );
+    }
+
+    #[test]
+    fn resumed_catch_up_lines_are_also_replay() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("Journal.2026-07-27T120000.01.log");
+        append(&path, "{\"a\":1}\n");
+
+        let mut first = JournalTailer::resume_from(dir.path().to_path_buf(), None);
+        first.poll().unwrap();
+        let saved = first.position().unwrap();
+
+        // デーモンが止まっている間に書かれたぶん。
+        append(&path, "{\"b\":2}\n");
+
+        let mut second = JournalTailer::resume_from(dir.path().to_path_buf(), Some(saved));
+        let lines = second.poll().unwrap();
+        assert_eq!(lines.len(), 1);
+        assert!(
+            lines[0].replay,
+            "lines written while the daemon was down were already in the file at startup"
+        );
+    }
+
+    #[test]
+    fn a_saved_offset_past_the_end_restarts_that_file_from_the_top() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("Journal.2026-07-27T120000.01.log");
+        append(&path, "{\"a\":1}\n");
+
+        let mut tailer = JournalTailer::resume_from(
+            dir.path().to_path_buf(),
+            Some(Position {
+                file: "Journal.2026-07-27T120000.01.log".into(),
+                offset: 9_999,
+            }),
+        );
+        let lines = tailer.poll().unwrap();
+
+        assert_eq!(
+            lines.len(),
+            1,
+            "a truncated/replaced file is read from the top"
+        );
+    }
+
+    #[test]
+    fn a_saved_file_that_no_longer_exists_resumes_at_the_next_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let newer = dir.path().join("Journal.2026-07-27T130000.01.log");
+        append(&newer, "{\"b\":2}\n");
+
+        let mut tailer = JournalTailer::resume_from(
+            dir.path().to_path_buf(),
+            Some(Position {
+                file: "Journal.2026-07-27T120000.01.log".into(), // 既に消えている
+                offset: 10,
+            }),
+        );
+        let lines = tailer.poll().unwrap();
+
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].text.contains("\"b\""));
+        assert!(
+            lines[0].replay,
+            "catching up on a file that was already there at startup is replay"
+        );
+    }
+
+    /// 現在のファイルが消えたとき、残っているのが**より古いファイルだけ**なら
+    /// フォールバックしてはならない。フォールバックすると古いファイルを先頭から
+    /// 読み直し、それ以降の全ファイルを `replay = false` で再配信してしまう。
+    #[test]
+    fn a_vanished_current_file_never_falls_back_to_an_older_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let older = dir.path().join("Journal.2026-07-27T100000.01.log");
+        let current = dir.path().join("Journal.2026-07-27T120000.01.log");
+        append(&older, "{\"old\":1}\n");
+        append(&current, "{\"cur\":1}\n");
+
+        let mut t = JournalTailer::new(dir.path().to_path_buf());
+        assert_eq!(texts(t.poll().unwrap()), vec!["{\"cur\":1}"]);
+
+        std::fs::remove_file(&current).unwrap();
+
+        assert_eq!(
+            texts(t.poll().unwrap()),
+            Vec::<String>::new(),
+            "an older file must not be re-delivered"
+        );
+        assert_eq!(
+            t.position().map(|p| p.file),
+            Some("Journal.2026-07-27T120000.01.log".to_string()),
+            "the position stays put until a strictly newer file appears"
+        );
+
+        // より新しいファイルが現れたら、そちらへ進む。
+        let newer = dir.path().join("Journal.2026-07-27T130000.01.log");
+        append(&newer, "{\"new\":1}\n");
+        assert_eq!(texts(t.poll().unwrap()), vec!["{\"new\":1}"]);
+    }
+
+    /// ディレクトリを「実行のみ可(r なし)」にすると、中のファイルは開ける
+    /// まま `read_dir` だけが失敗する。root では権限を無視できるため注入
+    /// できない(その場合はテストを飛ばす)。
+    fn make_unlistable(dir: &std::path::Path) -> bool {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o111)).unwrap();
+        std::fs::read_dir(dir).is_err()
+    }
+
+    fn make_listable(dir: &std::path::Path) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    /// ローテーション走査(`read_dir`)が一時的に失敗しても、それまでに読んだ
+    /// 行を捨ててはならない。捨てると `self.pos` だけが進んでいるため、その行は
+    /// 二度と配信されない。
+    #[test]
+    fn lines_already_read_survive_a_failing_rotation_scan() {
+        let dir = tempfile::tempdir().unwrap();
+        let j = dir.path().join("Journal.2026-07-27T120000.01.log");
+        append(&j, "line1\n");
+        let mut t = JournalTailer::new(dir.path().to_path_buf());
+        assert_eq!(texts(t.poll().unwrap()), vec!["line1"]);
+
+        append(&j, "line2\n");
+        if !make_unlistable(dir.path()) {
+            make_listable(dir.path());
+            return; // root: 権限で失敗を注入できない
+        }
+        let out = t.poll();
+        make_listable(dir.path());
+
+        assert_eq!(
+            texts(out.expect("the lines read before the scan failed must not be dropped")),
+            vec!["line2"]
+        );
+    }
+
+    /// ローテーション先のファイルが一時的に開けない場合、それを黙って飛ばして
+    /// さらに次のファイルへ進んではならない(そのファイルは恒久的に失われる)。
+    /// あわせて、この早期 return では `caught_up` を立てない — まだ追いつけて
+    /// いないので、残りは次の poll で `replay` として読む。
+    #[test]
+    fn a_temporarily_unreadable_rotated_file_is_not_skipped_and_stays_replay() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("Journal.2026-07-27T100000.01.log");
+        let b = dir.path().join("Journal.2026-07-27T110000.01.log");
+        let c = dir.path().join("Journal.2026-07-27T120000.01.log");
+        append(&a, "a1\n");
+        append(&b, "b1\n");
+        append(&c, "c1\n");
+
+        std::fs::set_permissions(&b, std::fs::Permissions::from_mode(0o000)).unwrap();
+        if std::fs::File::open(&b).is_ok() {
+            std::fs::set_permissions(&b, std::fs::Permissions::from_mode(0o644)).unwrap();
+            return; // root: 権限で失敗を注入できない
+        }
+
+        let mut t = JournalTailer::resume_from(
+            dir.path().to_path_buf(),
+            Some(Position {
+                file: "Journal.2026-07-27T100000.01.log".into(),
+                offset: 0,
+            }),
+        );
+        let first = t.poll().unwrap();
+        assert_eq!(texts(first), vec!["a1"], "must stop at the unreadable file");
+
+        std::fs::set_permissions(&b, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let second = t.poll().unwrap();
+        assert_eq!(
+            texts(second.clone()),
+            vec!["b1", "c1"],
+            "the file that could not be opened must be picked up on the next poll"
+        );
+        assert!(
+            second.iter().all(|l| l.replay),
+            "these lines were written before the daemon started"
+        );
     }
 }

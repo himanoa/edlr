@@ -42,6 +42,11 @@ struct Args {
     /// $XDG_CONFIG_HOME/edlr/grants、未設定なら ~/.config/edlr/grants)
     #[arg(long)]
     grants_dir: Option<PathBuf>,
+
+    /// Journal 読み取り位置の保存先ディレクトリ(未指定時は
+    /// $XDG_STATE_HOME/edlr、未設定なら ~/.local/state/edlr)
+    #[arg(long)]
+    state_dir: Option<PathBuf>,
 }
 
 #[tokio::main]
@@ -79,6 +84,12 @@ async fn main() {
     let grants_dir = args.grants_dir.clone().unwrap_or_else(|| {
         config::config_subdir(xdg_config_home.as_deref(), home.as_deref(), "grants")
     });
+    let state_dir = args.state_dir.clone().unwrap_or_else(|| {
+        let xdg_state_home = std::env::var_os("XDG_STATE_HOME").map(PathBuf::from);
+        config::state_base(xdg_state_home.as_deref(), home.as_deref())
+    });
+    let positions =
+        std::sync::Arc::new(edlr_core::journal::position::PositionStore::new(state_dir));
 
     if let Some(ui_dir) = &args.ui_dir {
         if !ui_dir.is_dir() {
@@ -118,10 +129,8 @@ async fn main() {
             // 既定値ではなく、CLI(`--settings-dir` など)で上書きされた
             // 実際のパスを渡す — そうしないと、既定と違う場所を使っている
             // デーモンでその実際の場所が無防備になる。
-            let filesystem_config_store = FilesystemConfigStore::new(
-                settings_dir,
-                vec![grants_dir, plugins_dir.clone()],
-            );
+            let filesystem_config_store =
+                FilesystemConfigStore::new(settings_dir, vec![grants_dir, plugins_dir.clone()]);
             let plugins_dir_for_blocking = plugins_dir.clone();
             match tokio::task::spawn_blocking(move || {
                 start_plugins(
@@ -158,6 +167,7 @@ async fn main() {
         dir,
         router.clone(),
         Duration::from_millis(args.poll_interval_ms),
+        Some(positions),
     ));
 
     // SIGTERM/SIGINT ハンドラ。ハンドラを一切登録しないままだと、デーモンは

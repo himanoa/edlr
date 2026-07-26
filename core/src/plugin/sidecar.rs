@@ -273,7 +273,10 @@ mod tests {
         assert_eq!(config.command, "");
         assert_eq!(config.port, 50021);
         assert_eq!(config.replicas, 1);
-        assert_eq!(config.args, vec!["--port".to_string(), "{port}".to_string()]);
+        assert_eq!(
+            config.args,
+            vec!["--port".to_string(), "{port}".to_string()]
+        );
     }
 
     #[test]
@@ -366,7 +369,10 @@ mod tests {
     fn overlapping_port_ranges_within_a_plugin_are_rejected() {
         let tmp = tempfile::tempdir().unwrap();
         let store = SidecarConfigStore::new(tmp.path().join("settings"));
-        let manifest = manifest_with(vec![request("tts", 50021, true), request("tr", 50030, false)]);
+        let manifest = manifest_with(vec![
+            request("tts", 50021, true),
+            request("tr", 50030, false),
+        ]);
 
         // tts が 50021..=50031 を占めると tr(50030)と重なる。
         let err = store

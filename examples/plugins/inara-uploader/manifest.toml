@@ -68,13 +68,14 @@ label = "送信の最短間隔(秒)"
 type = "number"
 default = 60
 
-# デーモン再起動時、edlr は現行 Journal を先頭から読み直す。既定 (false) では
-# プラグイン起動より前のイベントを送らないことで二重送信を避ける。
+# edlr は Journal の読み取り位置を永続化しており、再起動しても続きから配信する。
+# そのため既定 (true) で送っても二重送信にはならない。false にすると、デーモンが
+# 止まっていた間に書かれたイベントは INARA へ送られない(欠測になる)。
 [[settings]]
 key = "uploadHistorical"
-label = "起動前のイベントも送る(二重送信の恐れあり)"
+label = "デーモン起動前に書かれていたイベントも送る"
 type = "boolean"
-default = false
+default = true
 
 [[settings]]
 key = "dryRun"

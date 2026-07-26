@@ -49,7 +49,9 @@ use crate::plugin::manifest::{load_manifest, matches_event};
 use crate::plugin::registry::{PluginEntry, PluginState, Registry};
 use crate::plugin::settings::SettingsStore;
 use crate::plugin::sidecar::{assign_ports, SidecarConfig, SidecarConfigStore};
-use crate::plugin::sidecar_runtime::{implicit_http_hosts, sidecars_json_string, SidecarRuntimeEntry};
+use crate::plugin::sidecar_runtime::{
+    implicit_http_hosts, sidecars_json_string, SidecarRuntimeEntry,
+};
 use crate::plugin::Manifest;
 use crate::router::Router;
 
@@ -207,7 +209,9 @@ fn load_and_run_plugin(
                 .get(&request.name)
                 .map(|config| config.path.clone())
                 .unwrap_or_default();
-            let granted = grants_store.filesystem_state(manifest, &request.name).granted;
+            let granted = grants_store
+                .filesystem_state(manifest, &request.name)
+                .granted;
             FsRuntimeEntry {
                 name: request.name.clone(),
                 granted,
@@ -314,10 +318,14 @@ fn run_plugin_thread(
     }
 
     for event in events_rx {
-        let (kind, timestamp, name, payload_json) = event_params(&event);
-        if let Err(e) =
-            instance.call_on_event(kind, timestamp.as_deref(), name.as_deref(), &payload_json)
-        {
+        let (kind, timestamp, name, payload_json, replay) = event_params(&event);
+        if let Err(e) = instance.call_on_event(
+            kind,
+            timestamp.as_deref(),
+            name.as_deref(),
+            &payload_json,
+            replay,
+        ) {
             tracing::warn!(
                 plugin_id = %manifest.id,
                 "on-event call failed, disabling plugin: {e}"
@@ -378,19 +386,21 @@ fn spawn_event_subscriber(
     });
 }
 
-fn event_params(event: &Event) -> (&'static str, Option<String>, Option<String>, String) {
+fn event_params(event: &Event) -> (&'static str, Option<String>, Option<String>, String, bool) {
     match event {
         Event::Journal {
             timestamp,
             event: name,
             raw,
+            replay,
         } => (
             "journal",
             Some(timestamp.clone()),
             Some(name.clone()),
             raw.to_string(),
+            *replay,
         ),
-        Event::Status { raw } => ("status", None, None, raw.to_string()),
+        Event::Status { raw } => ("status", None, None, raw.to_string(), false),
     }
 }
 
@@ -426,6 +436,7 @@ mod tests {
             timestamp: "2026-07-25T00:00:00Z".into(),
             event: name.into(),
             raw: serde_json::json!({}),
+            replay: false,
         })
     }
 
