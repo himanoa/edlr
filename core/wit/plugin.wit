@@ -68,3 +68,25 @@ world plugin {
   export init: func();
   export on-event: func(ev: event);
 }
+
+/// ゲスト(プラグイン)がビルド時に対象とする world。
+///
+/// 中身は `plugin` に WASI の import 一式を足しただけ。Go/TinyGo の
+/// 標準ライブラリは、プラグインが何も呼ばなくても WASI を import する
+/// (環境変数の初期化で `wasi:cli/environment`、`time.Now()` で
+/// `wasi:clocks/wall-clock` など)。`plugin` にはそれらの宣言が無いため、
+/// `wasm-tools component new --wit-world plugin` は「world に無い import が
+/// モジュールに含まれている」としてコンポーネント化を拒否する。
+///
+/// Rust の `wasm32-wasip2` ターゲットはリンカ(`wasm-component-ld`)が WASI
+/// import を自動で足すのでこの world を使わなくてもビルドできるが、Go は
+/// そうならない。**ゲスト側は言語を問わずこの world を対象にすればよい。**
+///
+/// ホスト側(`core/src/plugin/host.rs` の `bindgen!`)は引き続き `plugin` を
+/// 使う。ホストが自前で提供するのは edlr 独自の 4 インターフェースだけで、
+/// WASI は `wasmtime_wasi` の `add_to_linker_sync` が linker へ足すため、
+/// ホストの world に WASI を含めると二重登録になってしまう。
+world plugin-guest {
+  include plugin;
+  include wasi:cli/imports@0.2.0;
+}

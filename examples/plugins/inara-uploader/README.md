@@ -1,7 +1,8 @@
 # inara-uploader
 
 Journal イベントを [INARA](https://inara.cz) の API v1 へアップロードする edlr プラグイン。
-**Go (TinyGo) 製**で、`examples/plugins/hello-logger`(Rust)と同じ `world plugin` に対して実装している。
+**Go (TinyGo) 製**で、`examples/plugins/hello-logger`(Rust)と同じ `world plugin` の
+インターフェースを実装している(ビルド時の対象は WASI を含む `world plugin-guest`。下記参照)。
 
 動作確認済み: 実際の `edlr` デーモンにロードされ、Journal から
 `setCommanderCredits` / `setCommanderRankPilot` / `addCommanderTravelFSDJump` /
@@ -20,10 +21,11 @@ cd examples/plugins/inara-uploader
 ./build.sh              # plugin.wasm を出力
 ```
 
-`build.sh` が何をしているかは スクリプト冒頭のコメントを参照(要点は
-「`world plugin` に WASI の import が宣言されていないので、ビルド時だけ
-`include wasi:cli/imports@0.2.0;` を差し込んだ WIT オーバーレイを組み立てる」)。
-これは下の「不足している実装」1 番の回避策。
+ビルド対象の world は `plugin` ではなく **`plugin-guest`**(= `plugin` に WASI の
+import 一式を足したもの)。Go/TinyGo の標準ライブラリはプラグインが何も呼ばなくても
+WASI を import するため、`plugin` を直接対象にすると `wasm-tools component new` が
+「world に無い import がある」として弾く。詳細は `core/wit/plugin.wit` の
+`world plugin-guest` のコメントを参照。
 
 ### 配置
 
@@ -56,7 +58,7 @@ wit-bindgen-go generate --world plugin --out gen ../../../core/wit
 | キー | 型 | 既定 | 説明 |
 | --- | --- | --- | --- |
 | `enabled` | boolean | `true` | 無効にすると何もしない |
-| `apiKey` | string | `""` | INARA の API キー。**平文で保存される**(下記 4 番) |
+| `apiKey` | string | `""` | INARA の API キー。**平文で保存される**(下記 2 番) |
 | `commanderName` | string | `""` | 空なら Journal の `LoadGame` / `Commander` から学習 |
 | `isBeingDeveloped` | boolean | `true` | INARA 側で「開発中クライアント」として扱わせる |
 | `batchSize` | number | `10` | この件数溜まったら送る |
@@ -100,25 +102,7 @@ wit-bindgen-go generate --world plugin --out gen ../../../core/wit
 **このプラグインを実用品にするために、edlr 本体側に足りていないもの。**
 どれもプラグイン単体では回避しきれない。
 
-### 1. `world plugin` に WASI の import が宣言されていない(ビルドを阻害)
-
-Go/TinyGo の標準ライブラリは、何もしなくても `wasi:cli/environment` や
-`wasi:clocks/wall-clock` を import する。ところが `world plugin` は edlr 独自の
-4 インターフェースしか宣言していないため、`wasm-tools component new` が
-「world に無い import がある」としてコンポーネント化を拒否する。
-
-Rust の `hello-logger` が素通りするのは、`wasm32-wasip2` ターゲットのリンカが
-WASI import を自動で足すため。**Go では同じ手が使えず、このリポジトリの WIT の
-ままでは Go プラグインをビルドできない。**
-
-いまは `build.sh` が WIT のオーバーレイを組み立てて回避している(本体の
-`plugin.wit` は触らない)。本来は `core/wit/plugin.wit` の `world plugin` が
-必要な WASI import を宣言すべき。ホスト側は既に `wasmtime_wasi` の
-`add_to_linker_sync` で WASI を提供しているので実行時の手当ては不要だが、
-`bindgen!` が生成するホスト側コードとの衝突(WASI を二重に linker へ足す形に
-ならないか)を確認する必要がある。
-
-### 2. 定期実行・終了フックが無い
+### 1. 定期実行・終了フックが無い
 
 プラグインは**イベントが届いたときにしか動けない**。そのため:
 
@@ -130,7 +114,7 @@ WASI import を自動で足すため。**Go では同じ手が使えず、この
 いるが、これは Journal 頼みの回避策にすぎない。`world plugin` に
 「一定間隔で呼ばれるフック」か「プラグイン停止時に呼ばれるフック」が欲しい。
 
-### 3. プラグインの永続ストレージが無い(二重送信 / 取りこぼし)
+### 2. プラグインの永続ストレージが無い(二重送信 / 取りこぼし)
 
 `host-settings` は読み取り専用(`get-all` のみ)で、プラグインが自分の状態を
 残す手段が無い。そのため「どこまで INARA へ送ったか」を再起動をまたいで
@@ -149,7 +133,7 @@ tailer は現行 Journal ファイルを先頭から読み直す**(`core/src/jou
 `host-settings.set`)。これがあれば「最後に送ったイベントのタイムスタンプ」を
 持てて、二重送信も取りこぼしも無くせる。
 
-### 4. 秘密情報向けの設定型が無い
+### 3. 秘密情報向けの設定型が無い
 
 INARA の API キーは `[[settings]]` の `string` として扱うしかない。結果:
 
@@ -162,22 +146,22 @@ INARA の API キーは `[[settings]]` の `string` として扱うしかない�
 スコープ外(プラグインが自前でヘッダに載せる想定)」とされているが、
 **プラグインが自前で持つ手段そのものが無い**ため、現状は平文設定しかない。
 
-### 5. `driver-http` のタイムアウトが 1.5 秒固定
+### 4. `driver-http` のタイムアウトが 1.5 秒固定
 
 `HTTP_TIMEOUT` はホスト側の定数で、プラグインからは変えられない。INARA が
 混んでいると 1.5 秒では返らず `transport` エラーになる。プラグインは
-キューを保持して再試行するが、キューは揮発(3 番)なのでデーモンが落ちれば
+キューを保持して再試行するが、キューは揮発(2 番)なのでデーモンが落ちれば
 失われる。プラグインごとにタイムアウトを設定できるか、送信を非同期に
 投げられる仕組みが欲しい。
 
-### 6. 送信中はイベントを取りこぼしうる
+### 5. 送信中はイベントを取りこぼしうる
 
 `driver-http.send` は同期呼び出しで、その間プラグイン専用スレッドは
 イベントを読まない。キューは 32 件で、溢れた分はホスト側で捨てられる
 (`PLUGIN_EVENT_QUEUE_CAPACITY`)。最大 1.5 秒 × 送信回数のあいだイベントが
 流れ続けると欠落しうる。戦闘中など高頻度の場面で顕在化する。
 
-### 7. マッピングが INARA のごく一部
+### 6. マッピングが INARA のごく一部
 
 INARA API v1 のイベントは 100 種類以上ある。このプラグインが対応しているのは
 上の表の 12 種類だけ。少なくとも次は未対応:
@@ -192,7 +176,7 @@ INARA API v1 のイベントは 100 種類以上ある。このプラグイン�
 `Cargo.json`)に書かれる。**edlr は現在 `Journal.*.log` と `Status.json` しか
 監視していない**ので、これらを扱うにはコア側の監視対象を増やす必要がある。
 
-### 8. Go プラグインのビルドがリポジトリに組み込まれていない
+### 7. Go プラグインのビルドがリポジトリに組み込まれていない
 
 `hello-logger` は cargo で普通にビルドできるが、Go プラグインは TinyGo と
 `wit-bindgen-go`(と `wasm-tools`)を各自で用意する必要がある。CI も無い。
