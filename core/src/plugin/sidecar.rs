@@ -60,6 +60,8 @@ pub enum SidecarConfigError {
     UnknownSidecar(String),
     /// `scalable = false` のサイドカーに `replicas > 1` を指定した。
     NotScalable(String),
+    /// `replicas = 0` を指定した(インスタンスが 1 つも存在しない構成は無意味)。
+    ZeroReplicas(String),
     /// `args` に `{port}` が無いまま `replicas > 1` を指定した。
     MissingPortPlaceholder(String),
     /// ポート採番が 65535 を超える。
@@ -76,6 +78,9 @@ impl fmt::Display for SidecarConfigError {
             SidecarConfigError::UnknownSidecar(name) => write!(f, "unknown sidecar: {name}"),
             SidecarConfigError::NotScalable(name) => {
                 write!(f, "sidecar {name} does not allow replicas > 1")
+            }
+            SidecarConfigError::ZeroReplicas(name) => {
+                write!(f, "sidecar {name} requires replicas >= 1")
             }
             SidecarConfigError::MissingPortPlaceholder(name) => write!(
                 f,
@@ -182,6 +187,17 @@ fn validate(
     request: &SidecarRequest,
     config: &SidecarConfig,
 ) -> Result<(), SidecarConfigError> {
+    // `replicas = 0` は「インスタンスを 1 つも起動しない」設定であり、他の
+    // すべての不正入力(NotScalable/MissingPortPlaceholder/PortOverflow/
+    // PortRangeOverlap)は明示的に拒否しているのに、ここだけ `assign_ports`
+    // の `.max(1)` に黙って 1 へ丸められてしまっていた(Minor: 最終レビュー
+    // で見つかった不一致)。`assign_ports` 自身の `.max(1)` は、検証をすり
+    // 抜けた古い保存済み設定を読んだときの防御的な下限として残す(こちらの
+    // 検証は新規の保存だけをガードする)。
+    if config.replicas == 0 {
+        return Err(SidecarConfigError::ZeroReplicas(name.to_string()));
+    }
+
     if config.replicas > 1 {
         if !request.scalable {
             return Err(SidecarConfigError::NotScalable(name.to_string()));
@@ -322,6 +338,27 @@ mod tests {
             )
             .expect_err("replicas > 1 without {port} must be rejected");
         assert!(matches!(err, SidecarConfigError::MissingPortPlaceholder(_)));
+    }
+
+    #[test]
+    fn replicas_zero_is_rejected_not_silently_rounded_up() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = SidecarConfigStore::new(tmp.path().join("settings"));
+        let manifest = manifest_with(vec![request("tts", 50021, true)]);
+
+        let err = store
+            .update_and_effective(
+                &manifest,
+                "tts",
+                &SidecarConfig {
+                    command: "/bin/true".into(),
+                    args: vec!["--port".into(), "{port}".into()],
+                    port: 50021,
+                    replicas: 0,
+                },
+            )
+            .expect_err("replicas = 0 must be rejected, not silently rounded up to 1");
+        assert!(matches!(err, SidecarConfigError::ZeroReplicas(_)));
     }
 
     #[test]

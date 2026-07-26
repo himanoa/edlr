@@ -665,6 +665,18 @@ impl Registry {
     /// `id` のプラグインの `name` サイドカーの承認/取消を `GrantsStore` に
     /// 永続化する。取消(`granted == false`)のときは稼働中の実行を止める
     /// (走り続けてよい根拠が承認と共に無くなるため)。
+    ///
+    /// `granted == true` のとき、`command` が未設定(空文字)のサイドカーは
+    /// 拒否する(`RegistryError::Sidecar`)。UI 側(`SidecarSection.tsx`)は
+    /// `command` 未設定の間チェックボックスを `disabled` にしているが、それは
+    /// UI 上の防御に過ぎない -- RPC を直接叩けば(あるいは将来別の UI 経路が
+    /// 増えれば)この検証を経由せずに「ユーザーが何が走るか一度も見ていない」
+    /// 状態のサイドカーを承認できてしまう。設計書・README が明言する
+    /// 「`command` 未設定では承認できない」という不変条件はここ(ストア/
+    /// `Registry` 側)で強制し、UI・RPC 層では二重実装しない(Important:
+    /// 最終レビューで見つかった取りこぼし)。取消は逆に常に許す --
+    /// `command` を消した状態でも稼働中の承認を取り消せなければ fail-open に
+    /// なってしまうため。
     pub fn set_sidecar_grant(
         &self,
         id: &str,
@@ -675,6 +687,20 @@ impl Registry {
         if manifest.sidecar(name).is_none() {
             return Err(RegistryError::UnknownSidecar(name.to_string()));
         }
+
+        if granted {
+            let configs = self.sidecar_config_store.effective(&manifest);
+            let command_configured = configs
+                .get(name)
+                .map(|config| !config.command.is_empty())
+                .unwrap_or(false);
+            if !command_configured {
+                return Err(RegistryError::Sidecar(format!(
+                    "sidecar {name} has no executable configured; cannot grant"
+                )));
+            }
+        }
+
         self.grants_store
             .set_sidecar(&manifest, name, granted)
             .map_err(RegistryError::Grants)?;
@@ -693,6 +719,61 @@ impl Registry {
     /// `ensure_started`。`Start`/`Restart` は未承認・`command` 未設定を
     /// `RegistryError::Sidecar` として拒否する(`refresh_sidecar_runtime` の
     /// ような JSON バッファの作り直しは、設定・承認自体は変わらないので行わない)。
+    ///
+    /// **TOCTOU 対策**: `Start`/`Restart` は `sidecar_runtime_lock_for(id)`
+    /// (`refresh_sidecar_runtime` -- `set_sidecar_config`/`set_sidecar_grant`
+    /// が呼ぶ -- と共有する、プラグイン単位のロック)を、承認・設定を読む
+    /// 前から `ensure_started` を呼び終えるまで保持する。これが無いと、
+    /// 「grant を読む」→「(ここで承認取消が割り込む)」→「その grant を
+    /// 信じて spawn する」という窓ができ、取消の裏で起動してしまう
+    /// (Important: 最終レビューで見つかった取りこぼし)。ロックを取ることで、
+    /// この関数と `refresh_sidecar_runtime` は互いに排他になり、
+    /// 「読んだ承認状態」と「実際に spawn する」の間に他の書き込みが
+    /// 挟まらないことを保証する。ロック取得順序は既存のドキュメント
+    /// (`sidecar_runtime_locks` を参照)のとおり一方向のまま
+    /// (`entries` → マップの Mutex → id 別ロック)であり、この関数は
+    /// `capabilities_lock` にも `sidecar_runtime_locks` のマップ自体にも
+    /// 触れないので新たな循環は生じない。
+    ///
+    /// この対策はホスト起点(RPC/UI)の経路のみをカバーする。ゲスト
+    /// (wasm)からの `ensure-started` は `HostCtx::ensure_started`
+    /// (`host.rs`)経由で、こちらとは別に `sidecars_json` 共有バッファを
+    /// 直接読むだけなので同じレースが理論上は残る -- が、それは意図的:
+    /// ゲスト呼び出しにこの id 別ロックを取らせると、`refresh_sidecar_runtime`
+    /// が同じロックを持って `shutdown_grace`(既定 3 秒)まで `stop` を待つ
+    /// 間、`ensure-started` を呼んだプラグインのスレッドがブロックされ、
+    /// `PluginInstance::CALL_DEADLINE`(2 秒)を超えて trap してしまう。
+    /// ゲスト経路のレース窓は「取消が `sidecars_json` バッファに反映されて
+    /// から `HostCtx::resolve_sidecar` が次に読むまで」の間だけで、次回の
+    /// `ensure-started`/`status` 呼び出しでは新しい(取消済みの)状態が
+    /// 見え、既に走っているインスタンスは UI から `stop` できる。
+    /// **TOCTOU 対策**: `Start`/`Restart` は `sidecar_runtime_lock_for(id)`
+    /// (`refresh_sidecar_runtime` -- `set_sidecar_config`/`set_sidecar_grant`
+    /// が呼ぶ -- と共有する、プラグイン単位のロック)を、承認・設定を読む
+    /// 前から `ensure_started` を呼び終えるまで保持する。これが無いと、
+    /// 「grant を読む」→「(ここで承認取消が割り込む)」→「その grant を
+    /// 信じて spawn する」という窓ができ、取消の裏で起動してしまう
+    /// (Important: 最終レビューで見つかった取りこぼし)。ロックを取ることで、
+    /// この関数と `refresh_sidecar_runtime` は互いに排他になり、
+    /// 「読んだ承認状態」と「実際に spawn する」の間に他の書き込みが
+    /// 挟まらないことを保証する。ロック取得順序は既存のドキュメント
+    /// (`sidecar_runtime_locks` を参照)のとおり一方向のまま
+    /// (`entries` → マップの Mutex → id 別ロック)であり、この関数は
+    /// `capabilities_lock` にも `sidecar_runtime_locks` のマップ自体にも
+    /// 触れないので新たな循環は生じない。
+    ///
+    /// この対策はホスト起点(RPC/UI)の経路のみをカバーする。ゲスト
+    /// (wasm)からの `ensure-started` は `HostCtx::ensure_started`
+    /// (`host.rs`)経由で、こちらとは別に `sidecars_json` 共有バッファを
+    /// 直接読むだけなので同じレースが理論上は残る -- が、それは意図的:
+    /// ゲスト呼び出しにこの id 別ロックを取らせると、`refresh_sidecar_runtime`
+    /// が同じロックを持って `shutdown_grace`(既定 3 秒)まで `stop` を待つ
+    /// 間、`ensure-started` を呼んだプラグインのスレッドがブロックされ、
+    /// `PluginInstance::CALL_DEADLINE`(2 秒)を超えて trap してしまう。
+    /// ゲスト経路のレース窓は「取消が `sidecars_json` バッファに反映されて
+    /// から `HostCtx::resolve_sidecar` が次に読むまで」の間だけで、次回の
+    /// `ensure-started`/`status` 呼び出しでは新しい(取消済みの)状態が
+    /// 見え、既に走っているインスタンスは UI から `stop` できる。
     pub fn control_sidecar(
         &self,
         id: &str,
@@ -710,10 +791,20 @@ impl Registry {
                 self.process_driver.stop(&key);
             }
             SidecarAction::Start | SidecarAction::Restart => {
+                let runtime_lock = self.sidecar_runtime_lock_for(id);
+                let _runtime_guard = runtime_lock
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+
                 if action == SidecarAction::Restart {
                     self.process_driver.stop(&key);
                 }
 
+                // ロック保持中に読み直す: `refresh_sidecar_runtime` は同じ
+                // ロックを取ってから承認取消/設定変更を確定するので、ここで
+                // 読む値は「取消/変更が確定済みならその後の値」であることが
+                // 保証される(取消が確定する前の古い値を信じて spawn する
+                // ことはない)。
                 let grant = self.grants_store.sidecar_state(&manifest, name);
                 if !grant.granted {
                     return Err(RegistryError::Sidecar(format!(
@@ -775,14 +866,52 @@ impl Registry {
             .map(|entry| entry.settings_json.clone())
     }
 
-    /// `id` のプラグインを `Disabled { reason }` にする。存在しなければ何もしない。
+    /// `id` のプラグインを `Disabled { reason }` にし、そのプラグインが
+    /// 持つ全サイドカーを停止する。存在しなければ何もしない。
+    ///
+    /// プラグインが無効化された時点で、そのサイドカーを止められる主体
+    /// (プラグイン自身)はもう居なくなる -- `runner.rs` は `on_event` が
+    /// trap したときここを呼んだ直後にプラグイン専用スレッドを終了させる
+    /// ため、`HostCtx`(と、そこから辿れる状態)は drop されるが、
+    /// サイドカープロセス自体はホスト(`ProcessDriver`)が引き続き所有して
+    /// おり、明示的に止めない限り動き続けてしまう。設計書が挙げる
+    /// 「プラグイン無効化 → そのプラグインの全サイドカーを停止」という
+    /// ホストの保証を実装するのがこの停止処理(Important: 最終レビューで
+    /// 見つかった取りこぼし)。
+    ///
+    /// `entries` ロックは `state` の書き換えと manifest のサイドカー名一覧の
+    /// 取得だけに使い、手放してから `ProcessDriver::stop`(同期版。SIGTERM
+    /// 無視の子がいれば `shutdown_grace` 秒ブロックしうる)を呼ぶ -- ここは
+    /// プラグイン専用スレッド(`runner.rs`)から直接呼ばれる経路なので、
+    /// 他プラグインの `entries` アクセスまで巻き添えでブロックしないように
+    /// するため(このブランチで守ってきた「ロックを猶予期間まるごと保持
+    /// しない」という制約と同じ理由)。ホスト起点の停止なので同期版
+    /// `stop`(ゲスト向け `stop_detached` ではない)を使う: `set_disabled`
+    /// を呼ぶ側(このプラグイン自身のスレッド)はここで終了するだけなので、
+    /// `PluginInstance::CALL_DEADLINE` の制約は関係ない。
     pub fn set_disabled(&self, id: &str, reason: String) {
-        let mut guard = self
-            .entries
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if let Some(entry) = guard.iter_mut().find(|entry| entry.manifest.id == id) {
-            entry.state = PluginState::Disabled { reason };
+        let sidecar_names: Option<Vec<String>> = {
+            let mut guard = self
+                .entries
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            guard.iter_mut().find(|entry| entry.manifest.id == id).map(|entry| {
+                entry.state = PluginState::Disabled { reason };
+                entry
+                    .manifest
+                    .sidecars
+                    .iter()
+                    .map(|s| s.name.clone())
+                    .collect()
+            })
+        };
+
+        let Some(names) = sidecar_names else {
+            return;
+        };
+        for name in names {
+            let key = Self::sidecar_key(id, &name);
+            self.process_driver.stop(&key);
         }
     }
 }
@@ -846,6 +975,246 @@ mod tests {
             .expect_err("unknown id should be rejected");
 
         assert!(matches!(err, RegistryError::UnknownPlugin(id) if id == "does-not-exist"));
+    }
+
+    fn manifest_with_sidecar(id: &str, port: u16) -> Manifest {
+        Manifest {
+            id: id.to_string(),
+            name: id.to_string(),
+            version: "0.1.0".into(),
+            description: String::new(),
+            entry: "plugin.wasm".into(),
+            events: vec![],
+            settings: vec![],
+            capabilities: vec![],
+            sidecars: vec![crate::plugin::manifest::SidecarRequest {
+                name: "tts".into(),
+                reason: "reason".into(),
+                args: vec!["-c".into(), "sleep 30".into()],
+                port,
+                scalable: false,
+            }],
+        }
+    }
+
+    /// Regression test for a review finding: disabling a plugin used to only
+    /// flip `PluginEntry::state` to `Disabled`, leaving any sidecar it had
+    /// started running with nobody left able to stop it (the plugin's own
+    /// thread has already exited by the time `set_disabled` is reached from
+    /// `runner.rs`). `set_disabled` must now also stop every sidecar the
+    /// disabled plugin's manifest declares.
+    #[test]
+    fn set_disabled_stops_all_sidecars_of_that_plugin() {
+        let registry = empty_registry();
+        let manifest = manifest_with_sidecar("sc-plugin", 50900);
+        registry.push(PluginEntry {
+            manifest: manifest.clone(),
+            state: PluginState::Running,
+            settings_json: Arc::new(Mutex::new("{}".to_string())),
+            capabilities_json: Arc::new(Mutex::new(
+                crate::plugin::host::capabilities_json_string(&[]),
+            )),
+            sidecars_json: Arc::new(Mutex::new("[]".to_string())),
+        });
+
+        let key = Registry::sidecar_key("sc-plugin", "tts");
+        let spec = ProcessSpec {
+            command: PathBuf::from("/bin/sh"),
+            args: vec!["-c".into(), "sleep 30".into()],
+            ports: vec![50900],
+        };
+        registry
+            .process_driver
+            .ensure_started(&key, &spec)
+            .expect("start sidecar directly via the driver, bypassing wasm entirely");
+        assert!(
+            registry.process_driver.status(&key, &spec)[0].running,
+            "sidecar should be running before disabling the plugin"
+        );
+
+        registry.set_disabled("sc-plugin", "on-event trapped".to_string());
+
+        assert!(
+            !registry.process_driver.status(&key, &spec)[0].running,
+            "set_disabled must stop the disabled plugin's sidecars"
+        );
+        let snapshot = registry.snapshot();
+        assert!(matches!(
+            snapshot
+                .iter()
+                .find(|(m, _)| m.id == "sc-plugin")
+                .map(|(_, s)| s.clone()),
+            Some(PluginState::Disabled { .. })
+        ));
+    }
+
+    /// Regression test for the TOCTOU the security review flagged in
+    /// `control_sidecar`: `Start`/`Restart` used to read the sidecar's grant
+    /// and config, then spawn, with no lock held across the two steps --
+    /// so a concurrent `set_sidecar_grant(false)` could land in between,
+    /// and `control_sidecar` would spawn (or leave running) an instance
+    /// using the grant it read *before* the revocation, even though the
+    /// on-disk grant is now revoked. `control_sidecar`'s fix takes the same
+    /// per-plugin `sidecar_runtime_lock_for(id)` that `set_sidecar_grant`
+    /// (via `refresh_sidecar_runtime`) takes, so the two calls can no longer
+    /// interleave.
+    ///
+    /// Like `concurrent_set_capabilities_keeps_shared_buffer_consistent_with_disk`
+    /// above, this hammers the race from many threads and checks the
+    /// invariant that must hold once every thread has finished: if the
+    /// on-disk grant ends up revoked, no instance may be left running. It's
+    /// a standing regression guard under real concurrent load rather than a
+    /// guaranteed reproduction of the pre-fix bug (the race window without
+    /// the fix is narrow and timing-dependent, same caveat as that test).
+    #[test]
+    fn concurrent_control_sidecar_start_and_grant_revoke_never_leaves_an_ungranted_instance_running(
+    ) {
+        let registry = empty_registry();
+        let manifest = manifest_with_sidecar("sc-plugin", 50910);
+        registry.push(PluginEntry {
+            manifest: manifest.clone(),
+            state: PluginState::Running,
+            settings_json: Arc::new(Mutex::new("{}".to_string())),
+            capabilities_json: Arc::new(Mutex::new(
+                crate::plugin::host::capabilities_json_string(&[]),
+            )),
+            sidecars_json: Arc::new(Mutex::new("[]".to_string())),
+        });
+
+        registry
+            .grants_store
+            .set_sidecar(&manifest, "tts", true)
+            .expect("grant should persist");
+        registry
+            .sidecar_config_store
+            .update_and_effective(
+                &manifest,
+                "tts",
+                &SidecarConfig {
+                    command: "/bin/sh".to_string(),
+                    args: vec!["-c".to_string(), "sleep 30".to_string()],
+                    port: 50910,
+                    replicas: 1,
+                },
+            )
+            .expect("config should persist");
+
+        const THREADS: usize = 8;
+        const ITERATIONS: usize = 20;
+        let barrier = Arc::new(std::sync::Barrier::new(THREADS + 1));
+
+        let mut handles = Vec::new();
+        for _ in 0..THREADS {
+            let registry = registry.clone();
+            let barrier = barrier.clone();
+            handles.push(thread::spawn(move || {
+                barrier.wait();
+                for _ in 0..ITERATIONS {
+                    let _ = registry.control_sidecar("sc-plugin", "tts", SidecarAction::Start);
+                }
+            }));
+        }
+        let revoker = {
+            let registry = registry.clone();
+            let barrier = barrier.clone();
+            thread::spawn(move || {
+                barrier.wait();
+                // Revoke partway through the hammering, then leave the
+                // grant revoked (last write wins on the grants file, and
+                // this is this test's only writer of the grant).
+                std::thread::sleep(Duration::from_millis(5));
+                registry
+                    .set_sidecar_grant("sc-plugin", "tts", false)
+                    .expect("revoke should succeed");
+            })
+        };
+
+        for handle in handles {
+            handle.join().expect("worker thread should not panic");
+        }
+        revoker.join().expect("revoker thread should not panic");
+
+        let disk_granted = registry.grants_store.sidecar_state(&manifest, "tts").granted;
+        let key = Registry::sidecar_key("sc-plugin", "tts");
+        let running = registry
+            .process_driver
+            .status(
+                &key,
+                &ProcessSpec {
+                    command: PathBuf::from("/bin/sh"),
+                    args: vec!["-c".to_string(), "sleep 30".to_string()],
+                    ports: vec![50910],
+                },
+            )
+            .iter()
+            .any(|i| i.running);
+
+        assert!(
+            disk_granted || !running,
+            "sidecar is running (running={running}) while the on-disk grant is \
+             revoked (granted={disk_granted}) -- a Start must have used a grant \
+             value read before the concurrent revoke took effect"
+        );
+
+        registry.process_driver.stop(&key);
+    }
+
+    /// Regression test for a review finding: `set_sidecar_grant` used to
+    /// persist `granted == true` unconditionally, without checking whether
+    /// the sidecar's `command` was ever configured. That let a caller grant
+    /// a sidecar before the user had seen (or set) what executable it would
+    /// run -- the UI enforces this client-side (the checkbox is `disabled`
+    /// while `command` is empty), but that's not a substitute for enforcing
+    /// it in the store: a direct RPC call bypasses the UI entirely.
+    #[test]
+    fn set_sidecar_grant_rejects_granting_without_a_configured_command() {
+        let registry = empty_registry();
+        let manifest = manifest_with_sidecar("sc-plugin", 50920);
+        registry.push(PluginEntry {
+            manifest: manifest.clone(),
+            state: PluginState::Running,
+            settings_json: Arc::new(Mutex::new("{}".to_string())),
+            capabilities_json: Arc::new(Mutex::new(
+                crate::plugin::host::capabilities_json_string(&[]),
+            )),
+            sidecars_json: Arc::new(Mutex::new("[]".to_string())),
+        });
+
+        let result = registry.set_sidecar_grant("sc-plugin", "tts", true);
+        match result {
+            Err(RegistryError::Sidecar(_)) => {}
+            _ => panic!("granting with no command configured must be rejected as RegistryError::Sidecar"),
+        }
+        assert!(
+            !registry.grants_store.sidecar_state(&manifest, "tts").granted,
+            "a rejected grant must not be persisted"
+        );
+
+        // Revoking (granted == false) must always be allowed, even with no
+        // command configured -- otherwise a caller couldn't back out of a
+        // stale/invalid state.
+        registry
+            .set_sidecar_grant("sc-plugin", "tts", false)
+            .expect("revoke must always succeed");
+
+        // Once a command is configured, granting succeeds.
+        registry
+            .sidecar_config_store
+            .update_and_effective(
+                &manifest,
+                "tts",
+                &SidecarConfig {
+                    command: "/bin/true".to_string(),
+                    args: vec![],
+                    port: 50920,
+                    replicas: 1,
+                },
+            )
+            .expect("config should persist");
+        registry
+            .set_sidecar_grant("sc-plugin", "tts", true)
+            .expect("granting with a configured command must succeed");
+        assert!(registry.grants_store.sidecar_state(&manifest, "tts").granted);
     }
 
     fn manifest_with_http_capability(id: &str) -> Manifest {

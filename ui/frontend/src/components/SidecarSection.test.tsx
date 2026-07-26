@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import SidecarSection from "./SidecarSection";
@@ -95,6 +95,39 @@ describe("SidecarSection", () => {
     expect(screen.getByText(/edlr のサンドボックスの外で動きます/)).toBeInTheDocument();
   });
 
+  it("discloses the network consequence and lists the ports granting would allow", () => {
+    render(
+      <SidecarSection
+        sidecars={[sidecar()]}
+        onConfigChange={noop}
+        onGrantChange={noop}
+        onControl={noop}
+      />,
+    );
+    const warning = screen.getByTestId("sidecar-network-warning");
+    expect(warning).toHaveTextContent("127.0.0.1:50021");
+    expect(warning.textContent).toMatch(/通信が.*許可/);
+  });
+
+  it("lists every port a multi-replica sidecar would be granted", () => {
+    render(
+      <SidecarSection
+        sidecars={[
+          sidecar({
+            config: { command: "", args: [], port: 50021, replicas: 3 },
+          }),
+        ]}
+        onConfigChange={noop}
+        onGrantChange={noop}
+        onControl={noop}
+      />,
+    );
+    const warning = screen.getByTestId("sidecar-network-warning");
+    expect(warning).toHaveTextContent("127.0.0.1:50021");
+    expect(warning).toHaveTextContent("127.0.0.1:50022");
+    expect(warning).toHaveTextContent("127.0.0.1:50023");
+  });
+
   it("shows a stale-grant warning", () => {
     render(
       <SidecarSection
@@ -136,8 +169,9 @@ describe("SidecarSection", () => {
         onControl={noop}
       />,
     );
-    expect(screen.getByText(/50021/)).toBeInTheDocument();
-    expect(screen.getByText(/終了コード 1/)).toBeInTheDocument();
+    const instanceList = screen.getByRole("list");
+    expect(within(instanceList).getByText(/50021/)).toBeInTheDocument();
+    expect(within(instanceList).getByText(/終了コード 1/)).toBeInTheDocument();
   });
 
   it("sends start/stop/restart control actions", async () => {
@@ -156,6 +190,37 @@ describe("SidecarSection", () => {
     expect(onControl).toHaveBeenCalledWith("tts", "stop");
     await userEvent.click(screen.getByRole("button", { name: "再起動" }));
     expect(onControl).toHaveBeenCalledWith("tts", "restart");
+  });
+
+  it("follows a config update coming from the server instead of showing stale form values", () => {
+    const { rerender } = render(
+      <SidecarSection
+        sidecars={[sidecar({ config: { command: "/usr/bin/piper", args: [], port: 50021, replicas: 1 } })]}
+        onConfigChange={noop}
+        onGrantChange={noop}
+        onControl={noop}
+      />,
+    );
+    expect(screen.getByLabelText(/実行ファイル/)).toHaveValue("/usr/bin/piper");
+
+    // Another client (or a stale-grant refetch) changed the saved config
+    // underneath us; the parent re-renders SidecarSection with the new
+    // `sidecar.config` prop.
+    rerender(
+      <SidecarSection
+        sidecars={[
+          sidecar({
+            config: { command: "/usr/bin/other-tts", args: ["--flag"], port: 50099, replicas: 2 },
+          }),
+        ]}
+        onConfigChange={noop}
+        onGrantChange={noop}
+        onControl={noop}
+      />,
+    );
+
+    expect(screen.getByLabelText(/実行ファイル/)).toHaveValue("/usr/bin/other-tts");
+    expect(screen.getByLabelText(/ポート/)).toHaveValue(50099);
   });
 
   it("surfaces an error from a rejected config save", async () => {

@@ -2,9 +2,51 @@ use std::io;
 use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 pub const DAEMON_ADDR: &str = "127.0.0.1:8137";
+
+/// SIGTERM を送ってから SIGKILL へフォールバックするまでの既定の猶予。
+/// `core::plugin::host::SIDECAR_SHUTDOWN_GRACE` と同じ 3 秒に揃えてある
+/// (サイドカー自身の猶予とデーモンの猶予がずれると、デーモンより先に
+/// サイドカーだけが SIGKILL される/その逆、といった直感に反する挙動になる
+/// ため)。
+pub const STOP_GRACE: Duration = Duration::from_secs(3);
+
+/// 子プロセスを SIGTERM で止め、`grace` 待って死ななければ SIGKILL に
+/// フォールバックする。`Child::kill()`(= SIGKILL)を無条件に呼ぶのは
+/// この関数内の最後の手段としてのみ。
+///
+/// デーモンにはシグナルハンドラが無いままだと `Child::kill()`(SIGKILL)で
+/// 即死させることになり、デーモンが `stop_all_sidecars` を実行する猶予を
+/// 一切与えられない -- 稼働中のサイドカーが孤児として残る(このブランチの
+/// 最終レビューで見つかった Critical な取りこぼし)。デーモン側に
+/// SIGTERM/SIGINT ハンドラを足した(`core/src/bin/edlr.rs`)のと対で、
+/// Tauri 側もここで SIGTERM をまず送り、後始末の時間を与える。
+///
+/// SAFETY: `child.id()` は自分が `spawn` した(まだ `wait` していない)
+/// プロセスの PID であり、シグナル送信のみで所有権は奪わない。
+pub fn stop_child_gracefully(child: &mut Child, grace: Duration) {
+    let pid = child.id() as libc::pid_t;
+    // SAFETY: see the doc comment above.
+    let sigterm_sent = unsafe { libc::kill(pid, libc::SIGTERM) } == 0;
+    if sigterm_sent {
+        let deadline = Instant::now() + grace;
+        loop {
+            match child.try_wait() {
+                Ok(Some(_)) => return,
+                Ok(None) => {}
+                Err(_) => break,
+            }
+            if Instant::now() >= deadline {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+}
 
 /// addr に TCP 接続できればデーモン生存とみなす。
 pub fn daemon_running(addr: &str) -> bool {
@@ -133,6 +175,80 @@ mod tests {
         let sh = find_in_path("sh").expect("sh should be on PATH");
         assert!(sh.is_file());
         assert_eq!(find_in_path("edlr-definitely-not-a-real-binary"), None);
+    }
+
+    /// Regression test for the "SIGKILL orphans sidecars" finding: a
+    /// SIGTERM-ignoring child must still end up dead after
+    /// `stop_child_gracefully`, via the SIGKILL fallback, and the call must
+    /// actually wait out (at least) the grace period rather than returning
+    /// early.
+    #[test]
+    fn stop_child_gracefully_falls_back_to_sigkill_for_a_stubborn_child() {
+        let dir = tempfile::tempdir().unwrap();
+        let ready = dir.path().join("ready");
+        let script = dir.path().join("stubborn");
+        // `ready` を作ってから sleep する: trap の設定より先に SIGTERM が
+        // 届くと(spawn 直後は default action のまま)、意図せずデフォルトの
+        // 終了動作で死んでしまい、SIGKILL フォールバックを検証できない
+        // レースがあるため、trap 設定後の合図を待ってから送る。
+        fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\ntrap '' TERM\ntouch {}\nsleep 30\n",
+                ready.display()
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let mut child = Command::new(&script).spawn().unwrap();
+        let pid = child.id() as libc::pid_t;
+
+        for _ in 0..200 {
+            if ready.exists() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        let started = Instant::now();
+        stop_child_gracefully(&mut child, Duration::from_millis(300));
+        let elapsed = started.elapsed();
+
+        assert!(
+            elapsed >= Duration::from_millis(300),
+            "must wait out the grace period before escalating to SIGKILL; took {elapsed:?}"
+        );
+        // SAFETY: existence check only, no signal sent.
+        let alive = unsafe { libc::kill(pid, 0) } == 0;
+        assert!(!alive, "stubborn child must be dead after the SIGKILL fallback");
+    }
+
+    /// A child that honors SIGTERM should not make `stop_child_gracefully`
+    /// wait out the full grace period -- otherwise every ordinary shutdown
+    /// would be needlessly slow.
+    #[test]
+    fn stop_child_gracefully_returns_promptly_when_sigterm_is_honored() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("polite");
+        fs::write(&script, "#!/bin/sh\nsleep 30\n").unwrap();
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let mut child = Command::new(&script).spawn().unwrap();
+
+        let started = Instant::now();
+        // grace は意図的に長め(10 秒)にしておく: これより十分短い時間で
+        // 戻ることを確認できれば、「猶予いっぱい待たされた」のではなく
+        // SIGTERM で早期に終了したと言える。しきい値(5 秒)自体にも
+        // 余裕を持たせ、workspace 全体のテストを並列実行したときの
+        // スケジューラの揺らぎで誤って FAILED にならないようにしている。
+        stop_child_gracefully(&mut child, Duration::from_secs(10));
+        let elapsed = started.elapsed();
+
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "must not wait out the full grace period when SIGTERM is honored; took {elapsed:?}"
+        );
     }
 
     #[test]

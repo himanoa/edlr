@@ -382,6 +382,22 @@ fn to_wit_instances(statuses: Vec<edlr_driver_process::InstanceStatus>) -> Vec<W
 }
 
 impl DriverProcessHost for HostCtx {
+    /// **既知の残存レース(意図的、`Registry::control_sidecar` のドキュメント
+    /// コメント参照)**: `resolve_sidecar` は `sidecars_json` を読んだ
+    /// あと、何のロックも保持せずに `process_driver.ensure_started` を呼ぶ。
+    /// `Registry::control_sidecar`(ホスト起点/RPC 経路)は
+    /// `sidecar_runtime_lock_for(id)` を取ってこの TOCTOU を閉じたが、
+    /// ここ(ゲスト起点の経路)には同じロックを取らせていない: そうすると
+    /// `refresh_sidecar_runtime`(承認取消・設定変更)が同じロックを持って
+    /// `shutdown_grace`(既定 3 秒)まで `stop` を待つ間、この呼び出しをした
+    /// プラグインの専用スレッドがブロックされ、`PluginInstance::
+    /// CALL_DEADLINE`(2 秒)を超えて trap してしまう -- このブランチで
+    /// 繰り返し守ってきた「ゲスト呼び出しをブロックさせない」制約に反する。
+    /// 残るレース窓は「承認取消/設定変更が `sidecars_json` バッファに反映
+    /// されてから、この呼び出しが次にそれを読むまで」の間だけで、次回の
+    /// `ensure-started`/`status` 呼び出しでは新しい状態が見え、既に走って
+    /// しまったインスタンスはホスト側(UI/RPC の `sidecar-control` や
+    /// `set_sidecar_grant`/`set_sidecar_config` 経由の停止)から止められる。
     fn ensure_started(&mut self, name: String) -> Result<Vec<WitInstance>, WitProcessError> {
         let spec = self.resolve_sidecar(&name)?;
         let key = self.sidecar_key(&name);

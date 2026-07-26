@@ -563,6 +563,41 @@ mod tests {
         assert_eq!(state, GrantState { granted: false, stale: false });
     }
 
+    /// Minor(最終レビュー指摘): 壊れた grants JSON がディスクにある状態で
+    /// `sidecar_state`/`set_sidecar` を呼んでも fail-closed(未承認扱い)の
+    /// まま動くことを固定する回帰テスト。`state`/`set` 側には既に
+    /// `broken_json_is_treated_as_unsaved` があるが、サイドカー単位の
+    /// `sidecar_state`/`set_sidecar` には同等のテストが無かった。
+    #[test]
+    fn broken_grants_json_is_treated_as_unsaved_for_sidecar_state_and_set_sidecar() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("grants");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("sc-plugin.json"), "not valid json {{{").unwrap();
+
+        let store = GrantsStore::new(dir);
+        let manifest = manifest_with_sidecar(50021);
+
+        // 壊れたファイルは「未承認」扱い(stale でもない -- fail-closed だが
+        // 「保存されているが不一致」とは違う無害な扱い)。
+        assert_eq!(
+            store.sidecar_state(&manifest, "tts"),
+            GrantState { granted: false, stale: false },
+            "broken grants JSON must fail closed as ungranted, not panic or resurrect a grant"
+        );
+
+        // `set_sidecar` は壊れたファイルの上に安全に新しい状態を書ける
+        // (`read_saved` が `None` を返すので `unwrap_or_default` から出発する)。
+        let state = store
+            .set_sidecar(&manifest, "tts", true)
+            .expect("set_sidecar must recover from a broken grants file, not fail or panic");
+        assert_eq!(state, GrantState { granted: true, stale: false });
+        assert_eq!(
+            store.sidecar_state(&manifest, "tts"),
+            GrantState { granted: true, stale: false }
+        );
+    }
+
     #[test]
     fn set_creates_missing_dir() {
         let tmp = tempfile::tempdir().unwrap();

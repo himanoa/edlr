@@ -49,6 +49,13 @@ pub fn sidecar_env(name: &str, port: u16, scalable: bool) -> Env {
 }
 
 /// 当該プラグインの `capabilities_json` が現在載せている実効許可ホスト。
+///
+/// `#[allow(dead_code)]`: このモジュールはテストバイナリごとに個別に
+/// コンパイルされる(`core/tests/*.rs` の各ファイルが `mod support;` する
+/// たび)。このヘルパを使わないテストバイナリからは「未使用」警告が出るが、
+/// 実際には他のテストバイナリで使われている正常な状態(Minor: 最終レビュー
+/// で見つかったテスト出力のノイズ)。
+#[allow(dead_code)]
 pub fn effective_hosts(registry: &Registry, id: &str) -> Vec<String> {
     registry.effective_hosts(id).unwrap_or_default()
 }
@@ -57,6 +64,7 @@ pub fn effective_hosts(registry: &Registry, id: &str) -> Vec<String> {
 /// 作り、それぞれに同名のサイドカーを 1 つずつ宣言した `Registry` を返す。
 /// 「あるプラグインのサイドカー停止待ちが、別プラグインのサイドカー操作を
 /// ブロックしないか」を検証するテスト専用のヘルパ。
+#[allow(dead_code)]
 pub fn two_plugin_sidecar_env(sidecar_name: &str, port_a: u16, port_b: u16) -> Env {
     let tmp = tempfile::tempdir().expect("tempdir");
     let plugins_dir = tmp.path().join("plugins");
@@ -76,6 +84,7 @@ pub fn two_plugin_sidecar_env(sidecar_name: &str, port_a: u16, port_b: u16) -> E
     Env { registry, _tmp: tmp }
 }
 
+#[allow(dead_code)]
 fn write_sidecar_plugin(plugins_dir: &Path, plugin_id: &str, sidecar_name: &str, port: u16) {
     let plugin_dir = plugins_dir.join(plugin_id);
     std::fs::create_dir_all(&plugin_dir).unwrap();

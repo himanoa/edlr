@@ -150,19 +150,46 @@ async fn main() {
         Duration::from_millis(args.poll_interval_ms),
     ));
 
+    // SIGTERM/SIGINT ハンドラ。ハンドラを一切登録しないままだと、デーモンは
+    // これらのシグナルに対してデフォルト動作(即死)をする -- サイドカーの
+    // 後始末(`stop_all_sidecars`)が一切走らないまま終了し、`Ctrl-C` や
+    // Tauri 側からの通常の停止経路でサイドカーが孤児として残ってしまう
+    // (このブランチの最終レビューで見つかった Critical な取りこぼし)。
+    // ここで拾って明示的な shutdown シーケンス(下の `stop_all_sidecars`)に
+    // 合流させることで、`rx.recv()` が `Closed` で抜ける経路と同じ後始末を
+    // 通す。Unix 専用(`signal(SignalKind::terminate())`)。このドライバ自体
+    // (`drivers/process`)が既に `std::os::unix::process::CommandExt` を
+    // 無条件に使っており、このホストは元々 Unix 専用であるため問題ない。
+    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        .expect("failed to install SIGTERM handler");
+    let mut sigint = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
+        .expect("failed to install SIGINT handler");
+
     loop {
-        match rx.recv().await {
-            Ok(event) => {
-                let json = match &*event {
-                    edlr_core::event::Event::Journal { raw, .. } => raw.to_string(),
-                    edlr_core::event::Event::Status { raw } => raw.to_string(),
-                };
-                println!("{json}");
+        tokio::select! {
+            event = rx.recv() => {
+                match event {
+                    Ok(event) => {
+                        let json = match &*event {
+                            edlr_core::event::Event::Journal { raw, .. } => raw.to_string(),
+                            edlr_core::event::Event::Status { raw } => raw.to_string(),
+                        };
+                        println!("{json}");
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        tracing::warn!("stdout consumer lagged, dropped {n} events");
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                }
             }
-            Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                tracing::warn!("stdout consumer lagged, dropped {n} events");
+            _ = sigterm.recv() => {
+                tracing::info!("received SIGTERM, shutting down");
+                break;
             }
-            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            _ = sigint.recv() => {
+                tracing::info!("received SIGINT, shutting down");
+                break;
+            }
         }
     }
 
@@ -170,7 +197,12 @@ async fn main() {
     // `ProcessDriver::stop_all`(`PluginHost::drop` 経由でも最後の砦として
     // 呼ばれる)は、まだ稼働中の `Registry`/`PluginHost` を保持したままの
     // 明示的な shutdown シーケンスの一部として、ここでも呼んでおく。
-    if let Some(registry) = &registry {
-        registry.stop_all_sidecars();
+    //
+    // `stop_all_sidecars`(同期版 `ProcessDriver::stop_all`)は SIGTERM を
+    // 無視するサイドカーがいれば `shutdown_grace`(既定 3 秒)×インスタンス数
+    // ブロックしうる。ここは非同期ランタイムの最後の一手なので tokio の
+    // ワーカースレッドを塞がないよう `spawn_blocking` に逃がしてから待つ。
+    if let Some(registry) = registry {
+        let _ = tokio::task::spawn_blocking(move || registry.stop_all_sidecars()).await;
     }
 }
