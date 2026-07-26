@@ -15,6 +15,8 @@ use std::process::Command;
 use std::time::Duration;
 use tokio_tungstenite::tungstenite::Message;
 
+mod support;
+
 type Ws =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
@@ -612,6 +614,167 @@ async fn plugins_set_capabilities_with_invalid_params_returns_rpc_error() {
     let resp = recv_json(&mut ws).await;
     assert_eq!(resp["type"], "rpc-error");
     assert_eq!(resp["id"], 3);
+}
+
+/// WS 接続と RPC の往復をまとめたテスト用ヘルパ。`_sidecar_env` を保持する
+/// のは、`Registry` が参照する `SidecarConfigStore`/`GrantsStore` の保存先
+/// tempdir をテストの間ずっと生存させるため(drop すると保存先が消える)。
+struct SidecarTestEnv {
+    _sidecar_env: support::Env,
+    ws: Ws,
+    next_id: i64,
+}
+
+impl SidecarTestEnv {
+    async fn call(
+        &mut self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        self.next_id += 1;
+        let id = self.next_id;
+        send_rpc(&mut self.ws, id, method, params).await;
+        let resp = recv_json(&mut self.ws).await;
+        assert_eq!(resp["id"], id);
+        match resp["type"].as_str().expect("type must be a string") {
+            "rpc-result" => Ok(resp["result"].clone()),
+            "rpc-error" => Err(resp["error"]
+                .as_str()
+                .expect("error must be a string")
+                .to_string()),
+            other => panic!("unexpected message type: {other}"),
+        }
+    }
+}
+
+/// `[[sidecar]]`(`name = "tts"`, `port = 50401`, `scalable = false`)を 1 件
+/// 持つ `sc-plugin` の manifest を置いた plugins-dir でサーバを起動し、
+/// 接続済みの `SidecarTestEnv` を返す。
+async fn spawn_server_with_sidecar_plugin() -> SidecarTestEnv {
+    let sidecar_env = support::sidecar_env("tts", 50401, false);
+    let registry = sidecar_env.registry.clone();
+    let (_router, addr) = setup(Some(registry)).await;
+    let mut ws = connect(addr).await;
+    recv_hello(&mut ws).await;
+    SidecarTestEnv {
+        _sidecar_env: sidecar_env,
+        ws,
+        next_id: 0,
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn sidecar_rpc_round_trip() {
+    let mut env = spawn_server_with_sidecar_plugin().await;
+
+    let sidecars = env
+        .call(
+            "plugins/get-sidecars",
+            serde_json::json!({"plugin": "sc-plugin"}),
+        )
+        .await
+        .expect("get-sidecars should succeed");
+    let list = sidecars["sidecars"].as_array().expect("sidecars array");
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0]["name"], "tts");
+    assert_eq!(list[0]["granted"], serde_json::json!(false));
+    assert_eq!(list[0]["config"]["command"], serde_json::json!(""));
+
+    let updated = env
+        .call(
+            "plugins/set-sidecar-config",
+            serde_json::json!({
+                "plugin": "sc-plugin",
+                "name": "tts",
+                "config": {"command": "/bin/sh", "args": ["-c", "sleep 30"], "port": 50401, "replicas": 1}
+            }),
+        )
+        .await
+        .expect("set-sidecar-config should succeed");
+    assert_eq!(
+        updated["sidecars"][0]["config"]["command"],
+        serde_json::json!("/bin/sh")
+    );
+
+    let granted = env
+        .call(
+            "plugins/set-sidecar-grant",
+            serde_json::json!({"plugin": "sc-plugin", "name": "tts", "granted": true}),
+        )
+        .await
+        .expect("set-sidecar-grant should succeed");
+    assert_eq!(
+        granted["sidecars"][0]["granted"],
+        serde_json::json!(true)
+    );
+
+    let started = env
+        .call(
+            "plugins/sidecar-control",
+            serde_json::json!({"plugin": "sc-plugin", "name": "tts", "action": "start"}),
+        )
+        .await
+        .expect("start should succeed");
+    assert_eq!(
+        started["sidecars"][0]["instances"][0]["state"],
+        serde_json::json!("running")
+    );
+
+    let stopped = env
+        .call(
+            "plugins/sidecar-control",
+            serde_json::json!({"plugin": "sc-plugin", "name": "tts", "action": "stop"}),
+        )
+        .await
+        .expect("stop should succeed");
+    assert_eq!(
+        stopped["sidecars"][0]["instances"][0]["state"],
+        serde_json::json!("exited")
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn invalid_sidecar_config_is_an_rpc_error_and_changes_nothing() {
+    let mut env = spawn_server_with_sidecar_plugin().await;
+
+    let err = env
+        .call(
+            "plugins/set-sidecar-config",
+            serde_json::json!({
+                "plugin": "sc-plugin",
+                "name": "tts",
+                // scalable = false のサイドカーに replicas > 1
+                "config": {"command": "/bin/sh", "args": ["-c", "sleep 30"], "port": 50411, "replicas": 4}
+            }),
+        )
+        .await
+        .expect_err("invalid config must be rejected");
+    assert!(err.contains("replicas"));
+
+    let sidecars = env
+        .call(
+            "plugins/get-sidecars",
+            serde_json::json!({"plugin": "sc-plugin"}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        sidecars["sidecars"][0]["config"]["command"],
+        serde_json::json!("")
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn unknown_sidecar_name_is_an_rpc_error() {
+    let mut env = spawn_server_with_sidecar_plugin().await;
+    let err = env
+        .call(
+            "plugins/get-sidecars",
+            serde_json::json!({"plugin": "nope"}),
+        )
+        .await
+        .expect_err("unknown plugin must be rejected");
+    assert!(err.contains("unknown plugin"));
 }
 
 #[tokio::test]
