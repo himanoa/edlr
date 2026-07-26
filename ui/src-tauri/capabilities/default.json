@@ -3,5 +3,5 @@
   "identifier": "default",
   "description": "edlr のウィンドウが使う権限",
   "windows": ["main"],
-  "permissions": ["core:default"]
+  "permissions": ["core:default", "dialog:allow-open"]
 }

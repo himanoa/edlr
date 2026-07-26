@@ -166,6 +166,17 @@ fn set_journal_dir(
     Ok(snapshot(&state))
 }
 
+/// ネイティブのディレクトリ選択ダイアログを開く。キャンセル時は None。
+#[tauri::command]
+async fn pick_journal_dir(app: tauri::AppHandle) -> Option<String> {
+    use tauri_plugin_dialog::DialogExt;
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    app.dialog().file().pick_folder(move |picked| {
+        let _ = tx.send(picked);
+    });
+    rx.await.ok().flatten().map(|path| path.to_string())
+}
+
 fn main() {
     // ウィンドウを出してフロントエンドを表示する薄い皮 + デーモンの道連れ起動。
     // 既に起動済みのデーモンには spawn も kill もしない。
@@ -188,8 +199,13 @@ fn main() {
     };
 
     let app = match tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .manage(state)
-        .invoke_handler(tauri::generate_handler![get_config, set_journal_dir])
+        .invoke_handler(tauri::generate_handler![
+            get_config,
+            set_journal_dir,
+            pick_journal_dir
+        ])
         .build(tauri::generate_context!())
     {
         Ok(app) => app,

@@ -9,7 +9,9 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 edlr-config = { path = "../../config" }
 tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
 serde = { version = "1", features = ["derive"] }
+tokio = { version = "1", features = ["sync"] }
 
 [dev-dependencies]
 tempfile = "3"
