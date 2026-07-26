@@ -70,6 +70,18 @@ pub struct ProcessDriver {
     groups: Mutex<HashMap<String, Group>>,
     shutdown_grace: Duration,
     spawn_min_interval: Duration,
+    /// `stop_detached` がバックグラウンドスレッドへ逃がした kill/wait 待ちの
+    /// ハンドル置き場。
+    ///
+    /// `take_for_stop` は既に `terminating` なインスタンスを拾わないため、
+    /// `stop_detached` が detach 済みのインスタンスは `stop_all` 自身の
+    /// `take_for_stop` からは見えない -- 何もしなければ `stop_all` は
+    /// それらの kill が終わるのを待たずに戻ってしまう(デーモン shutdown
+    /// 直後に子プロセスが生き残る)。`stop_all` はここに残っている全
+    /// ハンドルを join してから戻ることで、「戻った時点までに存在した
+    /// 全プロセスが確実に死んでいる」という保証を、`stop_detached` 経由の
+    /// 停止についても保つ。
+    pending_detached: Mutex<Vec<std::thread::JoinHandle<()>>>,
 }
 
 impl ProcessDriver {
@@ -78,6 +90,7 @@ impl ProcessDriver {
             groups: Mutex::new(HashMap::new()),
             shutdown_grace,
             spawn_min_interval,
+            pending_detached: Mutex::new(Vec::new()),
         }
     }
 
@@ -214,7 +227,8 @@ impl ProcessDriver {
     /// デーモン終了時の一括停止(`stop_all`)や、後続タスクで `Registry` が
     /// 呼ぶホスト起点の停止には使わない -- そちらは「戻った時点で実際に
     /// 死んでいる」ことに依存しているため、同期版の `stop`/`stop_all` の
-    /// ままにする。
+    /// ままにする(ただし `stop_all` は、この関数が今まさに逃がした kill も
+    /// `pending_detached` 経由で待つ。後述)。
     pub fn stop_detached(self: Arc<Self>, key: &str) {
         let taken = {
             let mut groups = self.lock();
@@ -227,13 +241,33 @@ impl ProcessDriver {
             return;
         }
         let key = key.to_string();
-        std::thread::spawn(move || {
-            self.finish_stop(&key, taken);
+        let driver = Arc::clone(&self);
+        let handle = std::thread::spawn(move || {
+            driver.finish_stop(&key, taken);
         });
+
+        let mut pending = self
+            .pending_detached
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        // 完了済みのハンドルを間引いてから追加する: `stop_all` を一度も
+        // 挟まずに `stop_detached` が繰り返し呼ばれても(例えば複数の
+        // サイドカーを次々止めるループ)、このリストが際限なく育たない
+        // ようにするため。
+        pending.retain(|h| !h.is_finished());
+        pending.push(handle);
     }
 
     /// 全 key の全インスタンスを停止する(デーモン shutdown 用)。
     /// `stop` と同じ理由でロックを解放してから待つ。
+    ///
+    /// 加えて、`stop_detached` が既に `terminating` にして
+    /// バックグラウンドスレッドへ委譲した kill/wait もここで待つ
+    /// (`pending_detached` を参照)。そうしないと、`stop_detached` の
+    /// 呼び出し直後に `stop_all` が走った場合、当該インスタンスは
+    /// 下の `take_for_stop` には「既に処理中」として素通りされてしまい、
+    /// 実際には死ぬ前に `stop_all` が戻ってしまう -- デーモン終了時に
+    /// 子プロセスが生き残る、という致命的な取りこぼしになる。
     pub fn stop_all(&self) {
         let per_key: Vec<(String, Vec<TakenChild>)> = {
             let mut groups = self.lock();
@@ -244,6 +278,16 @@ impl ProcessDriver {
         };
         for (key, taken) in per_key {
             self.finish_stop(&key, taken);
+        }
+
+        let pending: Vec<std::thread::JoinHandle<()>> = std::mem::take(
+            &mut *self
+                .pending_detached
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+        );
+        for handle in pending {
+            let _ = handle.join();
         }
     }
 
@@ -886,6 +930,63 @@ mod tests {
         assert!(
             !alive,
             "stop_all must not return until every process is actually dead"
+        );
+    }
+
+    /// Regression test for a review finding: `stop_all` used to determine
+    /// its own work purely from `take_for_stop`, which skips instances that
+    /// are already `terminating` -- exactly the state a preceding
+    /// `stop_detached` call leaves an instance in while its background
+    /// kill/wait is still running. Without `pending_detached`, a
+    /// guest `stop()` immediately followed by daemon shutdown
+    /// (`stop_all`, via `PluginHost::drop`) would let `stop_all` return
+    /// before the in-flight kill from `stop_detached` had actually
+    /// finished, leaving a live orphan behind once the host process exits.
+    #[test]
+    fn stop_all_waits_for_an_in_flight_stop_detached_kill_before_returning() {
+        let tmp =
+            std::env::temp_dir().join(format!("edlr-stop-all-race-test-{}", std::process::id()));
+        let _ = std::fs::remove_file(&tmp);
+
+        let driver = Arc::new(ProcessDriver::new(Duration::from_secs(2), Duration::from_millis(0)));
+        let stubborn_spec = ProcessSpec {
+            command: PathBuf::from("/bin/sh"),
+            args: vec![
+                "-c".to_string(),
+                format!("echo $$ > {}; trap '' TERM; sleep 30", tmp.display()),
+            ],
+            ports: vec![50142],
+        };
+
+        driver
+            .ensure_started("p/race", &stubborn_spec)
+            .expect("start");
+
+        let mut pid = None;
+        for _ in 0..200 {
+            if let Ok(content) = std::fs::read_to_string(&tmp) {
+                if let Ok(p) = content.trim().parse::<i32>() {
+                    pid = Some(p);
+                    break;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let pid = pid.expect("process should report its pid");
+
+        // Mirror a guest `stop()` immediately followed by daemon shutdown:
+        // the background kill `stop_detached` just kicked off is still
+        // mid-grace (2s) when `stop_all` runs right after it.
+        Arc::clone(&driver).stop_detached("p/race");
+        driver.stop_all();
+        let _ = std::fs::remove_file(&tmp);
+
+        // SAFETY: existence check only.
+        let alive = unsafe { libc::kill(pid, 0) } == 0;
+        assert!(
+            !alive,
+            "stop_all must wait out a stop_detached kill that was already in \
+             flight when it was called, not just the instances it detaches itself"
         );
     }
 }
