@@ -52,6 +52,13 @@ impl SettingField {
     }
 }
 
+/// プラグインが要求する capability(実行時に許可が必要な外部リソースアクセス)。
+#[derive(Debug, Clone, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum CapabilityRequest {
+    Http { hosts: Vec<String>, reason: String },
+}
+
 /// `manifest.toml` のパース結果。
 #[derive(Debug, Clone, PartialEq, serde::Deserialize)]
 pub struct Manifest {
@@ -65,6 +72,57 @@ pub struct Manifest {
     pub events: Vec<String>,
     #[serde(default)]
     pub settings: Vec<SettingField>,
+    #[serde(default)]
+    pub capabilities: Vec<CapabilityRequest>,
+}
+
+impl Manifest {
+    /// capability 要求一式の安定ハッシュ(grants の失効判定に使う)。
+    ///
+    /// - 同じ要求内容なら常に同じ値を返す(プロセスをまたいでも安定)。
+    /// - `hosts` の順序は正規化(小文字化してソート)されるため、順序違いは無視される。
+    /// - 要求内容が変われば異なる値になる。
+    /// - `capabilities` が空なら `None`。
+    pub fn capabilities_fingerprint(&self) -> Option<String> {
+        if self.capabilities.is_empty() {
+            return None;
+        }
+
+        let mut canonical_requests: Vec<String> = self
+            .capabilities
+            .iter()
+            .map(|req| match req {
+                CapabilityRequest::Http { hosts, reason } => {
+                    let mut normalized_hosts: Vec<String> =
+                        hosts.iter().map(|h| h.to_lowercase()).collect();
+                    normalized_hosts.sort();
+                    format!(
+                        "http|hosts={}|reason={}",
+                        normalized_hosts.join(","),
+                        reason
+                    )
+                }
+            })
+            .collect();
+        canonical_requests.sort();
+        let canonical = canonical_requests.join(";");
+
+        Some(fnv1a_hex(&canonical))
+    }
+}
+
+/// FNV-1a 64bit ハッシュ。`DefaultHasher` と異なり実行ごとに値が変わらないため、
+/// マニフェスト間で安定比較が必要な fingerprint に使う(暗号強度は不要)。
+fn fnv1a_hex(input: &str) -> String {
+    const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
+    const FNV_PRIME: u64 = 0x100000001b3;
+
+    let mut hash = FNV_OFFSET_BASIS;
+    for byte in input.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    format!("{hash:016x}")
 }
 
 /// `load_manifest` が返しうるエラー。
@@ -80,6 +138,8 @@ pub enum ManifestError {
     MissingEntry,
     /// `settings` 内で `key` が重複している。
     DuplicateKey,
+    /// `capabilities` の内容が不正(host の形式・空リストなど)。
+    BadCapability(String),
 }
 
 impl fmt::Display for ManifestError {
@@ -93,6 +153,7 @@ impl fmt::Display for ManifestError {
             ManifestError::BadId => write!(f, "manifest id must match [a-z0-9-]+"),
             ManifestError::MissingEntry => write!(f, "entry file does not exist"),
             ManifestError::DuplicateKey => write!(f, "duplicate settings key"),
+            ManifestError::BadCapability(msg) => write!(f, "invalid capability request: {msg}"),
         }
     }
 }
@@ -104,6 +165,62 @@ fn is_valid_id(id: &str) -> bool {
         && id
             .chars()
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+}
+
+/// capability の host エントリを検証する。
+///
+/// - `http://` または `https://` で始まること
+/// - URL としてパース可能で、host を持つこと
+/// - path・query・fragment を持たないこと(bare origin のみ)。ただし末尾の
+///   `/` 一つだけの path (`https://example.com/`) は origin と等価なので許可する。
+fn validate_host(host: &str) -> Result<(), String> {
+    if !host.starts_with("http://") && !host.starts_with("https://") {
+        return Err(format!("host must start with http:// or https://: {host}"));
+    }
+
+    let parsed =
+        url::Url::parse(host).map_err(|e| format!("host is not a valid URL: {host} ({e})"))?;
+
+    if parsed.host_str().is_none_or(str::is_empty) {
+        return Err(format!("host must have a non-empty hostname: {host}"));
+    }
+
+    if !matches!(parsed.path(), "" | "/") {
+        return Err(format!("host must not contain a path: {host}"));
+    }
+
+    if parsed.query().is_some() {
+        return Err(format!("host must not contain a query: {host}"));
+    }
+
+    if parsed.fragment().is_some() {
+        return Err(format!("host must not contain a fragment: {host}"));
+    }
+
+    Ok(())
+}
+
+fn validate_capabilities(capabilities: &[CapabilityRequest]) -> Result<(), ManifestError> {
+    for capability in capabilities {
+        match capability {
+            CapabilityRequest::Http { hosts, reason } => {
+                if hosts.is_empty() {
+                    return Err(ManifestError::BadCapability(
+                        "http capability requires at least one host".to_string(),
+                    ));
+                }
+                if reason.trim().is_empty() {
+                    return Err(ManifestError::BadCapability(
+                        "http capability requires a non-empty reason".to_string(),
+                    ));
+                }
+                for host in hosts {
+                    validate_host(host).map_err(ManifestError::BadCapability)?;
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 /// `dir/manifest.toml` を読み込み、検証して返す。
@@ -135,6 +252,8 @@ pub fn load_manifest(dir: &Path) -> Result<Manifest, ManifestError> {
             return Err(ManifestError::DuplicateKey);
         }
     }
+
+    validate_capabilities(&manifest.capabilities)?;
 
     Ok(manifest)
 }
@@ -445,5 +564,241 @@ default = "x"
         let events: Vec<String> = vec![];
         assert!(!matches_event(&events, &journal_event("FSDJump")));
         assert!(!matches_event(&events, &status_event()));
+    }
+
+    #[test]
+    fn capabilities_with_http_request_are_parsed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin_dir = tmp.path().join("cap-plugin");
+        fs::create_dir_all(&plugin_dir).unwrap();
+        write_entry(&plugin_dir, "plugin.wasm");
+        write_manifest(
+            &plugin_dir,
+            r#"
+id = "cap-plugin"
+name = "Cap Plugin"
+version = "0.1.0"
+entry = "plugin.wasm"
+
+[[capabilities]]
+kind = "http"
+hosts = ["https://api.example.com", "https://api2.example.com"]
+reason = "fetch fleet data"
+"#,
+        );
+
+        let manifest = load_manifest(&plugin_dir).expect("manifest should parse");
+
+        assert_eq!(manifest.capabilities.len(), 1);
+        assert_eq!(
+            manifest.capabilities[0],
+            CapabilityRequest::Http {
+                hosts: vec![
+                    "https://api.example.com".to_string(),
+                    "https://api2.example.com".to_string(),
+                ],
+                reason: "fetch fleet data".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn capabilities_default_to_empty_when_omitted() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin_dir = tmp.path().join("no-cap-plugin");
+        fs::create_dir_all(&plugin_dir).unwrap();
+        write_entry(&plugin_dir, "plugin.wasm");
+        write_manifest(
+            &plugin_dir,
+            r#"
+id = "no-cap-plugin"
+name = "No Cap"
+version = "0.1.0"
+entry = "plugin.wasm"
+"#,
+        );
+
+        let manifest = load_manifest(&plugin_dir).expect("manifest should parse");
+        assert!(manifest.capabilities.is_empty());
+    }
+
+    #[test]
+    fn unknown_capability_kind_is_rejected() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin_dir = tmp.path().join("unknown-kind-plugin");
+        fs::create_dir_all(&plugin_dir).unwrap();
+        write_entry(&plugin_dir, "plugin.wasm");
+        write_manifest(
+            &plugin_dir,
+            r#"
+id = "unknown-kind-plugin"
+name = "Unknown Kind"
+version = "0.1.0"
+entry = "plugin.wasm"
+
+[[capabilities]]
+kind = "filesystem"
+hosts = ["https://api.example.com"]
+reason = "n/a"
+"#,
+        );
+
+        let err = load_manifest(&plugin_dir).expect_err("unknown capability kind should error");
+        assert!(matches!(err, ManifestError::Parse(_)));
+    }
+
+    #[test]
+    fn host_without_scheme_is_rejected() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin_dir = tmp.path().join("no-scheme-plugin");
+        fs::create_dir_all(&plugin_dir).unwrap();
+        write_entry(&plugin_dir, "plugin.wasm");
+        write_manifest(
+            &plugin_dir,
+            r#"
+id = "no-scheme-plugin"
+name = "No Scheme"
+version = "0.1.0"
+entry = "plugin.wasm"
+
+[[capabilities]]
+kind = "http"
+hosts = ["api.example.com"]
+reason = "fetch data"
+"#,
+        );
+
+        let err = load_manifest(&plugin_dir).expect_err("host without scheme should be rejected");
+        assert!(matches!(err, ManifestError::BadCapability(_)));
+    }
+
+    #[test]
+    fn host_with_path_is_rejected() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin_dir = tmp.path().join("path-host-plugin");
+        fs::create_dir_all(&plugin_dir).unwrap();
+        write_entry(&plugin_dir, "plugin.wasm");
+        write_manifest(
+            &plugin_dir,
+            r#"
+id = "path-host-plugin"
+name = "Path Host"
+version = "0.1.0"
+entry = "plugin.wasm"
+
+[[capabilities]]
+kind = "http"
+hosts = ["https://api.example.com/v1"]
+reason = "fetch data"
+"#,
+        );
+
+        let err = load_manifest(&plugin_dir).expect_err("host with path should be rejected");
+        assert!(matches!(err, ManifestError::BadCapability(_)));
+    }
+
+    #[test]
+    fn empty_hosts_list_is_rejected() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin_dir = tmp.path().join("empty-hosts-plugin");
+        fs::create_dir_all(&plugin_dir).unwrap();
+        write_entry(&plugin_dir, "plugin.wasm");
+        write_manifest(
+            &plugin_dir,
+            r#"
+id = "empty-hosts-plugin"
+name = "Empty Hosts"
+version = "0.1.0"
+entry = "plugin.wasm"
+
+[[capabilities]]
+kind = "http"
+hosts = []
+reason = "fetch data"
+"#,
+        );
+
+        let err = load_manifest(&plugin_dir).expect_err("empty hosts should be rejected");
+        assert!(matches!(err, ManifestError::BadCapability(_)));
+    }
+
+    #[test]
+    fn empty_reason_is_rejected() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin_dir = tmp.path().join("empty-reason-plugin");
+        fs::create_dir_all(&plugin_dir).unwrap();
+        write_entry(&plugin_dir, "plugin.wasm");
+        write_manifest(
+            &plugin_dir,
+            r#"
+id = "empty-reason-plugin"
+name = "Empty Reason"
+version = "0.1.0"
+entry = "plugin.wasm"
+
+[[capabilities]]
+kind = "http"
+hosts = ["https://api.example.com"]
+reason = ""
+"#,
+        );
+
+        let err = load_manifest(&plugin_dir).expect_err("empty reason should be rejected");
+        assert!(matches!(err, ManifestError::BadCapability(_)));
+    }
+
+    #[test]
+    fn fingerprint_is_stable_order_independent_and_sensitive_to_content() {
+        fn manifest_with_hosts(hosts: Vec<&str>) -> Manifest {
+            Manifest {
+                id: "fp-plugin".into(),
+                name: "FP Plugin".into(),
+                version: "0.1.0".into(),
+                description: String::new(),
+                entry: "plugin.wasm".into(),
+                events: vec![],
+                settings: vec![],
+                capabilities: vec![CapabilityRequest::Http {
+                    hosts: hosts.into_iter().map(String::from).collect(),
+                    reason: "fetch data".into(),
+                }],
+            }
+        }
+
+        let a = manifest_with_hosts(vec!["https://api.example.com", "https://api2.example.com"]);
+        let b = manifest_with_hosts(vec!["https://api.example.com", "https://api2.example.com"]);
+        let reordered =
+            manifest_with_hosts(vec!["https://api2.example.com", "https://api.example.com"]);
+        let extra_host = manifest_with_hosts(vec![
+            "https://api.example.com",
+            "https://api2.example.com",
+            "https://api3.example.com",
+        ]);
+        let mut no_capabilities = a.clone();
+        no_capabilities.capabilities.clear();
+
+        let fp_a = a.capabilities_fingerprint().expect("should have a value");
+        let fp_b = b.capabilities_fingerprint().expect("should have a value");
+        let fp_reordered = reordered
+            .capabilities_fingerprint()
+            .expect("should have a value");
+        let fp_extra = extra_host
+            .capabilities_fingerprint()
+            .expect("should have a value");
+
+        assert_eq!(
+            fp_a, fp_b,
+            "identical content must produce identical fingerprint"
+        );
+        assert_eq!(fp_a, fp_reordered, "host order must not affect fingerprint");
+        assert_ne!(
+            fp_a, fp_extra,
+            "changing the request set must change the fingerprint"
+        );
+        assert_eq!(
+            no_capabilities.capabilities_fingerprint(),
+            None,
+            "no capability requests must yield None"
+        );
     }
 }

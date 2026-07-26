@@ -21,6 +21,7 @@ tower-http = { version = "0.6", features = ["fs"] }
 wasmtime = { version = "47.0.2", features = ["component-model"] }
 anyhow = "1.0.104"
 wasmtime-wasi = "47.0.2"
+url = "2.5.8"
 
 [dev-dependencies]
 tempfile = "3"
