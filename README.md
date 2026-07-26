@@ -30,6 +30,20 @@ Elite Dangerous の Journal / Status.json を監視し、イベントをドラ�
 (wasmtime エンジン)の初期化に失敗した場合はその旨を warn ログに出し、
 プラグイン機能なしでデーモン本体は動き続ける。
 
+インターフェースは `core/wit/plugin.wit` の 2 つの world:
+
+- **`plugin`** — ホスト側(`bindgen!`)が使う。edlr が提供する 4 インターフェース
+  (`host-log` / `host-settings` / `driver-http` / `driver-process`)と、プラグインが
+  export する `init` / `on-event` だけを宣言する
+- **`plugin-guest`** — **プラグイン(ゲスト)がビルド時に対象にする world**。
+  `plugin` に WASI の import 一式(`wasi:cli/imports@0.2.0`)を足したもの。Go/TinyGo の
+  標準ライブラリはプラグインが何も呼ばなくても WASI を import するため、`plugin` を
+  直接対象にするとコンポーネント化が失敗する。Rust の `wasm32-wasip2` ターゲットは
+  リンカが WASI import を自動で足すのでどちらでもビルドできる
+
+WASI 自体はホストが `wasmtime_wasi` の `add_to_linker_sync` で提供するため、
+`plugin-guest` でビルドしたコンポーネントはそのままロードできる。
+
 ### plugins-dir のレイアウト
 
     <plugins-dir>/
