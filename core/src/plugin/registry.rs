@@ -287,8 +287,15 @@ impl Registry {
             .set(&manifest, granted)
             .map_err(RegistryError::Grants)?;
 
-        let capabilities_json_string =
-            capabilities_json_string(state.granted, &manifest.capability_hosts());
+        // Sidecar の暗黙許可(implicit_http_hosts)を織り込む配線は Task 6 の
+        // 責務。ここではコンパイルを通す最小修正として capability grant の
+        // 効果だけを反映する。
+        let effective_hosts = if state.granted {
+            manifest.capability_hosts()
+        } else {
+            Vec::new()
+        };
+        let capabilities_json_string = capabilities_json_string(&effective_hosts);
         *capabilities_json
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = capabilities_json_string;
@@ -405,7 +412,7 @@ mod tests {
         let registry = empty_registry();
         let manifest = manifest_with_http_capability("cap-plugin");
         let capabilities_json = Arc::new(Mutex::new(
-            crate::plugin::host::capabilities_json_string(false, &[]),
+            crate::plugin::host::capabilities_json_string(&[]),
         ));
         registry.push(PluginEntry {
             manifest: manifest.clone(),
@@ -423,7 +430,6 @@ mod tests {
 
         let stored = capabilities_json.lock().unwrap().clone();
         let parsed: serde_json::Value = serde_json::from_str(&stored).unwrap();
-        assert_eq!(parsed["granted"], serde_json::json!(true));
         assert_eq!(
             parsed["hosts"],
             serde_json::json!(["https://api.example.com"])
@@ -437,7 +443,7 @@ mod tests {
         assert!(!state.granted);
         let stored = capabilities_json.lock().unwrap().clone();
         let parsed: serde_json::Value = serde_json::from_str(&stored).unwrap();
-        assert_eq!(parsed["granted"], serde_json::json!(false));
+        assert_eq!(parsed["hosts"], serde_json::json!([]));
     }
 
     /// Regression test for a race the security review flagged: without
@@ -474,7 +480,7 @@ mod tests {
 
         let manifest = manifest_with_http_capability("cap-plugin");
         let capabilities_json = Arc::new(Mutex::new(
-            crate::plugin::host::capabilities_json_string(false, &[]),
+            crate::plugin::host::capabilities_json_string(&[]),
         ));
         registry.push(PluginEntry {
             manifest: manifest.clone(),
@@ -505,10 +511,18 @@ mod tests {
         }
 
         let disk_granted = grants_store.state(&manifest).granted;
+        // `capabilities_json` no longer carries an explicit `granted` flag
+        // (see `capabilities_json_string`'s doc comment): "granted" is now
+        // inferred from whether the effective `hosts` list is non-empty,
+        // which holds for this manifest since it always requests a
+        // non-empty host list when granted.
         let buffer_granted: bool = {
             let stored = capabilities_json.lock().unwrap().clone();
             let parsed: serde_json::Value = serde_json::from_str(&stored).unwrap();
-            parsed["granted"].as_bool().unwrap()
+            !parsed["hosts"]
+                .as_array()
+                .map(|hosts| hosts.is_empty())
+                .unwrap_or(true)
         };
 
         assert_eq!(

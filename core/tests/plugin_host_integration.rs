@@ -68,7 +68,12 @@ fn ctx_with_capabilities(
             "test-plugin".to_string(),
             settings.clone(),
             capabilities.clone(),
+            Arc::new(Mutex::new("[]".to_string())),
             test_http_driver(),
+            Arc::new(edlr_driver_process::ProcessDriver::new(
+                std::time::Duration::from_secs(3),
+                std::time::Duration::from_secs(1),
+            )),
         ),
         settings,
         capabilities,

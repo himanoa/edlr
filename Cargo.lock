@@ -1212,6 +1212,7 @@ dependencies = [
  "clap",
  "edlr-config",
  "edlr-driver-http",
+ "edlr-driver-process",
  "futures-util",
  "notify",
  "serde",

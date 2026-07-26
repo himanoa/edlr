@@ -88,17 +88,22 @@ fn app() -> Router {
         .route("/big", get(big))
 }
 
-/// Builds a `HostCtx` with the given driver and capability grant state,
+/// Builds a `HostCtx` with the given driver and effective allowlisted hosts,
 /// mirroring how `runner.rs` builds one for a real plugin (minus settings,
 /// which these tests don't touch).
-fn ctx_with_driver(driver: Arc<HttpDriver>, granted: bool, hosts: &[&str]) -> HostCtx {
+fn ctx_with_driver(driver: Arc<HttpDriver>, hosts: &[&str]) -> HostCtx {
     let hosts: Vec<String> = hosts.iter().map(|h| h.to_string()).collect();
-    let capabilities_json = capabilities_json_string(granted, &hosts);
+    let capabilities_json = capabilities_json_string(&hosts);
     HostCtx::new(
         "test-plugin".to_string(),
         Arc::new(Mutex::new("{}".to_string())),
         Arc::new(Mutex::new(capabilities_json)),
+        Arc::new(Mutex::new("[]".to_string())),
         driver,
+        Arc::new(edlr_driver_process::ProcessDriver::new(
+            Duration::from_secs(3),
+            Duration::from_secs(1),
+        )),
     )
 }
 
@@ -125,7 +130,7 @@ fn request(
 fn allowed_get_returns_status_and_body() {
     let base = spawn_test_server();
     let url = format!("{base}/echo-get");
-    let mut ctx = ctx_with_driver(default_driver(), true, &[base.as_str()]);
+    let mut ctx = ctx_with_driver(default_driver(), &[base.as_str()]);
 
     let response = ctx
         .send(request("GET", &url, Vec::new(), None))
@@ -144,7 +149,7 @@ fn allowed_get_returns_status_and_body() {
 fn allowed_post_round_trips_body_and_headers() {
     let base = spawn_test_server();
     let url = format!("{base}/echo-post");
-    let mut ctx = ctx_with_driver(default_driver(), true, &[base.as_str()]);
+    let mut ctx = ctx_with_driver(default_driver(), &[base.as_str()]);
 
     let response = ctx
         .send(request(
@@ -171,7 +176,7 @@ fn allowed_post_round_trips_body_and_headers() {
 /// no connection was attempted.
 #[test]
 fn disallowed_host_is_denied_without_connecting() {
-    let mut ctx = ctx_with_driver(default_driver(), true, &["https://allowed.example.com"]);
+    let mut ctx = ctx_with_driver(default_driver(), &["https://allowed.example.com"]);
 
     let start = Instant::now();
     let err = ctx
@@ -193,7 +198,7 @@ fn disallowed_host_is_denied_without_connecting() {
 fn redirect_is_returned_without_following() {
     let base = spawn_test_server();
     let url = format!("{base}/redirect");
-    let mut ctx = ctx_with_driver(default_driver(), true, &[base.as_str()]);
+    let mut ctx = ctx_with_driver(default_driver(), &[base.as_str()]);
 
     let response = ctx
         .send(request("GET", &url, Vec::new(), None))
@@ -215,7 +220,7 @@ fn oversized_body_is_a_transport_error() {
     // point; the `/big` handler serves 10_000 bytes, well over this.
     let small_cap_driver =
         Arc::new(HttpDriver::new(HTTP_TIMEOUT, 1024).expect("build small-cap http driver"));
-    let mut ctx = ctx_with_driver(small_cap_driver, true, &[base.as_str()]);
+    let mut ctx = ctx_with_driver(small_cap_driver, &[base.as_str()]);
 
     let err = ctx
         .send(request("GET", &url, Vec::new(), None))
@@ -234,7 +239,7 @@ fn unreachable_address_is_a_transport_error() {
     drop(listener);
 
     let url = format!("http://{addr}/");
-    let mut ctx = ctx_with_driver(default_driver(), true, &[format!("http://{addr}").as_str()]);
+    let mut ctx = ctx_with_driver(default_driver(), &[format!("http://{addr}").as_str()]);
 
     let err = ctx
         .send(request("GET", &url, Vec::new(), None))

@@ -6,6 +6,7 @@ pub mod registry;
 pub mod runner;
 pub mod settings;
 pub mod sidecar;
+pub mod sidecar_runtime;
 
 pub use grants::{GrantState, GrantsError, GrantsStore};
 pub use manifest::{

@@ -29,10 +29,34 @@ interface driver-http {
   send: func(req: request) -> result<response, driver-error>;
 }
 
+interface driver-process {
+  enum instance-state { running, exited }
+
+  record instance {
+    index: u32,
+    port: u16,
+    state: instance-state,
+    exit-code: option<s32>,
+  }
+
+  variant driver-error {
+    permission-denied(string),
+    not-configured(string),
+    unknown-sidecar(string),
+    rate-limited(string),
+    spawn-failed(string),
+  }
+
+  ensure-started: func(name: string) -> result<list<instance>, driver-error>;
+  stop: func(name: string) -> result<_, driver-error>;
+  status: func(name: string) -> result<list<instance>, driver-error>;
+}
+
 world plugin {
   import host-log;
   import host-settings;
   import driver-http;
+  import driver-process;
 
   record event {
     kind: string,               // "journal" | "status"

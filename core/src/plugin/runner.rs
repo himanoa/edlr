@@ -132,9 +132,17 @@ fn load_and_run_plugin(
     let settings_json = Arc::new(Mutex::new(settings_json_string));
 
     let grant_state = grants_store.state(manifest);
-    let initial_capabilities_json =
-        capabilities_json_string(grant_state.granted, &manifest.capability_hosts());
+    // Sidecar 承認状態を effective hosts に織り込む配線は Task 6 の Registry
+    // の責務。ここではコンパイルを通す最小修正として capability grant のみ
+    // 反映し、sidecars_json は空のまま渡す。
+    let initial_hosts = if grant_state.granted {
+        manifest.capability_hosts()
+    } else {
+        Vec::new()
+    };
+    let initial_capabilities_json = capabilities_json_string(&initial_hosts);
     let capabilities_json = Arc::new(Mutex::new(initial_capabilities_json));
+    let sidecars_json = Arc::new(Mutex::new("[]".to_string()));
 
     let (events_tx, events_rx) = std_mpsc::sync_channel::<Arc<Event>>(PLUGIN_EVENT_QUEUE_CAPACITY);
     let (ready_tx, ready_rx) = std_mpsc::channel::<PluginState>();
@@ -144,6 +152,7 @@ fn load_and_run_plugin(
         let manifest = manifest.clone();
         let settings_json = settings_json.clone();
         let capabilities_json = capabilities_json.clone();
+        let sidecars_json = sidecars_json.clone();
         let registry = registry.clone();
         move || {
             run_plugin_thread(
@@ -152,6 +161,7 @@ fn load_and_run_plugin(
                 entry_path,
                 settings_json,
                 capabilities_json,
+                sidecars_json,
                 registry,
                 events_rx,
                 ready_tx,
@@ -187,6 +197,7 @@ fn run_plugin_thread(
     entry_path: PathBuf,
     settings_json: Arc<Mutex<String>>,
     capabilities_json: Arc<Mutex<String>>,
+    sidecars_json: Arc<Mutex<String>>,
     registry: Registry,
     events_rx: std_mpsc::Receiver<Arc<Event>>,
     ready_tx: std_mpsc::Sender<PluginState>,
@@ -195,7 +206,9 @@ fn run_plugin_thread(
         manifest.id.clone(),
         settings_json,
         capabilities_json,
+        sidecars_json,
         host.http_driver(),
+        host.process_driver(),
     );
     let mut instance = match host.load(&entry_path, ctx) {
         Ok(instance) => instance,
