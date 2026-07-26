@@ -47,7 +47,25 @@ const EPOCH_TICK_INTERVAL: Duration = Duration::from_millis(100);
 /// Per-call timeout applied to every `driver-http.send` request (covers
 /// connect through to the full response). Fixed for now; could become
 /// configurable per-plugin later if a legitimate use case needs it.
-pub const HTTP_TIMEOUT: Duration = Duration::from_secs(10);
+///
+/// Epoch interruption (see `PluginInstance::CALL_DEADLINE`) only fires at
+/// wasm instruction boundaries, so it cannot preempt a blocking host call:
+/// while a guest is inside `driver-http.send`, execution is in host (Rust)
+/// code, not wasm, so no epoch check ever runs until the host call returns.
+/// If `HTTP_TIMEOUT` were allowed to exceed `CALL_DEADLINE`, a single
+/// `driver-http.send` call could occupy a plugin thread for far longer than
+/// the documented per-call deadline -- against a host the plugin's own
+/// author controls, this is trivial to trigger deliberately. Keeping
+/// `HTTP_TIMEOUT` strictly less than `CALL_DEADLINE` (enforced by the const
+/// assertion below) makes the HTTP driver's own timeout the binding
+/// constraint for `driver-http.send` specifically, so it can never be the
+/// reason a guest call runs longer than `CALL_DEADLINE` was meant to allow.
+pub const HTTP_TIMEOUT: Duration = Duration::from_millis(1_500);
+
+const _: () = assert!(
+    HTTP_TIMEOUT.as_millis() < PluginInstance::CALL_DEADLINE.as_millis(),
+    "HTTP_TIMEOUT must stay strictly under PluginInstance::CALL_DEADLINE -- see HTTP_TIMEOUT's doc comment"
+);
 
 /// Maximum response body size, in bytes, a `driver-http.send` call will
 /// return before failing with a `transport` error. See
@@ -59,11 +77,14 @@ pub const HTTP_MAX_BODY: usize = 8 * 1024 * 1024;
 /// Maximum linear memory (bytes) a single plugin instance may allocate.
 ///
 /// The epoch deadline (see `PluginInstance::CALL_DEADLINE`) bounds how long a
-/// guest call may run, but says nothing about how much memory it may claim
-/// while doing so; without a cap a plugin can grow its linear memory without
-/// bound and OOM-kill the whole daemon, defeating the isolation the plugin
-/// host is meant to provide. 64 MiB is a generous ceiling for the kind of
-/// small, single-purpose plugins this host targets (log formatters, simple
+/// guest call may run *while executing wasm instructions* -- it says nothing
+/// about how much memory a call may claim while doing so, nor does it bound
+/// time spent blocked inside a host call such as `driver-http.send` (see
+/// `HTTP_TIMEOUT`'s doc comment for that half of the story). Without a
+/// memory cap a plugin can grow its linear memory without bound and OOM-kill
+/// the whole daemon, defeating the isolation the plugin host is meant to
+/// provide. 64 MiB is a generous ceiling for the kind of small,
+/// single-purpose plugins this host targets (log formatters, simple
 /// notifiers, ...); it is a fixed constant for now but can be made
 /// configurable per-plugin later if a legitimate use case needs more.
 const PLUGIN_MEMORY_LIMIT: usize = 64 * 1024 * 1024;

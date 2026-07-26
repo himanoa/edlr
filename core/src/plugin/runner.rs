@@ -20,6 +20,24 @@ use std::path::{Path, PathBuf};
 use std::sync::{mpsc as std_mpsc, Arc, Mutex};
 use std::thread;
 
+/// Capacity of the per-plugin journal-event queue (`events_tx`/`events_rx`
+/// below). `driver-http.send` can block a plugin's dedicated thread for up
+/// to `host::HTTP_TIMEOUT` per call (a host the plugin author controls can
+/// simply not respond), during which the plugin's own thread is not
+/// draining `events_rx` at all. The channel used to be unbounded
+/// (`std_mpsc::channel`), so a stalled plugin let the router/monitor's
+/// broadcast events accumulate in host memory without limit -- outside
+/// anything `StoreLimits` can see, since it lives on the host side of the
+/// boundary, not in the plugin's wasm linear memory. Bounding it here caps
+/// that growth at a fixed, small number of pending events per plugin.
+///
+/// Overflow policy: when full, `spawn_event_subscriber` drops the new event
+/// and logs a `tracing::warn!` rather than blocking the subscriber task (see
+/// its doc comment) or disabling the plugin outright -- a plugin that's
+/// merely slow (e.g. waiting out its own `driver-http.send` call) should be
+/// allowed to catch up and keep running, not be killed for falling behind.
+const PLUGIN_EVENT_QUEUE_CAPACITY: usize = 32;
+
 use tokio::sync::broadcast;
 
 use crate::event::Event;
@@ -118,7 +136,7 @@ fn load_and_run_plugin(
         capabilities_json_string(grant_state.granted, &manifest.capability_hosts());
     let capabilities_json = Arc::new(Mutex::new(initial_capabilities_json));
 
-    let (events_tx, events_rx) = std_mpsc::channel::<Arc<Event>>();
+    let (events_tx, events_rx) = std_mpsc::sync_channel::<Arc<Event>>(PLUGIN_EVENT_QUEUE_CAPACITY);
     let (ready_tx, ready_rx) = std_mpsc::channel::<PluginState>();
 
     thread::spawn({
@@ -218,18 +236,40 @@ fn run_plugin_thread(
 
 /// `router` を購読し、`manifest.events` にマッチしたイベントだけを
 /// プラグインスレッドへ転送する tokio タスクを起動する。
+///
+/// `events_tx` は容量固定の `sync_channel`(`PLUGIN_EVENT_QUEUE_CAPACITY`)
+/// なので、送信には(ブロックする `send` ではなく)`try_send` を使う。この
+/// tokio タスクは非同期ランタイムのワーカースレッド上で動くため、万一
+/// プラグインスレッドが `driver-http.send` のブロッキング呼び出し中で
+/// `events_rx` を全く読んでいなくても、ここで待たされてはいけない
+/// (ワーカースレッドを塞ぐと router/monitor 全体に波及する)。キューが
+/// 満杯の間に届いたイベントは `tracing::warn!` を出して破棄する
+/// (`PLUGIN_EVENT_QUEUE_CAPACITY` のドキュメント参照)。
 fn spawn_event_subscriber(
     manifest: Manifest,
     mut rx: broadcast::Receiver<Arc<Event>>,
-    events_tx: std_mpsc::Sender<Arc<Event>>,
+    events_tx: std_mpsc::SyncSender<Arc<Event>>,
 ) {
     tokio::spawn(async move {
         loop {
             match rx.recv().await {
                 Ok(event) => {
-                    if matches_event(&manifest.events, &event) && events_tx.send(event).is_err() {
-                        // プラグインスレッドが終了(disabled)済み。
-                        break;
+                    if !matches_event(&manifest.events, &event) {
+                        continue;
+                    }
+                    match events_tx.try_send(event) {
+                        Ok(()) => {}
+                        Err(std_mpsc::TrySendError::Full(_)) => {
+                            tracing::warn!(
+                                plugin_id = %manifest.id,
+                                "event queue full ({PLUGIN_EVENT_QUEUE_CAPACITY} pending), \
+                                 dropping event for a slow/blocked plugin"
+                            );
+                        }
+                        Err(std_mpsc::TrySendError::Disconnected(_)) => {
+                            // プラグインスレッドが終了(disabled)済み。
+                            break;
+                        }
                     }
                 }
                 Err(broadcast::error::RecvError::Lagged(skipped)) => {
@@ -257,5 +297,80 @@ fn event_params(event: &Event) -> (&'static str, Option<String>, Option<String>,
             raw.to_string(),
         ),
         Event::Status { raw } => ("status", None, None, raw.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! `spawn_event_subscriber` is what stands between the router's
+    //! broadcast channel and a plugin thread that might be blocked for up
+    //! to `host::HTTP_TIMEOUT` inside `driver-http.send`. These tests never
+    //! drain `events_rx` (simulating a fully-stalled plugin thread) and
+    //! assert that publishing far more events than
+    //! `PLUGIN_EVENT_QUEUE_CAPACITY` neither blocks the publishing task nor
+    //! grows the queue past its bound.
+    use super::*;
+    use std::time::Duration;
+
+    fn test_manifest() -> Manifest {
+        Manifest {
+            id: "queue-test-plugin".into(),
+            name: "Queue Test".into(),
+            version: "0.1.0".into(),
+            description: String::new(),
+            entry: "plugin.wasm".into(),
+            events: vec!["*".to_string()],
+            settings: vec![],
+            capabilities: vec![],
+        }
+    }
+
+    fn journal_event(name: &str) -> Arc<Event> {
+        Arc::new(Event::Journal {
+            timestamp: "2026-07-25T00:00:00Z".into(),
+            event: name.into(),
+            raw: serde_json::json!({}),
+        })
+    }
+
+    #[tokio::test]
+    async fn slow_plugin_channel_stays_bounded_and_publishing_does_not_block() {
+        let (broadcast_tx, broadcast_rx) = broadcast::channel::<Arc<Event>>(4096);
+        let (events_tx, events_rx) =
+            std_mpsc::sync_channel::<Arc<Event>>(PLUGIN_EVENT_QUEUE_CAPACITY);
+
+        spawn_event_subscriber(test_manifest(), broadcast_rx, events_tx);
+
+        // Simulate a plugin thread that's blocked in `driver-http.send`:
+        // never drain `events_rx` while publishing far more events than the
+        // queue's capacity. If `try_send` were replaced with a blocking
+        // `send`, this loop (running on the current task, same as the
+        // subscriber would on a shared runtime) would risk deadlocking or
+        // at minimum this test would take a long time; with `try_send` it
+        // must complete promptly regardless of channel fullness.
+        let published = PLUGIN_EVENT_QUEUE_CAPACITY * 50;
+        for i in 0..published {
+            broadcast_tx
+                .send(journal_event(&format!("Evt{i}")))
+                .expect("broadcast send should succeed (large capacity, no lag)");
+        }
+
+        // Give the subscriber tokio task a bounded window to drain the
+        // broadcast channel into events_rx (or drop on overflow); this test
+        // fails by hanging (via the outer test timeout) if the subscriber
+        // ever blocks trying to push past the queue's capacity.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        let mut queued = 0usize;
+        while events_rx.try_recv().is_ok() {
+            queued += 1;
+        }
+
+        assert!(
+            queued <= PLUGIN_EVENT_QUEUE_CAPACITY,
+            "queued {queued} events, expected at most {PLUGIN_EVENT_QUEUE_CAPACITY} \
+             (publishing {published} events to a never-drained receiver must not \
+             grow the queue past its bound)"
+        );
     }
 }
