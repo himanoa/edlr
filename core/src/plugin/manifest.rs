@@ -81,7 +81,9 @@ impl Manifest {
     ///
     /// - 同じ要求内容なら常に同じ値を返す(プロセスをまたいでも安定)。
     /// - `hosts` の順序は正規化(小文字化してソート)されるため、順序違いは無視される。
-    /// - 要求内容が変われば異なる値になる。
+    /// - 要求内容が変われば異なる値になる。`reason` や `host` は検証済みとはいえ
+    ///   自由記述のフィールドを含むため、区切り文字での結合ではなく長さ接頭辞で
+    ///   エンコードして曖昧さ(衝突)を排除する(詳細は `encode_field` を参照)。
     /// - `capabilities` が空なら `None`。
     pub fn capabilities_fingerprint(&self) -> Option<String> {
         if self.capabilities.is_empty() {
@@ -96,19 +98,40 @@ impl Manifest {
                     let mut normalized_hosts: Vec<String> =
                         hosts.iter().map(|h| h.to_lowercase()).collect();
                     normalized_hosts.sort();
-                    format!(
-                        "http|hosts={}|reason={}",
-                        normalized_hosts.join(","),
-                        reason
-                    )
+
+                    let mut encoded = encode_field("http");
+                    encoded.push_str(&encode_field(&normalized_hosts.len().to_string()));
+                    for host in &normalized_hosts {
+                        encoded.push_str(&encode_field(host));
+                    }
+                    encoded.push_str(&encode_field(reason));
+                    encoded
                 }
             })
             .collect();
         canonical_requests.sort();
-        let canonical = canonical_requests.join(";");
+
+        let mut canonical = encode_field(&canonical_requests.len().to_string());
+        for request in &canonical_requests {
+            canonical.push_str(&encode_field(request));
+        }
 
         Some(fnv1a_hex(&canonical))
     }
+}
+
+/// 可変長文字列フィールドを長さ接頭辞方式でエンコードする: `"{byte_len}:{content}"`。
+///
+/// 複数の可変長フィールドを区切り文字(`;` や `|` など)で単純結合すると、
+/// フィールドの中身に区切り文字そのものが含まれる場合(例えば `reason` は
+/// 検証されない自由記述フィールド)に異なる入力が同じ結合結果を生みうる
+/// (例: `"a;b"` と `"a" + ";" + "b"` の衝突)。長さを前置しておけば、
+/// `encode_field(f1) + encode_field(f2) + ... + encode_field(fn)` は
+/// `(f1, f2, ..., fn)` に対して単射になる — 先頭から「長さを読む→その
+/// バイト数だけ読む」を繰り返せば一意に読み戻せるため、内容にどんな文字列が
+/// 含まれていても後続フィールドとの衝突が起こらない。
+fn encode_field(s: &str) -> String {
+    format!("{}:{}", s.len(), s)
 }
 
 /// FNV-1a 64bit ハッシュ。`DefaultHasher` と異なり実行ごとに値が変わらないため、
@@ -173,6 +196,8 @@ fn is_valid_id(id: &str) -> bool {
 /// - URL としてパース可能で、host を持つこと
 /// - path・query・fragment を持たないこと(bare origin のみ)。ただし末尾の
 ///   `/` 一つだけの path (`https://example.com/`) は origin と等価なので許可する。
+/// - userinfo(`user:pass@host` の形式)を含まないこと。人間がレビューする
+///   capability 宣言に認証情報が紛れ込むのを防ぐ。
 fn validate_host(host: &str) -> Result<(), String> {
     if !host.starts_with("http://") && !host.starts_with("https://") {
         return Err(format!("host must start with http:// or https://: {host}"));
@@ -195,6 +220,10 @@ fn validate_host(host: &str) -> Result<(), String> {
 
     if parsed.fragment().is_some() {
         return Err(format!("host must not contain a fragment: {host}"));
+    }
+
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(format!("host must not contain userinfo: {host}"));
     }
 
     Ok(())
@@ -799,6 +828,119 @@ reason = ""
             no_capabilities.capabilities_fingerprint(),
             None,
             "no capability requests must yield None"
+        );
+    }
+
+    #[test]
+    fn fingerprint_does_not_collide_when_reason_contains_delimiter_like_content() {
+        // Set A: a single request whose `reason` contains text that looks like a
+        // second serialized request (using the delimiters the old naive
+        // implementation joined fields with: `;` between requests, `|` between
+        // fields within a request).
+        let set_a = Manifest {
+            id: "fp-plugin".into(),
+            name: "FP Plugin".into(),
+            version: "0.1.0".into(),
+            description: String::new(),
+            entry: "plugin.wasm".into(),
+            events: vec![],
+            settings: vec![],
+            capabilities: vec![CapabilityRequest::Http {
+                hosts: vec!["https://h1.com".into()],
+                reason: "foo;http|hosts=https://h2.com|reason=bar".into(),
+            }],
+        };
+
+        // Set B: two separate requests that request an additional host
+        // (`h2.com`) beyond what set A actually grants access to.
+        let set_b = Manifest {
+            id: "fp-plugin".into(),
+            name: "FP Plugin".into(),
+            version: "0.1.0".into(),
+            description: String::new(),
+            entry: "plugin.wasm".into(),
+            events: vec![],
+            settings: vec![],
+            capabilities: vec![
+                CapabilityRequest::Http {
+                    hosts: vec!["https://h1.com".into()],
+                    reason: "foo".into(),
+                },
+                CapabilityRequest::Http {
+                    hosts: vec!["https://h2.com".into()],
+                    reason: "bar".into(),
+                },
+            ],
+        };
+
+        let fp_a = set_a
+            .capabilities_fingerprint()
+            .expect("should have a value");
+        let fp_b = set_b
+            .capabilities_fingerprint()
+            .expect("should have a value");
+
+        assert_ne!(
+            fp_a, fp_b,
+            "a request set that grants an extra host must not share a fingerprint \
+             with a single request whose free-text reason merely looks like it"
+        );
+    }
+
+    #[test]
+    fn host_with_userinfo_is_rejected() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin_dir = tmp.path().join("userinfo-host-plugin");
+        fs::create_dir_all(&plugin_dir).unwrap();
+        write_entry(&plugin_dir, "plugin.wasm");
+        write_manifest(
+            &plugin_dir,
+            r#"
+id = "userinfo-host-plugin"
+name = "Userinfo Host"
+version = "0.1.0"
+entry = "plugin.wasm"
+
+[[capabilities]]
+kind = "http"
+hosts = ["https://user:pw@api.example.com"]
+reason = "fetch data"
+"#,
+        );
+
+        let err = load_manifest(&plugin_dir).expect_err("host with userinfo should be rejected");
+        assert!(matches!(err, ManifestError::BadCapability(_)));
+    }
+
+    #[test]
+    fn host_with_bare_trailing_slash_is_accepted() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin_dir = tmp.path().join("trailing-slash-plugin");
+        fs::create_dir_all(&plugin_dir).unwrap();
+        write_entry(&plugin_dir, "plugin.wasm");
+        write_manifest(
+            &plugin_dir,
+            r#"
+id = "trailing-slash-plugin"
+name = "Trailing Slash"
+version = "0.1.0"
+entry = "plugin.wasm"
+
+[[capabilities]]
+kind = "http"
+hosts = ["https://example.com/"]
+reason = "fetch data"
+"#,
+        );
+
+        let manifest =
+            load_manifest(&plugin_dir).expect("bare trailing slash host should be accepted");
+        assert_eq!(
+            manifest.capabilities[0],
+            CapabilityRequest::Http {
+                hosts: vec!["https://example.com/".to_string()],
+                reason: "fetch data".to_string(),
+            }
         );
     }
 }
