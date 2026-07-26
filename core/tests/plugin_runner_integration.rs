@@ -115,7 +115,8 @@ async fn hello_logger_stays_running_and_busy_loop_gets_disabled_after_publish() 
     let settings_store = SettingsStore::new(tmp.path().join("settings"));
     let grants_store = GrantsStore::new(tmp.path().join("grants"));
     let sidecar_config_store = SidecarConfigStore::new(tmp.path().join("settings"));
-    let filesystem_config_store = FilesystemConfigStore::new(tmp.path().join("settings"), Vec::new());
+    let filesystem_config_store =
+        FilesystemConfigStore::new(tmp.path().join("settings"), Vec::new());
     let router = Router::new(16);
     let host = PluginHost::new().expect("host should start");
 
@@ -194,7 +195,8 @@ async fn broken_manifest_directory_is_skipped_but_others_still_load() {
     let settings_store = SettingsStore::new(tmp.path().join("settings"));
     let grants_store = GrantsStore::new(tmp.path().join("grants"));
     let sidecar_config_store = SidecarConfigStore::new(tmp.path().join("settings"));
-    let filesystem_config_store = FilesystemConfigStore::new(tmp.path().join("settings"), Vec::new());
+    let filesystem_config_store =
+        FilesystemConfigStore::new(tmp.path().join("settings"), Vec::new());
     let router = Router::new(16);
     let host = PluginHost::new().expect("host should start");
 
@@ -226,7 +228,8 @@ async fn nonexistent_plugins_dir_yields_empty_registry() {
     let settings_store = SettingsStore::new(tmp.path().join("settings"));
     let grants_store = GrantsStore::new(tmp.path().join("grants"));
     let sidecar_config_store = SidecarConfigStore::new(tmp.path().join("settings"));
-    let filesystem_config_store = FilesystemConfigStore::new(tmp.path().join("settings"), Vec::new());
+    let filesystem_config_store =
+        FilesystemConfigStore::new(tmp.path().join("settings"), Vec::new());
     let router = Router::new(16);
     let host = PluginHost::new().expect("host should start");
 
@@ -259,7 +262,8 @@ async fn init_failure_registers_disabled_and_starts_no_event_task() {
     let settings_store = SettingsStore::new(tmp.path().join("settings"));
     let grants_store = GrantsStore::new(tmp.path().join("grants"));
     let sidecar_config_store = SidecarConfigStore::new(tmp.path().join("settings"));
-    let filesystem_config_store = FilesystemConfigStore::new(tmp.path().join("settings"), Vec::new());
+    let filesystem_config_store =
+        FilesystemConfigStore::new(tmp.path().join("settings"), Vec::new());
     let router = Router::new(16);
     let host = PluginHost::new().expect("host should start");
 
@@ -336,7 +340,8 @@ async fn list_returns_plugin_info_with_effective_values_matching_manifest_defaul
     let settings_store = SettingsStore::new(tmp.path().join("settings"));
     let grants_store = GrantsStore::new(tmp.path().join("grants"));
     let sidecar_config_store = SidecarConfigStore::new(tmp.path().join("settings"));
-    let filesystem_config_store = FilesystemConfigStore::new(tmp.path().join("settings"), Vec::new());
+    let filesystem_config_store =
+        FilesystemConfigStore::new(tmp.path().join("settings"), Vec::new());
     let router = Router::new(16);
     let host = PluginHost::new().expect("host should start");
 
@@ -382,7 +387,8 @@ async fn set_values_persists_validates_and_updates_shared_settings_json() {
     let settings_store = SettingsStore::new(tmp.path().join("settings"));
     let grants_store = GrantsStore::new(tmp.path().join("grants"));
     let sidecar_config_store = SidecarConfigStore::new(tmp.path().join("settings"));
-    let filesystem_config_store = FilesystemConfigStore::new(tmp.path().join("settings"), Vec::new());
+    let filesystem_config_store =
+        FilesystemConfigStore::new(tmp.path().join("settings"), Vec::new());
     let router = Router::new(16);
     let host = PluginHost::new().expect("host should start");
 
@@ -441,7 +447,8 @@ async fn set_values_with_unknown_key_returns_err_and_leaves_values_unchanged() {
     let settings_store = SettingsStore::new(tmp.path().join("settings"));
     let grants_store = GrantsStore::new(tmp.path().join("grants"));
     let sidecar_config_store = SidecarConfigStore::new(tmp.path().join("settings"));
-    let filesystem_config_store = FilesystemConfigStore::new(tmp.path().join("settings"), Vec::new());
+    let filesystem_config_store =
+        FilesystemConfigStore::new(tmp.path().join("settings"), Vec::new());
     let router = Router::new(16);
     let host = PluginHost::new().expect("host should start");
 

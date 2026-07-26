@@ -39,7 +39,9 @@ pub struct Env {
 #[allow(dead_code)]
 pub fn valid_plugin_wasm() -> PathBuf {
     let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let crate_path = manifest_dir.join("..").join("examples/plugins/hello-logger");
+    let crate_path = manifest_dir
+        .join("..")
+        .join("examples/plugins/hello-logger");
 
     let status = Command::new("cargo")
         .args(["build", "--target", "wasm32-wasip2", "--release"])

@@ -88,9 +88,8 @@ async fn main() {
         let xdg_state_home = std::env::var_os("XDG_STATE_HOME").map(PathBuf::from);
         config::state_base(xdg_state_home.as_deref(), home.as_deref())
     });
-    let positions = std::sync::Arc::new(edlr_core::journal::position::PositionStore::new(
-        state_dir,
-    ));
+    let positions =
+        std::sync::Arc::new(edlr_core::journal::position::PositionStore::new(state_dir));
 
     if let Some(ui_dir) = &args.ui_dir {
         if !ui_dir.is_dir() {
@@ -130,10 +129,8 @@ async fn main() {
             // 既定値ではなく、CLI(`--settings-dir` など)で上書きされた
             // 実際のパスを渡す — そうしないと、既定と違う場所を使っている
             // デーモンでその実際の場所が無防備になる。
-            let filesystem_config_store = FilesystemConfigStore::new(
-                settings_dir,
-                vec![grants_dir, plugins_dir.clone()],
-            );
+            let filesystem_config_store =
+                FilesystemConfigStore::new(settings_dir, vec![grants_dir, plugins_dir.clone()]);
             let plugins_dir_for_blocking = plugins_dir.clone();
             match tokio::task::spawn_blocking(move || {
                 start_plugins(

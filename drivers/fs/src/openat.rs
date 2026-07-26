@@ -83,10 +83,7 @@ impl Dir {
         // `openat2` に渡すパスは空文字を許さないので、ルート自身は "." で指す。
         let probe = if rel_dir.is_empty() { "." } else { rel_dir };
         match openat2_beneath(&root_fd, probe, dir_oflags(), Mode::empty()) {
-            Ok(Some(fd)) => Ok(Dir {
-                fd,
-                confined: true,
-            }),
+            Ok(Some(fd)) => Ok(Dir { fd, confined: true }),
             // カーネルが `openat2` を持たない。ルートの fd から 1 要素ずつ
             // `O_NOFOLLOW` で降りる。
             Ok(None) => {
@@ -96,8 +93,13 @@ impl Dir {
                         check_component(&component)?;
                         // `O_NOFOLLOW` なので、途中の要素がリンクなら ELOOP。
                         // 1 要素ずつなので `..` も混ざりようがない。
-                        fd = rustix::fs::openat(&fd, component.as_str(), dir_oflags(), Mode::empty())
-                            .map_err(|e| errno_to_error(e, &component))?;
+                        fd = rustix::fs::openat(
+                            &fd,
+                            component.as_str(),
+                            dir_oflags(),
+                            Mode::empty(),
+                        )
+                        .map_err(|e| errno_to_error(e, &component))?;
                     }
                 }
                 Ok(Dir {
@@ -124,11 +126,8 @@ impl Dir {
     /// ファイルに対してこのフラグを無視するが、以後の `read` の意味論を
     /// 普通のファイルと完全に同じに保つため。
     pub fn open_read(&self, name: &str) -> Result<File, FsError> {
-        let file = exists_is_impossible(self.open_with(
-            name,
-            OFlags::RDONLY | OFlags::NONBLOCK,
-            false,
-        ))?;
+        let file =
+            exists_is_impossible(self.open_with(name, OFlags::RDONLY | OFlags::NONBLOCK, false))?;
         ensure_regular_file(file, name)
     }
 
@@ -270,12 +269,7 @@ impl Dir {
     }
 
     /// 実際に開く。`O_EXCL` 付きで既に何かが存在した場合だけ `Ok(None)`。
-    fn open_with(
-        &self,
-        name: &str,
-        oflags: OFlags,
-        create: bool,
-    ) -> Result<Option<File>, FsError> {
+    fn open_with(&self, name: &str, oflags: OFlags, create: bool) -> Result<Option<File>, FsError> {
         check_component(name)?;
         let oflags = oflags | OFlags::NOFOLLOW | OFlags::CLOEXEC;
         let mode = if create {

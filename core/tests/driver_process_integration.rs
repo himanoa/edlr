@@ -70,7 +70,9 @@ async fn revoking_a_grant_stops_running_instances() {
             },
         )
         .unwrap();
-    env.registry.set_sidecar_grant("sc-plugin", "tts", true).unwrap();
+    env.registry
+        .set_sidecar_grant("sc-plugin", "tts", true)
+        .unwrap();
 
     let started = env
         .registry
@@ -100,7 +102,9 @@ async fn changing_the_config_stops_the_running_sidecar() {
     env.registry
         .set_sidecar_config("sc-plugin", "tts", &config)
         .unwrap();
-    env.registry.set_sidecar_grant("sc-plugin", "tts", true).unwrap();
+    env.registry
+        .set_sidecar_grant("sc-plugin", "tts", true)
+        .unwrap();
     env.registry
         .control_sidecar("sc-plugin", "tts", edlr_core::plugin::SidecarAction::Start)
         .unwrap();
@@ -110,7 +114,10 @@ async fn changing_the_config_stops_the_running_sidecar() {
         .set_sidecar_config(
             "sc-plugin",
             "tts",
-            &SidecarConfig { port: 50325, ..config },
+            &SidecarConfig {
+                port: 50325,
+                ..config
+            },
         )
         .expect("config change");
     assert!(
@@ -134,7 +141,9 @@ async fn stop_all_sidecars_leaves_nothing_running() {
             },
         )
         .unwrap();
-    env.registry.set_sidecar_grant("sc-plugin", "tts", true).unwrap();
+    env.registry
+        .set_sidecar_grant("sc-plugin", "tts", true)
+        .unwrap();
     env.registry
         .control_sidecar("sc-plugin", "tts", edlr_core::plugin::SidecarAction::Start)
         .unwrap();
@@ -178,7 +187,11 @@ async fn sidecar_operations_on_different_plugins_do_not_block_each_other() {
         .set_sidecar_grant("sc-plugin-a", "tts", true)
         .unwrap();
     env.registry
-        .control_sidecar("sc-plugin-a", "tts", edlr_core::plugin::SidecarAction::Start)
+        .control_sidecar(
+            "sc-plugin-a",
+            "tts",
+            edlr_core::plugin::SidecarAction::Start,
+        )
         .unwrap();
 
     // plugin B: 承認/設定操作の対象になれるよう設定だけ済ませておく。

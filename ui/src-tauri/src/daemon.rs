@@ -271,7 +271,10 @@ mod tests {
         );
         // SAFETY: existence check only, no signal sent.
         let alive = unsafe { libc::kill(pid, 0) } == 0;
-        assert!(!alive, "stubborn child must be dead after the SIGKILL fallback");
+        assert!(
+            !alive,
+            "stubborn child must be dead after the SIGKILL fallback"
+        );
     }
 
     /// A child that honors SIGTERM should not make `stop_child_gracefully`

@@ -26,7 +26,13 @@ impl Guest for HelloLogger {
             let name = ev.name.as_deref().unwrap_or("-");
             edlr::plugin::host_log::log(
                 edlr::plugin::host_log::Level::Info,
-                &format!("{}:{} {}", ev.kind, name, ev.payload_json),
+                &format!(
+                    "{}:{}{} {}",
+                    ev.kind,
+                    name,
+                    if ev.replay { " (replay)" } else { "" },
+                    ev.payload_json
+                ),
             );
         }
     }

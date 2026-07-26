@@ -571,16 +571,28 @@ mod tests {
 
         assert_eq!(
             store.sidecar_state(&manifest, "tts"),
-            GrantState { granted: false, stale: false }
+            GrantState {
+                granted: false,
+                stale: false
+            }
         );
 
         let state = store
             .set_sidecar(&manifest, "tts", true)
             .expect("grant should succeed");
-        assert_eq!(state, GrantState { granted: true, stale: false });
+        assert_eq!(
+            state,
+            GrantState {
+                granted: true,
+                stale: false
+            }
+        );
         assert_eq!(
             store.sidecar_state(&manifest, "tts"),
-            GrantState { granted: true, stale: false }
+            GrantState {
+                granted: true,
+                stale: false
+            }
         );
     }
 
@@ -594,7 +606,10 @@ mod tests {
         let changed = manifest_with_sidecar(50099);
         assert_eq!(
             store.sidecar_state(&changed, "tts"),
-            GrantState { granted: false, stale: true }
+            GrantState {
+                granted: false,
+                stale: true
+            }
         );
     }
 
@@ -631,12 +646,21 @@ mod tests {
 
         assert_eq!(
             store.sidecar_state(&manifest, "nope"),
-            GrantState { granted: false, stale: false }
+            GrantState {
+                granted: false,
+                stale: false
+            }
         );
         let state = store
             .set_sidecar(&manifest, "nope", true)
             .expect("set on an unknown sidecar is a no-op, not an error");
-        assert_eq!(state, GrantState { granted: false, stale: false });
+        assert_eq!(
+            state,
+            GrantState {
+                granted: false,
+                stale: false
+            }
+        );
     }
 
     /// Minor(最終レビュー指摘): 壊れた grants JSON がディスクにある状態で
@@ -658,7 +682,10 @@ mod tests {
         // 「保存されているが不一致」とは違う無害な扱い)。
         assert_eq!(
             store.sidecar_state(&manifest, "tts"),
-            GrantState { granted: false, stale: false },
+            GrantState {
+                granted: false,
+                stale: false
+            },
             "broken grants JSON must fail closed as ungranted, not panic or resurrect a grant"
         );
 
@@ -667,10 +694,19 @@ mod tests {
         let state = store
             .set_sidecar(&manifest, "tts", true)
             .expect("set_sidecar must recover from a broken grants file, not fail or panic");
-        assert_eq!(state, GrantState { granted: true, stale: false });
+        assert_eq!(
+            state,
+            GrantState {
+                granted: true,
+                stale: false
+            }
+        );
         assert_eq!(
             store.sidecar_state(&manifest, "tts"),
-            GrantState { granted: true, stale: false }
+            GrantState {
+                granted: true,
+                stale: false
+            }
         );
     }
 
@@ -702,12 +738,18 @@ mod tests {
 
         assert_eq!(
             store.filesystem_state(&manifest, "exports"),
-            GrantState { granted: false, stale: false }
+            GrantState {
+                granted: false,
+                stale: false
+            }
         );
         store.set_filesystem(&manifest, "exports", true).unwrap();
         assert_eq!(
             store.filesystem_state(&manifest, "exports"),
-            GrantState { granted: true, stale: false }
+            GrantState {
+                granted: true,
+                stale: false
+            }
         );
     }
 
@@ -722,7 +764,10 @@ mod tests {
 
         assert_eq!(
             store.filesystem_state(&manifest_with_fs(FilesystemMode::ReadWrite), "exports"),
-            GrantState { granted: false, stale: true }
+            GrantState {
+                granted: false,
+                stale: true
+            }
         );
     }
 
@@ -756,11 +801,17 @@ mod tests {
 
         assert_eq!(
             store.filesystem_state(&manifest, "nope"),
-            GrantState { granted: false, stale: false }
+            GrantState {
+                granted: false,
+                stale: false
+            }
         );
         assert_eq!(
             store.set_filesystem(&manifest, "nope", true).unwrap(),
-            GrantState { granted: false, stale: false }
+            GrantState {
+                granted: false,
+                stale: false
+            }
         );
     }
 

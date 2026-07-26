@@ -2,7 +2,7 @@
 
 package plugin
 
-// Exports represents the caller-defined exports from "edlr:plugin/plugin@0.1.0".
+// Exports represents the caller-defined exports from "edlr:plugin/plugin@0.2.0".
 var Exports struct {
 	// Init represents the caller-defined, exported function "init".
 	//

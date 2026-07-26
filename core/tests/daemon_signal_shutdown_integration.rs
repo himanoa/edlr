@@ -93,7 +93,9 @@ impl Drop for DaemonGuard {
 
 async fn call(ws: &mut Ws, id: i64, method: &str, params: serde_json::Value) -> serde_json::Value {
     let msg = serde_json::json!({ "type": "rpc", "id": id, "method": method, "params": params });
-    ws.send(Message::Text(msg.to_string().into())).await.unwrap();
+    ws.send(Message::Text(msg.to_string().into()))
+        .await
+        .unwrap();
     let resp = recv_json(ws).await;
     assert_eq!(resp["id"], id);
     assert_eq!(

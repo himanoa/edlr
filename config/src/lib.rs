@@ -257,7 +257,10 @@ mod tests {
     #[test]
     fn config_file_path_uses_xdg_when_set() {
         assert_eq!(
-            config_file_path(Some(Path::new("/xdg/config")), Some(Path::new("/home/pilot"))),
+            config_file_path(
+                Some(Path::new("/xdg/config")),
+                Some(Path::new("/home/pilot"))
+            ),
             PathBuf::from("/xdg/config/edlr/config.json")
         );
     }

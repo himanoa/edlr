@@ -1,7 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-mod daemon;
 mod config;
+mod daemon;
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -44,8 +44,7 @@ fn autostart_daemon(
         return (None, config::DaemonStartup::External);
     }
     let Some(bin) = resolve_bin() else {
-        let reason =
-            "edlr binary not found (set EDLR_BIN or put edlr on PATH)".to_string();
+        let reason = "edlr binary not found (set EDLR_BIN or put edlr on PATH)".to_string();
         eprintln!("{reason}; starting UI without daemon");
         return (None, config::DaemonStartup::Failed(reason));
     };
@@ -213,10 +212,8 @@ fn apply_config(
 
     // spawn できただけでは足りない。応答を確認できて初めてエラーを消す。
     let came_up = wait_until_listening(10);
-    *state
-        .daemon_error
-        .lock()
-        .unwrap_or_else(|p| p.into_inner()) = config::daemon_error_after_restart(came_up);
+    *state.daemon_error.lock().unwrap_or_else(|p| p.into_inner()) =
+        config::daemon_error_after_restart(came_up);
     Ok(())
 }
 

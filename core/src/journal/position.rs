@@ -68,10 +68,9 @@ impl PositionStore {
         fs::create_dir_all(&self.dir)?;
         let serialized = serde_json::to_string_pretty(&all)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-        let tmp = self.dir.join(format!(
-            "journal-position.json.tmp.{}",
-            std::process::id()
-        ));
+        let tmp = self
+            .dir
+            .join(format!("journal-position.json.tmp.{}", std::process::id()));
         fs::write(&tmp, serialized)?;
         fs::rename(&tmp, self.path())
     }
@@ -94,23 +93,35 @@ mod tests {
         store
             .save(
                 dir_a,
-                &Position { file: "Journal.a.log".into(), offset: 42 },
+                &Position {
+                    file: "Journal.a.log".into(),
+                    offset: 42,
+                },
             )
             .expect("save should succeed");
         store
             .save(
                 dir_b,
-                &Position { file: "Journal.b.log".into(), offset: 7 },
+                &Position {
+                    file: "Journal.b.log".into(),
+                    offset: 7,
+                },
             )
             .expect("save should succeed");
 
         assert_eq!(
             store.load(dir_a),
-            Some(Position { file: "Journal.a.log".into(), offset: 42 })
+            Some(Position {
+                file: "Journal.a.log".into(),
+                offset: 42
+            })
         );
         assert_eq!(
             store.load(dir_b),
-            Some(Position { file: "Journal.b.log".into(), offset: 7 })
+            Some(Position {
+                file: "Journal.b.log".into(),
+                offset: 7
+            })
         );
     }
 
@@ -120,8 +131,24 @@ mod tests {
         let store = PositionStore::new(tmp.path().join("state"));
         let dir = Path::new("/journals/a");
 
-        store.save(dir, &Position { file: "Journal.a.log".into(), offset: 1 }).unwrap();
-        store.save(dir, &Position { file: "Journal.a.log".into(), offset: 99 }).unwrap();
+        store
+            .save(
+                dir,
+                &Position {
+                    file: "Journal.a.log".into(),
+                    offset: 1,
+                },
+            )
+            .unwrap();
+        store
+            .save(
+                dir,
+                &Position {
+                    file: "Journal.a.log".into(),
+                    offset: 99,
+                },
+            )
+            .unwrap();
 
         assert_eq!(store.load(dir).unwrap().offset, 99);
     }
@@ -144,7 +171,13 @@ mod tests {
         let store = PositionStore::new(dir.clone());
 
         store
-            .save(Path::new("/journals/a"), &Position { file: "j.log".into(), offset: 1 })
+            .save(
+                Path::new("/journals/a"),
+                &Position {
+                    file: "j.log".into(),
+                    offset: 1,
+                },
+            )
             .expect("save should create the directory");
 
         assert!(dir.join("journal-position.json").is_file());
@@ -159,7 +192,13 @@ mod tests {
 
         let store = PositionStore::new(file.join("state"));
         assert!(store
-            .save(Path::new("/journals/a"), &Position { file: "j.log".into(), offset: 1 })
+            .save(
+                Path::new("/journals/a"),
+                &Position {
+                    file: "j.log".into(),
+                    offset: 1
+                }
+            )
             .is_err());
     }
 }

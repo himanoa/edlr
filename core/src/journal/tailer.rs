@@ -366,7 +366,10 @@ mod tests {
 
         let mut tailer = JournalTailer::resume_from(dir.path().to_path_buf(), None);
         let first = tailer.poll().unwrap();
-        assert!(first.iter().all(|l| l.replay), "pre-existing lines are replay");
+        assert!(
+            first.iter().all(|l| l.replay),
+            "pre-existing lines are replay"
+        );
 
         append(&path, "{\"c\":3}\n");
         let second = tailer.poll().unwrap();
@@ -413,7 +416,11 @@ mod tests {
         );
         let lines = tailer.poll().unwrap();
 
-        assert_eq!(lines.len(), 1, "a truncated/replaced file is read from the top");
+        assert_eq!(
+            lines.len(),
+            1,
+            "a truncated/replaced file is read from the top"
+        );
     }
 
     #[test]

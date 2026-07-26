@@ -6,13 +6,12 @@
 //     そのため送信は「イベントを受け取ったついでに」行う。最後のイベントから
 //     ゲーム終了までの間に溜まったぶんは、Journal の `Shutdown` イベントで
 //     まとめて送る。
-//   - プラグインには永続ストレージが無い(`host-settings` は読み取り専用)。
-//     そのため「どこまで送ったか」を再起動をまたいで覚えられない。デーモン
-//     再起動時に Journal を先頭から読み直す edlr の挙動と組み合わさると
-//     二重送信になるため、既定では**プラグイン起動時刻より古いイベントを
-//     送らない**(`uploadHistorical` で変更可)。
+//   - edlr は Journal の読み取り位置を永続化しており、デーモン再起動をまたいで
+//     続きから配信する。デーモンが動き出す前に既に書かれていたイベントには
+//     `event.replay` が立つので、既定ではこれを送らない(`uploadHistorical` で
+//     変更可)。
 //
-// どちらも詳細は README.md の「不足している実装」を参照。
+// 詳細は README.md の「不足している実装」を参照。
 package main
 
 import (
@@ -50,8 +49,8 @@ type settings struct {
 
 // state はプラグインのプロセス内状態。永続化はされない。
 type state struct {
-	// startedAt は init() が呼ばれた時刻。これより古い Journal イベントは
-	// 既定では「過去に送信済みのはず」として捨てる(README の replay 節)。
+	// startedAt は init() が呼ばれた時刻。ログ表示にのみ使う
+	// (replay の判定はホストから渡る event.replay を使う)。
 	startedAt time.Time
 
 	commanderName string
@@ -118,11 +117,11 @@ func onEvent(ev plugin.Event) {
 	// (リプレイ中の LoadGame からでも名前は学習してよい)。
 	learnIdentity(name, payload)
 
-	if !cfg.UploadHistorical && isReplay(timestamp, st.startedAt) {
+	if !cfg.UploadHistorical && ev.Replay {
 		st.skippedOld++
 		if st.skippedOld == 1 || st.skippedOld%100 == 0 {
 			logf(hostlog.LevelInfo,
-				"skipping %d journal event(s) older than plugin start (set uploadHistorical to send them)",
+				"skipping %d replayed journal event(s) (set uploadHistorical to send them)",
 				st.skippedOld)
 		}
 		return
@@ -216,23 +215,6 @@ func flush(cfg settings) {
 
 	st.queue = nil
 	logResult(result, len(batch))
-}
-
-// isReplay は、イベントのタイムスタンプがプラグイン起動より前かどうかを返す。
-//
-// edlr の Journal tailer はデーモン起動時に現行 Journal ファイルを先頭から
-// 読み直すため、この判定が無いと再起動のたびに同じイベントを INARA へ
-// 送ってしまう。パースできないタイムスタンプは「新しい」側に倒す
-// (送らないより送るほうがマシ、かつ握り潰しを避ける)。
-func isReplay(timestamp string, startedAt time.Time) bool {
-	if timestamp == "" {
-		return false
-	}
-	t, err := time.Parse(time.RFC3339, timestamp)
-	if err != nil {
-		return false
-	}
-	return t.Before(startedAt)
 }
 
 func learnIdentity(name string, payload map[string]any) {

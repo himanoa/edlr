@@ -49,7 +49,9 @@ use crate::plugin::manifest::{load_manifest, matches_event};
 use crate::plugin::registry::{PluginEntry, PluginState, Registry};
 use crate::plugin::settings::SettingsStore;
 use crate::plugin::sidecar::{assign_ports, SidecarConfig, SidecarConfigStore};
-use crate::plugin::sidecar_runtime::{implicit_http_hosts, sidecars_json_string, SidecarRuntimeEntry};
+use crate::plugin::sidecar_runtime::{
+    implicit_http_hosts, sidecars_json_string, SidecarRuntimeEntry,
+};
 use crate::plugin::Manifest;
 use crate::router::Router;
 
@@ -207,7 +209,9 @@ fn load_and_run_plugin(
                 .get(&request.name)
                 .map(|config| config.path.clone())
                 .unwrap_or_default();
-            let granted = grants_store.filesystem_state(manifest, &request.name).granted;
+            let granted = grants_store
+                .filesystem_state(manifest, &request.name)
+                .granted;
             FsRuntimeEntry {
                 name: request.name.clone(),
                 granted,

@@ -123,8 +123,7 @@ pub fn handle_rpc(
                         ),
                     });
                     value["sidecars"] = sidecars_result_json(&info.sidecars)["sidecars"].clone();
-                    value["filesystem"] =
-                        filesystem_result_json(&info.filesystem)["roots"].clone();
+                    value["filesystem"] = filesystem_result_json(&info.filesystem)["roots"].clone();
                     match info.state {
                         crate::plugin::PluginState::Running => {
                             value["state"] = serde_json::json!("running");
@@ -495,15 +494,13 @@ mod tests {
             raw: serde_json::json!({"event": "FSDJump"}),
             replay: true,
         };
-        let parsed: serde_json::Value =
-            serde_json::from_str(&event_to_ws_json(&journal)).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&event_to_ws_json(&journal)).unwrap();
         assert_eq!(parsed["replay"], serde_json::json!(true));
 
         let status = Event::Status {
             raw: serde_json::json!({"Flags": 1}),
         };
-        let parsed: serde_json::Value =
-            serde_json::from_str(&event_to_ws_json(&status)).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&event_to_ws_json(&status)).unwrap();
         assert_eq!(
             parsed.get("replay"),
             None,
