@@ -564,32 +564,13 @@ git commit -m "feat(ui): read journal dir from config.json at startup"
   - `set_journal_dir(path: String) -> Result<ConfigDto, String>`
   - `struct ConfigDto { journalDir: Option<String>, daemonManaged: bool, configError: Option<String> }`(camelCase でシリアライズ)
 
-- [ ] **Step 1: DTO を追加**
+- [ ] **Step 1: 失敗するテストを書く**
 
-`ui/src-tauri/src/config.rs` の `LoadedConfig` の下に追記:
-
-```rust
-use serde::Serialize;
-
-/// フロントエンドへ返す設定のスナップショット。
-#[derive(Debug, Clone, Serialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct ConfigDto {
-    pub journal_dir: Option<String>,
-    /// Tauri が spawn したデーモンを保持しているか。`false` の場合は
-    /// 外部起動のデーモンなので再起動できない(勝手に殺さない)。
-    pub daemon_managed: bool,
-    pub config_error: Option<String>,
-}
-```
-
-`ui/src-tauri/Cargo.toml` の `[dependencies]` に追加:
+`ui/src-tauri/Cargo.toml` の `[dev-dependencies]` に追加:
 
 ```toml
-serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 ```
-
-- [ ] **Step 2: 失敗するテストを書く**
 
 `ui/src-tauri/src/config.rs` の `mod tests` に追記:
 
@@ -610,20 +591,37 @@ serde = { version = "1", features = ["derive"] }
     }
 ```
 
-`ui/src-tauri/Cargo.toml` の `[dev-dependencies]` に追加:
-
-```toml
-serde_json = "1"
-```
-
-- [ ] **Step 3: テストが失敗することを確認**
+- [ ] **Step 2: テストが失敗することを確認**
 
 Run: `cargo test -p edlr-ui 2>&1 | tail -20`
-Expected: コンパイルエラー(`ConfigDto` 未定義、または `serde_json` 未解決)。Step 1 を先に適用済みなら `serde_json` の解決エラー。
+Expected: コンパイルエラー `cannot find struct, variant or union type ConfigDto`。
 
-- [ ] **Step 4: テストを通す**
+- [ ] **Step 3: DTO を実装**
 
-Step 1 と Step 2 の内容で既に実装は揃っている。依存追加のみで通るはず。
+`ui/src-tauri/Cargo.toml` の `[dependencies]` に追加:
+
+```toml
+serde = { version = "1", features = ["derive"] }
+```
+
+`ui/src-tauri/src/config.rs` の `LoadedConfig` の下に追記:
+
+```rust
+use serde::Serialize;
+
+/// フロントエンドへ返す設定のスナップショット。
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfigDto {
+    pub journal_dir: Option<String>,
+    /// Tauri が spawn したデーモンを保持しているか。`false` の場合は
+    /// 外部起動のデーモンなので再起動できない(勝手に殺さない)。
+    pub daemon_managed: bool,
+    pub config_error: Option<String>,
+}
+```
+
+- [ ] **Step 4: テストが通ることを確認**
 
 Run: `cargo test -p edlr-ui 2>&1 | grep -E "^test result|^error"`
 Expected: `test result: ok. 9 passed; 0 failed`
@@ -633,16 +631,20 @@ Expected: `test result: ok. 9 passed; 0 failed`
 `ui/src-tauri/src/main.rs` の `use` に追加:
 
 ```rust
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 ```
 
 `autostart_daemon` の下に追記:
 
 ```rust
 /// Tauri が保持するアプリ状態。
+///
+/// `daemon` を `Arc` で包むのは、`tauri::Builder::build` が失敗したときに
+/// `main` 側からもデーモンを停止できるようにするため。`state` は `manage` へ
+/// ムーブされてしまうので、同じ `Arc` のクローンを `main` に残しておく。
 struct AppState {
     /// Tauri が spawn したデーモン。外部起動のデーモンを掴んでいる場合は None。
-    daemon: Mutex<Option<std::process::Child>>,
+    daemon: Arc<Mutex<Option<std::process::Child>>>,
     config_path: PathBuf,
     config: Mutex<edlr_config::AppConfig>,
     config_error: Mutex<Option<String>>,
@@ -785,12 +787,14 @@ fn set_journal_dir(
 
 `main()` を次で置き換える。
 
-**`AppState` は `Arc` で包まず、そのまま `manage` する。** Tauri が内部で
-保持するため、終了時のクロージャからは `AppHandle::state::<AppState>()` で
-取り出す。こうすると Step 6 のコマンドが宣言している
-`tauri::State<'_, AppState>` と `manage` した型が一致する
-(`Arc<AppState>` を manage すると、コマンド側も
+**`AppState` そのものは `Arc` で包まず、そのまま `manage` する。** こうすると
+Step 6 のコマンドが宣言している `tauri::State<'_, AppState>` と `manage` した
+型が一致する(`Arc<AppState>` を manage すると、コマンド側も
 `tauri::State<'_, Arc<AppState>>` にしなければ実行時に取得へ失敗する)。
+
+かわりに **`daemon` フィールドだけ `Arc`** にして、そのクローンを `main` に
+残す。これで `state` が `manage` へムーブされた後でも、ビルド失敗時と終了時の
+両方からデーモンを停止できる(現行 `main.rs:62,78` の挙動を維持する)。
 
 ```rust
 fn main() {
@@ -802,8 +806,11 @@ fn main() {
     }
     let child = autostart_daemon(loaded.config.journal_dir.clone());
 
+    // state は manage へムーブされるため、停止用にこのハンドルを手元へ残す。
+    let daemon = Arc::new(Mutex::new(child));
+
     let state = AppState {
-        daemon: Mutex::new(child),
+        daemon: Arc::clone(&daemon),
         config_path: loaded.path,
         config: Mutex::new(loaded.config),
         config_error: Mutex::new(loaded.error),
@@ -816,21 +823,22 @@ fn main() {
     {
         Ok(app) => app,
         Err(e) => {
+            kill_daemon(&daemon);
             eprintln!("error while building tauri application: {e}");
             std::process::exit(1);
         }
     };
 
-    app.run(|app_handle, event| {
+    app.run(move |_app, event| {
         if let tauri::RunEvent::Exit = event {
-            kill_daemon(&app_handle.state::<AppState>());
+            kill_daemon(&daemon);
         }
     });
 }
 
-/// 保持しているデーモンがあれば停止する。
-fn kill_daemon(state: &AppState) {
-    let mut guard = state.daemon.lock().unwrap_or_else(|p| p.into_inner());
+/// 保持しているデーモンがあれば停止する(終了時・ビルド失敗時)。
+fn kill_daemon(slot: &Mutex<Option<std::process::Child>>) {
+    let mut guard = slot.lock().unwrap_or_else(|p| p.into_inner());
     if let Some(mut child) = guard.take() {
         let _ = child.kill();
         let _ = child.wait();
@@ -838,21 +846,35 @@ fn kill_daemon(state: &AppState) {
 }
 ```
 
-`app_handle.state::<AppState>()` を使うため `use tauri::Manager;` を `use` に追加すること。
+- [ ] **Step 8: capability ファイルを作成**
 
-**注意:** `tauri::Builder::build` が失敗した場合、`state` は既に `manage` へ
-ムーブされており、そこからデーモンを取り出して kill することはできない。
-この経路ではデーモンが残るが、ウィンドウを作れない時点でアプリは起動不能であり、
-デーモン自体は正常に動いている(次回起動時は `daemon_running` が true を返して
-spawn をスキップする)。現行コードはここで kill していたが、状態を Tauri へ
-預ける以上この経路は諦める。
+**このタスクがこのアプリ初の IPC コマンドを追加する。** Tauri 2 ではフロントエンドが
+`invoke` を呼ぶために capability の許可が要る。現在 `ui/src-tauri/capabilities/` は
+**存在しない**(コマンドが 1 つも無かったため不要だった)。これを作らないと
+コマンドはビルドは通るが実行時に拒否される。
 
-- [ ] **Step 8: ビルドと全テストを確認**
+`ui/src-tauri/capabilities/default.json` を新規作成:
+
+```json
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "edlr のウィンドウが使う権限",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}
+```
+
+`"windows"` の値は `tauri.conf.json` のウィンドウのラベルと一致する必要がある。
+`ui/src-tauri/tauri.conf.json` の `app.windows[0]` に `label` が無い場合、Tauri の
+既定ラベルは `"main"` なので上記のままでよい。`label` が明示されていればその値を使うこと。
+
+- [ ] **Step 9: ビルドと全テストを確認**
 
 Run: `cargo build && cargo test 2>&1 | grep -E "^test result: FAILED|^error" || echo "ALL GREEN"`
 Expected: `ALL GREEN`
 
-- [ ] **Step 9: コミット**
+- [ ] **Step 10: コミット**
 
 ```bash
 git add ui/src-tauri/
@@ -924,7 +946,8 @@ tokio = { version = "1", features = ["sync"] }
 
 - [ ] **Step 3: capability を許可**
 
-`ui/src-tauri/capabilities/default.json` を確認する。存在しなければ作成:
+Task 4 Step 8 で作成済みの `ui/src-tauri/capabilities/default.json` の
+`permissions` 配列に `"dialog:allow-open"` を追加する。ファイル全体は次になる:
 
 ```json
 {
@@ -935,8 +958,6 @@ tokio = { version = "1", features = ["sync"] }
   "permissions": ["core:default", "dialog:allow-open"]
 }
 ```
-
-既に存在する場合は `permissions` 配列に `"dialog:allow-open"` を追加する。
 
 - [ ] **Step 4: ビルドを確認**
 
