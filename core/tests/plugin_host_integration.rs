@@ -35,11 +35,33 @@ fn memory_hog_wasm() -> PathBuf {
     build_fixture("examples/plugins/memory-hog", "memory_hog.wasm")
 }
 
+fn http_caller_wasm() -> PathBuf {
+    build_fixture("examples/plugins/http-caller", "http_caller.wasm")
+}
+
+/// Default `capabilities_json` for tests that don't care about capabilities:
+/// nothing granted, no hosts.
+const NO_CAPABILITIES: &str = r#"{"granted":false,"hosts":[]}"#;
+
 fn ctx(settings_json: &str) -> (HostCtx, Arc<Mutex<String>>) {
+    let (ctx, settings, _capabilities) = ctx_with_capabilities(settings_json, NO_CAPABILITIES);
+    (ctx, settings)
+}
+
+fn ctx_with_capabilities(
+    settings_json: &str,
+    capabilities_json: &str,
+) -> (HostCtx, Arc<Mutex<String>>, Arc<Mutex<String>>) {
     let settings = Arc::new(Mutex::new(settings_json.to_string()));
+    let capabilities = Arc::new(Mutex::new(capabilities_json.to_string()));
     (
-        HostCtx::new("test-plugin".to_string(), settings.clone()),
+        HostCtx::new(
+            "test-plugin".to_string(),
+            settings.clone(),
+            capabilities.clone(),
+        ),
         settings,
+        capabilities,
     )
 }
 
@@ -51,6 +73,17 @@ fn load(
     let (ctx, settings) = ctx(settings_json);
     let instance = host.load(wasm_path, ctx).expect("load should succeed");
     (instance, settings)
+}
+
+fn load_with_capabilities(
+    host: &PluginHost,
+    wasm_path: &Path,
+    settings_json: &str,
+    capabilities_json: &str,
+) -> (PluginInstance, Arc<Mutex<String>>, Arc<Mutex<String>>) {
+    let (ctx, settings, capabilities) = ctx_with_capabilities(settings_json, capabilities_json);
+    let instance = host.load(wasm_path, ctx).expect("load should succeed");
+    (instance, settings, capabilities)
 }
 
 #[test]
@@ -151,4 +184,59 @@ fn memory_hog_on_event_hits_memory_limit() {
         "call took {elapsed:?}, which is suspiciously close to the call deadline; \
          this may be a deadline trap rather than a memory-limit trap"
     );
+}
+
+/// The `http-caller` fixture calls `driver-http.send` once in `on-event` and
+/// catches whatever the host returns (logging it via `host-log`) instead of
+/// propagating it. With capabilities ungranted, the host implementation
+/// returns a typed `permission-denied` error, not a trap -- so the guest
+/// call must complete normally (`Ok`), never trap.
+#[test]
+fn http_caller_on_event_does_not_trap_when_ungranted() {
+    let wasm = http_caller_wasm();
+    let host = PluginHost::new().expect("host should start");
+    let (mut instance, _settings, _capabilities) =
+        load_with_capabilities(&host, &wasm, r#"{}"#, NO_CAPABILITIES);
+
+    instance.call_init().expect("call_init should succeed");
+    instance
+        .call_on_event("journal", None, Some("FSDJump"), "{}")
+        .expect("on-event should not trap when the capability is ungranted");
+}
+
+/// Same as above, but with the capability granted for the default url the
+/// fixture calls (`https://api.example.com/ping`). This task's host
+/// implementation still does no networking -- it returns
+/// `transport("not implemented")` once permission checks pass -- but that is
+/// still a typed error the guest can catch, so the call must not trap
+/// either.
+#[test]
+fn http_caller_on_event_does_not_trap_when_granted_for_allowed_host() {
+    let wasm = http_caller_wasm();
+    let host = PluginHost::new().expect("host should start");
+    let capabilities_json = r#"{"granted":true,"hosts":["https://api.example.com"]}"#;
+    let (mut instance, _settings, _capabilities) =
+        load_with_capabilities(&host, &wasm, r#"{}"#, capabilities_json);
+
+    instance.call_init().expect("call_init should succeed");
+    instance
+        .call_on_event("journal", None, Some("FSDJump"), "{}")
+        .expect("on-event should not trap once permission checks pass");
+}
+
+/// A grant for a *different* host must not authorize the fixture's default
+/// url; the host implementation should still return a typed
+/// `permission-denied` (not a trap) because `check_url` rejects it.
+#[test]
+fn http_caller_on_event_does_not_trap_when_granted_for_other_host() {
+    let wasm = http_caller_wasm();
+    let host = PluginHost::new().expect("host should start");
+    let capabilities_json = r#"{"granted":true,"hosts":["https://other.example.com"]}"#;
+    let (mut instance, _settings, _capabilities) =
+        load_with_capabilities(&host, &wasm, r#"{}"#, capabilities_json);
+
+    instance.call_init().expect("call_init should succeed");
+    instance
+        .call_on_event("journal", None, Some("FSDJump"), "{}")
+        .expect("on-event should not trap when granted for an unrelated host");
 }

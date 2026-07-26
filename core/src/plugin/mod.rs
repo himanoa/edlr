@@ -1,3 +1,4 @@
+pub mod allowlist;
 pub mod grants;
 pub mod host;
 pub mod manifest;

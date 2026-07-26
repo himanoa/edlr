@@ -5,7 +5,8 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use crate::plugin::host::PluginHost;
+use crate::plugin::grants::{GrantState, GrantsError, GrantsStore};
+use crate::plugin::host::{capabilities_json_string, PluginHost};
 use crate::plugin::settings::SettingsStore;
 use crate::plugin::{Manifest, SettingsError};
 
@@ -23,6 +24,11 @@ pub struct PluginEntry {
     /// `HostCtx` と共有される effective settings JSON。将来の RPC がここを
     /// 更新すると、次回以降の wasm 呼び出しに反映される。
     pub settings_json: Arc<Mutex<String>>,
+    /// `HostCtx` と共有される capability 承認状態 JSON
+    /// (`{"granted": bool, "hosts": [...]}`)。`Registry::set_capabilities`
+    /// がここを更新すると、次回以降の `driver-http.send` 呼び出しに
+    /// 再起動不要で反映される。
+    pub capabilities_json: Arc<Mutex<String>>,
 }
 
 /// RPC 応答用のプラグイン情報スナップショット。
@@ -39,6 +45,8 @@ pub enum RegistryError {
     UnknownPlugin(String),
     /// `SettingsStore::update` による検証・永続化エラー。
     Settings(SettingsError),
+    /// `GrantsStore::set` による永続化エラー。
+    Grants(GrantsError),
 }
 
 impl fmt::Display for RegistryError {
@@ -46,6 +54,7 @@ impl fmt::Display for RegistryError {
         match self {
             RegistryError::UnknownPlugin(id) => write!(f, "unknown plugin: {id}"),
             RegistryError::Settings(e) => write!(f, "{e}"),
+            RegistryError::Grants(e) => write!(f, "{e}"),
         }
     }
 }
@@ -64,6 +73,7 @@ pub struct Registry {
     entries: Arc<Mutex<Vec<PluginEntry>>>,
     _host: Arc<PluginHost>,
     settings_store: Arc<SettingsStore>,
+    grants_store: Arc<GrantsStore>,
     plugins_dir: PathBuf,
 }
 
@@ -71,12 +81,14 @@ impl Registry {
     pub(crate) fn new(
         host: Arc<PluginHost>,
         settings_store: Arc<SettingsStore>,
+        grants_store: Arc<GrantsStore>,
         plugins_dir: PathBuf,
     ) -> Self {
         Registry {
             entries: Arc::new(Mutex::new(Vec::new())),
             _host: host,
             settings_store,
+            grants_store,
             plugins_dir,
         }
     }
@@ -192,6 +204,41 @@ impl Registry {
         Ok(effective)
     }
 
+    /// `id` のプラグインの capability 承認/取消を `GrantsStore` に永続化し、
+    /// 稼働中プラグインが参照する共有 `capabilities_json` も更新する。
+    ///
+    /// `set_values` と同様、`entries` ロックは manifest と `capabilities_json`
+    /// の共有ハンドルを取得する間だけ保持し、`GrantsStore::set` のファイル
+    /// I/O はロックを解放した後に行う。これにより、承認/取消は次回以降の
+    /// `driver-http.send` 呼び出しから即座に有効になる(プラグインの再起動
+    /// 不要)。
+    pub fn set_capabilities(&self, id: &str, granted: bool) -> Result<GrantState, RegistryError> {
+        let (manifest, capabilities_json) = {
+            let guard = self
+                .entries
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let entry = guard
+                .iter()
+                .find(|entry| entry.manifest.id == id)
+                .ok_or_else(|| RegistryError::UnknownPlugin(id.to_string()))?;
+            (entry.manifest.clone(), entry.capabilities_json.clone())
+        };
+
+        let state = self
+            .grants_store
+            .set(&manifest, granted)
+            .map_err(RegistryError::Grants)?;
+
+        let capabilities_json_string =
+            capabilities_json_string(state.granted, &manifest.capability_hosts());
+        *capabilities_json
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = capabilities_json_string;
+
+        Ok(state)
+    }
+
     /// `id` のプラグインの manifest クローンを返す(`entries` ロック保持は
     /// このルックアップの間だけ)。
     fn find_manifest(&self, id: &str) -> Result<Manifest, RegistryError> {
@@ -234,7 +281,13 @@ mod tests {
         let host = Arc::new(PluginHost::new().expect("host should start"));
         let tmp = tempfile::tempdir().unwrap();
         let settings_store = Arc::new(SettingsStore::new(tmp.path().join("settings")));
-        Registry::new(host, settings_store, tmp.path().join("plugins"))
+        let grants_store = Arc::new(GrantsStore::new(tmp.path().join("grants")));
+        Registry::new(
+            host,
+            settings_store,
+            grants_store,
+            tmp.path().join("plugins"),
+        )
     }
 
     #[test]
@@ -259,5 +312,72 @@ mod tests {
             .expect_err("unknown id should be rejected");
 
         assert!(matches!(err, RegistryError::UnknownPlugin(id) if id == "does-not-exist"));
+    }
+
+    #[test]
+    fn set_capabilities_for_unknown_plugin_returns_unknown_plugin_error() {
+        let registry = empty_registry();
+
+        let err = registry
+            .set_capabilities("does-not-exist", true)
+            .expect_err("unknown id should be rejected");
+
+        assert!(matches!(err, RegistryError::UnknownPlugin(id) if id == "does-not-exist"));
+    }
+
+    fn manifest_with_http_capability(id: &str) -> Manifest {
+        Manifest {
+            id: id.to_string(),
+            name: id.to_string(),
+            version: "0.1.0".into(),
+            description: String::new(),
+            entry: "plugin.wasm".into(),
+            events: vec![],
+            settings: vec![],
+            capabilities: vec![crate::plugin::CapabilityRequest::Http {
+                hosts: vec!["https://api.example.com".to_string()],
+                reason: "test".into(),
+            }],
+        }
+    }
+
+    #[test]
+    fn set_capabilities_persists_grant_and_updates_shared_capabilities_json() {
+        let registry = empty_registry();
+        let manifest = manifest_with_http_capability("cap-plugin");
+        let capabilities_json = Arc::new(Mutex::new(
+            crate::plugin::host::capabilities_json_string(false, &[]),
+        ));
+        registry.push(PluginEntry {
+            manifest: manifest.clone(),
+            state: PluginState::Running,
+            settings_json: Arc::new(Mutex::new("{}".to_string())),
+            capabilities_json: capabilities_json.clone(),
+        });
+
+        let state = registry
+            .set_capabilities("cap-plugin", true)
+            .expect("set_capabilities should succeed");
+
+        assert!(state.granted);
+        assert!(!state.stale);
+
+        let stored = capabilities_json.lock().unwrap().clone();
+        let parsed: serde_json::Value = serde_json::from_str(&stored).unwrap();
+        assert_eq!(parsed["granted"], serde_json::json!(true));
+        assert_eq!(
+            parsed["hosts"],
+            serde_json::json!(["https://api.example.com"])
+        );
+
+        // Revoking updates the shared buffer again, live, without touching
+        // the registered entry itself.
+        let state = registry
+            .set_capabilities("cap-plugin", false)
+            .expect("revoke should succeed");
+        assert!(!state.granted);
+        let stored = capabilities_json.lock().unwrap().clone();
+        let parsed: serde_json::Value = serde_json::from_str(&stored).unwrap();
+        assert_eq!(parsed["granted"], serde_json::json!(false));
     }
 }

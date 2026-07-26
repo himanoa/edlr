@@ -1,4 +1,5 @@
 use edlr_core::event::Event;
+use edlr_core::plugin::grants::GrantsStore;
 use edlr_core::plugin::host::PluginHost;
 use edlr_core::plugin::runner::start_plugins;
 use edlr_core::plugin::settings::SettingsStore;
@@ -67,10 +68,11 @@ fn hello_logger_registry() -> (tempfile::TempDir, Registry) {
     write_hello_logger(&plugins_dir);
 
     let settings_store = SettingsStore::new(tmp.path().join("settings"));
+    let grants_store = GrantsStore::new(tmp.path().join("grants"));
     let router = Router::new(16);
     let host = PluginHost::new().expect("host should start");
 
-    let registry = start_plugins(&plugins_dir, settings_store, &router, host);
+    let registry = start_plugins(&plugins_dir, settings_store, grants_store, &router, host);
     (tmp, registry)
 }
 

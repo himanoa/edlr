@@ -23,7 +23,8 @@ use std::thread;
 use tokio::sync::broadcast;
 
 use crate::event::Event;
-use crate::plugin::host::{HostCtx, PluginHost};
+use crate::plugin::grants::GrantsStore;
+use crate::plugin::host::{capabilities_json_string, HostCtx, PluginHost};
 use crate::plugin::manifest::{load_manifest, matches_event};
 use crate::plugin::registry::{PluginEntry, PluginState, Registry};
 use crate::plugin::settings::SettingsStore;
@@ -37,14 +38,17 @@ use crate::router::Router;
 pub fn start_plugins(
     plugins_dir: &Path,
     settings_store: SettingsStore,
+    grants_store: GrantsStore,
     router: &Router,
     host: PluginHost,
 ) -> Registry {
     let host = Arc::new(host);
     let settings_store = Arc::new(settings_store);
+    let grants_store = Arc::new(grants_store);
     let registry = Registry::new(
         host.clone(),
         settings_store.clone(),
+        grants_store.clone(),
         plugins_dir.to_path_buf(),
     );
 
@@ -77,7 +81,15 @@ pub fn start_plugins(
             }
         };
 
-        load_and_run_plugin(&manifest, &path, &settings_store, router, &host, &registry);
+        load_and_run_plugin(
+            &manifest,
+            &path,
+            &settings_store,
+            &grants_store,
+            router,
+            &host,
+            &registry,
+        );
     }
 
     registry
@@ -85,10 +97,12 @@ pub fn start_plugins(
 
 /// 1 プラグインをロードし、成功すれば専用スレッド・購読タスクを起動し、
 /// 結果(Running/Disabled)を `registry` に登録する。
+#[allow(clippy::too_many_arguments)]
 fn load_and_run_plugin(
     manifest: &Manifest,
     dir: &Path,
     settings_store: &SettingsStore,
+    grants_store: &GrantsStore,
     router: &Router,
     host: &Arc<PluginHost>,
     registry: &Registry,
@@ -99,6 +113,11 @@ fn load_and_run_plugin(
         .unwrap_or_else(|_| "{}".to_string());
     let settings_json = Arc::new(Mutex::new(settings_json_string));
 
+    let grant_state = grants_store.state(manifest);
+    let initial_capabilities_json =
+        capabilities_json_string(grant_state.granted, &manifest.capability_hosts());
+    let capabilities_json = Arc::new(Mutex::new(initial_capabilities_json));
+
     let (events_tx, events_rx) = std_mpsc::channel::<Arc<Event>>();
     let (ready_tx, ready_rx) = std_mpsc::channel::<PluginState>();
 
@@ -106,6 +125,7 @@ fn load_and_run_plugin(
         let host = host.clone();
         let manifest = manifest.clone();
         let settings_json = settings_json.clone();
+        let capabilities_json = capabilities_json.clone();
         let registry = registry.clone();
         move || {
             run_plugin_thread(
@@ -113,6 +133,7 @@ fn load_and_run_plugin(
                 manifest,
                 entry_path,
                 settings_json,
+                capabilities_json,
                 registry,
                 events_rx,
                 ready_tx,
@@ -129,6 +150,7 @@ fn load_and_run_plugin(
         manifest: manifest.clone(),
         state,
         settings_json,
+        capabilities_json,
     });
 
     if running {
@@ -140,16 +162,18 @@ fn load_and_run_plugin(
 
 /// プラグイン専用スレッドの本体。`load` → `call_init` → イベントループを
 /// 直列に実行する。すべての wasm 呼び出しはこのスレッド上でのみ発生する。
+#[allow(clippy::too_many_arguments)]
 fn run_plugin_thread(
     host: Arc<PluginHost>,
     manifest: Manifest,
     entry_path: PathBuf,
     settings_json: Arc<Mutex<String>>,
+    capabilities_json: Arc<Mutex<String>>,
     registry: Registry,
     events_rx: std_mpsc::Receiver<Arc<Event>>,
     ready_tx: std_mpsc::Sender<PluginState>,
 ) {
-    let ctx = HostCtx::new(manifest.id.clone(), settings_json);
+    let ctx = HostCtx::new(manifest.id.clone(), settings_json, capabilities_json);
     let mut instance = match host.load(&entry_path, ctx) {
         Ok(instance) => instance,
         Err(e) => {

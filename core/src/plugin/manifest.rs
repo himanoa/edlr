@@ -118,6 +118,17 @@ impl Manifest {
 
         Some(fnv1a_hex(&canonical))
     }
+
+    /// 全 capability 要求の host 一覧を平坦化して返す(要求元 kind の区別なし、
+    /// 重複を含みうる)。`driver-http` の許可判定に使う許可リストの元になる。
+    pub fn capability_hosts(&self) -> Vec<String> {
+        self.capabilities
+            .iter()
+            .flat_map(|req| match req {
+                CapabilityRequest::Http { hosts, .. } => hosts.clone(),
+            })
+            .collect()
+    }
 }
 
 /// 可変長文字列フィールドを長さ接頭辞方式でエンコードする: `"{byte_len}:{content}"`。

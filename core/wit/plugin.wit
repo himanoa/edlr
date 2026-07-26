@@ -9,9 +9,30 @@ interface host-settings {
   get-all: func() -> string; // 設定値 JSON オブジェクト文字列(defaults マージ済み)
 }
 
+interface driver-http {
+  record request {
+    method: string,
+    url: string,
+    headers: list<tuple<string, string>>,
+    body: option<list<u8>>,
+  }
+  record response {
+    status: u16,
+    headers: list<tuple<string, string>>,
+    body: list<u8>,
+  }
+  variant driver-error {
+    permission-denied(string),
+    invalid-request(string),
+    transport(string),
+  }
+  send: func(req: request) -> result<response, driver-error>;
+}
+
 world plugin {
   import host-log;
   import host-settings;
+  import driver-http;
 
   record event {
     kind: string,               // "journal" | "status"

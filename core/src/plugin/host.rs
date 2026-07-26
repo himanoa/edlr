@@ -19,9 +19,15 @@ mod bindings {
     });
 }
 
+use bindings::edlr::plugin::driver_http::{
+    DriverError as WitDriverError, Host as DriverHttpHost, Request as WitRequest,
+    Response as WitResponse,
+};
 use bindings::edlr::plugin::host_log::{Host as HostLogHost, Level as WitLevel};
 use bindings::edlr::plugin::host_settings::Host as HostSettingsHost;
 use bindings::{Event as WitEvent, Plugin as PluginBindings};
+
+use crate::plugin::allowlist::check_url;
 
 /// Interval between epoch ticks driven by the background ticker thread.
 const EPOCH_TICK_INTERVAL: Duration = Duration::from_millis(100);
@@ -53,6 +59,19 @@ pub struct HostCtx {
     /// Effective settings JSON string. Wrapped so the runner can swap the
     /// value in place between calls without reloading the plugin.
     pub settings_json: Arc<Mutex<String>>,
+    /// Capability grant state JSON string, shape `{"granted": bool, "hosts":
+    /// ["https://..."]}`. Built by the runner at startup from `GrantsStore` +
+    /// the manifest's requested hosts, and readable/writable live via the
+    /// same `Arc` the `Registry` holds -- so approving/revoking a capability
+    /// takes effect on the very next `driver-http.send` call, no plugin
+    /// restart required.
+    ///
+    /// This is the *only* source the `driver-http` host implementation
+    /// consults to decide whether a call is permitted: the guest never
+    /// passes its own id or grants as an argument, so a plugin cannot
+    /// forge or observe another plugin's capability state, nor influence
+    /// the decision through its inputs.
+    pub capabilities_json: Arc<Mutex<String>>,
     /// WASI state. The `plugin` world itself does not import WASI, but
     /// components built for the `wasm32-wasip2` target still import a
     /// baseline set of WASI interfaces (io, random, clocks, ...) from the
@@ -65,10 +84,15 @@ pub struct HostCtx {
 }
 
 impl HostCtx {
-    pub fn new(plugin_id: String, settings_json: Arc<Mutex<String>>) -> HostCtx {
+    pub fn new(
+        plugin_id: String,
+        settings_json: Arc<Mutex<String>>,
+        capabilities_json: Arc<Mutex<String>>,
+    ) -> HostCtx {
         HostCtx {
             plugin_id,
             settings_json,
+            capabilities_json,
             // Deliberately empty sandbox default: no preopened directories,
             // no stdio, no network access, so a plugin can only interact
             // with the host through the `plugin` world's explicit imports.
@@ -111,6 +135,90 @@ impl HostSettingsHost for HostCtx {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone()
+    }
+}
+
+/// Serializes the `capabilities_json` shape (`{"granted": bool, "hosts":
+/// [...]}`) shared between `HostCtx` and `Registry`. `hosts` are only
+/// consulted by `driver-http.send` when `granted` is true, but are included
+/// unconditionally here for simplicity -- an ungranted plugin's `send` calls
+/// are already rejected before `hosts` would ever be read (see
+/// `DriverHttpHost::send` below).
+pub fn capabilities_json_string(granted: bool, hosts: &[String]) -> String {
+    serde_json::to_string(&serde_json::json!({
+        "granted": granted,
+        "hosts": hosts,
+    }))
+    .unwrap_or_else(|_| r#"{"granted":false,"hosts":[]}"#.to_string())
+}
+
+/// Parsed view of `capabilities_json`, defaulting to "nothing granted" if the
+/// shared buffer somehow holds unparseable or unexpected-shape JSON (this
+/// host implementation never writes such a value, but the field is a shared
+/// `Arc<Mutex<String>>` deliberately parsed defensively rather than trusted).
+struct Capabilities {
+    granted: bool,
+    hosts: Vec<String>,
+}
+
+fn parse_capabilities(raw: &str) -> Capabilities {
+    let value: serde_json::Value = match serde_json::from_str(raw) {
+        Ok(value) => value,
+        Err(_) => {
+            return Capabilities {
+                granted: false,
+                hosts: Vec::new(),
+            }
+        }
+    };
+
+    let granted = value
+        .get("granted")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    let hosts = value
+        .get("hosts")
+        .and_then(serde_json::Value::as_array)
+        .map(|hosts| {
+            hosts
+                .iter()
+                .filter_map(|h| h.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    Capabilities { granted, hosts }
+}
+
+impl DriverHttpHost for HostCtx {
+    /// This task's `send` never performs any networking. It only decides
+    /// *whether* the call would be permitted: not granted -> `permission-
+    /// denied`; granted but the URL is outside the plugin's allowlisted
+    /// hosts -> `permission-denied` with the allowlist rejection reason;
+    /// otherwise -> `transport("not implemented")` as a placeholder for the
+    /// real HTTP call a later task wires in.
+    ///
+    /// The decision is made *entirely* from `self.capabilities_json`, which
+    /// is per-`HostCtx` (i.e. per plugin instance) and never derived from
+    /// `req`. The guest supplies only the URL it wants to reach; it has no
+    /// way to supply or influence its own grant state.
+    fn send(&mut self, req: WitRequest) -> Result<WitResponse, WitDriverError> {
+        let raw = self
+            .capabilities_json
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        let capabilities = parse_capabilities(&raw);
+
+        if !capabilities.granted {
+            return Err(WitDriverError::PermissionDenied(
+                "capability not granted".to_string(),
+            ));
+        }
+
+        check_url(&capabilities.hosts, &req.url).map_err(WitDriverError::PermissionDenied)?;
+
+        Err(WitDriverError::Transport("not implemented".to_string()))
     }
 }
 
@@ -222,5 +330,76 @@ impl PluginInstance {
         self.bindings
             .call_on_event(&mut self.store, &event)
             .map_err(|e| anyhow::anyhow!("plugin on-event() call failed or timed out: {e}"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! Unit tests for `DriverHttpHost::send` called directly against
+    //! `HostCtx`, without going through wasm at all. This is possible (and
+    //! preferable to a full wasm round-trip for exercising the permission
+    //! logic) because the whole point of the design is that the decision is
+    //! made purely from `HostCtx`'s own `capabilities_json`, never from
+    //! anything the guest passes in `req` -- so a host-side call with a
+    //! hand-built `WitRequest` exercises exactly the same decision path a
+    //! real guest call would.
+    use super::*;
+
+    fn ctx(capabilities_json: &str) -> HostCtx {
+        HostCtx::new(
+            "test-plugin".to_string(),
+            Arc::new(Mutex::new("{}".to_string())),
+            Arc::new(Mutex::new(capabilities_json.to_string())),
+        )
+    }
+
+    fn request(url: &str) -> WitRequest {
+        WitRequest {
+            method: "GET".to_string(),
+            url: url.to_string(),
+            headers: Vec::new(),
+            body: None,
+        }
+    }
+
+    #[test]
+    fn send_without_grant_is_permission_denied() {
+        let mut ctx = ctx(&capabilities_json_string(false, &[]));
+
+        let err = ctx
+            .send(request("https://api.example.com/ping"))
+            .expect_err("ungranted call should be rejected");
+
+        assert!(
+            matches!(err, WitDriverError::PermissionDenied(msg) if msg == "capability not granted")
+        );
+    }
+
+    #[test]
+    fn send_granted_but_disallowed_host_is_permission_denied() {
+        let mut ctx = ctx(&capabilities_json_string(
+            true,
+            &["https://api.example.com".to_string()],
+        ));
+
+        let err = ctx
+            .send(request("https://evil.example.com/ping"))
+            .expect_err("call to a non-allowlisted host should be rejected");
+
+        assert!(matches!(err, WitDriverError::PermissionDenied(_)));
+    }
+
+    #[test]
+    fn send_granted_and_allowed_host_is_not_implemented_transport() {
+        let mut ctx = ctx(&capabilities_json_string(
+            true,
+            &["https://api.example.com".to_string()],
+        ));
+
+        let err = ctx
+            .send(request("https://api.example.com/ping"))
+            .expect_err("this task does not implement real networking yet");
+
+        assert!(matches!(err, WitDriverError::Transport(msg) if msg == "not implemented"));
     }
 }
