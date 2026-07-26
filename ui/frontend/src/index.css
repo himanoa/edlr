@@ -216,3 +216,33 @@ body {
   gap: 0.5rem;
   margin-top: 0.5rem;
 }
+.filesystem-section {
+  margin-top: 0.75rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid #2b313b;
+}
+.filesystem-card {
+  border: 1px solid #2b313b;
+  border-radius: 6px;
+  padding: 0.75rem 1rem;
+  margin-bottom: 0.75rem;
+}
+.filesystem-card legend {
+  padding: 0 0.4rem;
+  color: #7fb3d8;
+  font-weight: 600;
+}
+.filesystem-reason {
+  color: #8a93a2;
+  font-size: 0.85rem;
+  margin: 0 0 0.5rem;
+}
+.filesystem-grant-toggle {
+  margin-top: 0.5rem;
+}
+.badge-filesystem-mode {
+  background: #1c2129;
+  border-radius: 4px;
+  padding: 0.05rem 0.4rem;
+  color: #7fb3d8;
+}

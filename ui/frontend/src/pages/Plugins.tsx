@@ -1,9 +1,18 @@
 import { useEffect, useRef, useState } from "react";
 import CapabilitySection from "../components/CapabilitySection";
+import FilesystemSection from "../components/FilesystemSection";
 import PluginForm from "../components/PluginForm";
 import SidecarSection from "../components/SidecarSection";
 import { RpcClient } from "../rpc";
-import type { Capabilities, PluginInfo, PluginsList, SidecarConfig, Sidecars } from "../types/plugin";
+import type {
+  Capabilities,
+  FilesystemConfig,
+  FilesystemRoots,
+  PluginInfo,
+  PluginsList,
+  SidecarConfig,
+  Sidecars,
+} from "../types/plugin";
 import { defaultWsUrl } from "../ws";
 
 type Status = "loading" | "ready" | "error";
@@ -125,6 +134,36 @@ export default function Plugins() {
       );
     };
 
+  const handleFilesystemConfig =
+    (pluginId: string) => async (name: string, config: FilesystemConfig) => {
+      const client = clientRef.current;
+      if (!client) throw new Error("RPC に接続されていません");
+      const updated = await client.call<FilesystemRoots>("plugins/set-filesystem-config", {
+        plugin: pluginId,
+        name,
+        config,
+      });
+      if (!mountedRef.current) return;
+      setPlugins((prev) =>
+        prev.map((p) => (p.id === pluginId ? { ...p, filesystem: updated.roots } : p)),
+      );
+    };
+
+  const handleFilesystemGrant =
+    (pluginId: string) => async (name: string, granted: boolean) => {
+      const client = clientRef.current;
+      if (!client) throw new Error("RPC に接続されていません");
+      const updated = await client.call<FilesystemRoots>("plugins/set-filesystem-grant", {
+        plugin: pluginId,
+        name,
+        granted,
+      });
+      if (!mountedRef.current) return;
+      setPlugins((prev) =>
+        prev.map((p) => (p.id === pluginId ? { ...p, filesystem: updated.roots } : p)),
+      );
+    };
+
   return (
     <section>
       <h1>Plugins</h1>
@@ -152,6 +191,11 @@ export default function Plugins() {
               onConfigChange={handleSidecarConfig(p.id)}
               onGrantChange={handleSidecarGrant(p.id)}
               onControl={handleSidecarControl(p.id)}
+            />
+            <FilesystemSection
+              roots={p.filesystem}
+              onConfigChange={handleFilesystemConfig(p.id)}
+              onGrantChange={handleFilesystemGrant(p.id)}
             />
           </article>
         ))}
