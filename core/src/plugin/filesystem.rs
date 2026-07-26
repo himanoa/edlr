@@ -141,6 +141,15 @@ impl FilesystemConfigStore {
 
     /// manifest の既定値(空パス)に保存済みの値をマージした設定一覧を返す。
     /// ファイルが無い・壊れている場合は既定値のみ(panic しない)。
+    ///
+    /// **保存済みの値も読み込み時に検証する。** ディスク上の
+    /// `<id>.filesystem.json` は保存時の検証を経ていない可能性がある(手書き、
+    /// 旧バージョンで保存されたもの、保護対象が増える前に保存されたもの)。
+    /// 検証を通らない値は空パス(= 未設定)へ落とすので、承認もできず
+    /// (`Registry::set_filesystem_grant`)、共有バッファにも `path` が載らず
+    /// (`fs_runtime`)、ホスト側も `not-configured` で拒否する
+    /// (`HostCtx::resolve_root`)。これで I1 の保護が保存時だけでなく恒久的に
+    /// 閉じる。
     pub fn effective(&self, manifest: &Manifest) -> BTreeMap<String, FilesystemConfig> {
         let _guard = self.lock.lock().unwrap_or_else(|p| p.into_inner());
         self.effective_locked(manifest)
@@ -160,6 +169,19 @@ impl FilesystemConfigStore {
                     .get(&request.name)
                     .cloned()
                     .unwrap_or_else(|| FilesystemConfig { path: String::new() });
+                let config = match self.validate_path(&request.name, &config.path) {
+                    Ok(()) => config,
+                    Err(e) => {
+                        tracing::warn!(
+                            plugin = %manifest.id,
+                            root = %request.name,
+                            path = %config.path,
+                            "stored filesystem directory is no longer acceptable ({e}); \
+                             treating it as unset"
+                        );
+                        FilesystemConfig { path: String::new() }
+                    }
+                };
                 (request.name.clone(), config)
             })
             .collect()
@@ -204,9 +226,31 @@ impl FilesystemConfigStore {
 ///
 /// 状態ディレクトリは起動時にまだ存在しないことがある(初回起動の `grants`
 /// など)。`canonicalize` は存在しないパスで失敗するので、存在する最長の
-/// 祖先まで正規化し、残りをそのまま繋ぐ。正規化できなければ元のパスを返す
-/// (比較が緩くなるだけで、保護対象から外れることはない)。
+/// 祖先まで正規化し、残りをそのまま繋ぐ。
+///
+/// **相対パスは必ずカレントディレクトリを前置してから正規化する。** 比較相手
+/// (ユーザーが選んだディレクトリ)は必ず `canonicalize()` 済みの絶対パスなので、
+/// 相対パスのまま保護リストに載せると `starts_with` がどちら向きにも一致せず、
+/// 保護が静かに外れる(`--grants-dir some/where` のような相対指定で、その祖先も
+/// 1 つも存在しない場合に起きる)。スナップショットは起動時に 1 回きりなので、
+/// 穴はプロセスの寿命の間ずっと開いたままになる。
+///
+/// カレントディレクトリすら取れず絶対パスにできなかった場合は、保護が効かない
+/// ことを警告した上で元のパスを返す(黙って落とさない)。
 fn best_effort_absolute(path: &std::path::Path) -> PathBuf {
+    if path.is_relative() {
+        match std::env::current_dir() {
+            Ok(cwd) => return best_effort_absolute(&cwd.join(path)),
+            Err(e) => {
+                tracing::warn!(
+                    path = %path.display(),
+                    "cannot resolve a relative state directory against the current directory \
+                     ({e}); it will not be protected from being granted as a filesystem root"
+                );
+                return path.to_path_buf();
+            }
+        }
+    }
     if let Ok(canonical) = path.canonicalize() {
         return canonical;
     }
@@ -494,6 +538,87 @@ mod tests {
             )
             .expect_err("an ancestor of a not-yet-created state directory must be rejected");
         assert!(matches!(err, FilesystemConfigError::ProtectedDirectory(_)));
+    }
+
+    /// 相対パスで渡された状態ディレクトリでも保護が効くこと。
+    ///
+    /// `--grants-dir some/where` のような相対指定で、その祖先も 1 つも存在
+    /// しない場合、`best_effort_absolute` は相対パスをそのまま返す。候補側は
+    /// 必ず `canonicalize()` 済みの絶対パスなので `starts_with` がどちら向きにも
+    /// 一致せず、保護が静かに外れてしまう。スナップショットは起動時に 1 回きり
+    /// なので、穴はプロセスの寿命の間ずっと開く。
+    ///
+    /// cwd を動かすと(`set_current_dir` はプロセス全体に効く)並列テストを
+    /// 壊すので、cwd 配下にまだ存在しない名前を使って同じ状況を作る。
+    #[test]
+    fn a_relative_state_directory_path_is_still_protected() {
+        let cwd = std::env::current_dir().unwrap();
+        let relative_root = PathBuf::from(format!("edlr-fs-protection-test-{}", std::process::id()));
+        let relative_grants = relative_root.join("grants");
+        let absolute_grants = cwd.join(&relative_grants);
+        // ストア構築時点では、祖先も含めて 1 つも存在しない。
+        assert!(!cwd.join(&relative_root).exists());
+
+        let tmp = tempfile::tempdir().unwrap();
+        let store = FilesystemConfigStore::new(
+            tmp.path().join("settings"),
+            vec![relative_grants.clone()],
+        );
+        let manifest = manifest_with(vec![request("exports")]);
+
+        // 起動後にディレクトリができてから、ユーザーがそれを選ぶ。
+        std::fs::create_dir_all(&absolute_grants).unwrap();
+        let result = store.update_and_effective(
+            &manifest,
+            "exports",
+            &FilesystemConfig {
+                path: absolute_grants.to_string_lossy().to_string(),
+            },
+        );
+        let _ = std::fs::remove_dir_all(cwd.join(&relative_root));
+
+        let err = result
+            .expect_err("a state directory passed as a relative path must still be protected");
+        assert!(matches!(err, FilesystemConfigError::ProtectedDirectory(_)));
+    }
+
+    /// ディスク上の設定は、保存時の検証を経ていない可能性がある(手書き、
+    /// 旧バージョンで保存されたもの)。読み込み時にも検証し、通らないものは
+    /// 空パス(= 未設定)へ落とすこと。これで I1 の保護が保存時だけでなく
+    /// 恒久的に閉じる。
+    #[test]
+    fn a_hand_written_config_pointing_at_a_protected_directory_is_treated_as_unset() {
+        let tmp = tempfile::tempdir().unwrap();
+        let settings = tmp.path().join("settings");
+        let grants = tmp.path().join("grants");
+        std::fs::create_dir_all(&settings).unwrap();
+        std::fs::create_dir_all(&grants).unwrap();
+        let manifest = manifest_with(vec![request("exports"), request("cache")]);
+
+        let good = tmp.path().join("exports");
+        std::fs::create_dir(&good).unwrap();
+        std::fs::write(
+            settings.join("fs-plugin.filesystem.json"),
+            serde_json::to_string(&serde_json::json!({
+                "exports": { "path": grants.to_string_lossy() },
+                "cache": { "path": good.to_string_lossy() },
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let store = FilesystemConfigStore::new(settings, vec![grants]);
+        let effective = store.effective(&manifest);
+
+        assert_eq!(
+            effective["exports"].path, "",
+            "a stored path that fails validation must be treated as unset"
+        );
+        assert_eq!(
+            effective["cache"].path,
+            good.to_string_lossy(),
+            "a valid stored path must survive untouched"
+        );
     }
 
     #[test]

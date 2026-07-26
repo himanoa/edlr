@@ -231,16 +231,11 @@ impl FsDriver {
 
         // 子へ降りる前に、このディレクトリの一覧を確定させる。降りている
         // 間このディレクトリの dirent ストリームを開いたままにしないため。
+        // 予算判定は `entries` の中(dirent を読み進めながら)で行う。ここで
+        // 返ってきた `Vec` を数えたのでは、単一ディレクトリに大量のエントリを
+        // 置かれたときに予算が効かない。
         let mut subdirectories = Vec::new();
-        for item in dir.entries()? {
-            *scanned += 1;
-            if *scanned > self.scan_limit {
-                return Err(FsError::TooLarge(format!(
-                    "walked more than {} directory entries under {dir_path:?}",
-                    self.scan_limit
-                )));
-            }
-
+        for item in dir.entries(scanned, self.scan_limit)? {
             let relative = if dir_path.is_empty() {
                 item.name.clone()
             } else {
@@ -799,6 +794,73 @@ mod tests {
             .expect("read/stat on a FIFO must not block");
         assert!(read.is_err(), "read on a FIFO must fail, got {read:?}");
         assert!(stat.is_err(), "stat on a FIFO must fail, got {stat:?}");
+    }
+
+    /// `append` も `read` と同じ理由でブロックしてはならない。
+    ///
+    /// reader のいない FIFO に対する `open(O_WRONLY)` は永久に返らない。
+    /// `read` を塞いだのと完全に同じ故障モードなので、同じ形で塞ぐ。
+    #[test]
+    fn appending_to_a_fifo_inside_the_root_is_refused_instead_of_blocking() {
+        let dir = tempfile::tempdir().unwrap();
+        make_fifo(&dir.path().join("pipe"));
+
+        let root = dir.path().to_path_buf();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let d = FsDriver::new(READ_LIMIT, 10_000);
+            let _ = tx.send(d.append(&root, "pipe", b"x"));
+        });
+
+        let result = rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("append to a FIFO must not block");
+        assert!(result.is_err(), "append to a FIFO must fail, got {result:?}");
+    }
+
+    /// 走査予算は、1 ディレクトリを読み終えてからではなく**読みながら**
+    /// 効かなければならない。
+    ///
+    /// `entries()` が dirent を全件読み、1 件ごとに `statat` を発行して
+    /// `Vec` に積んでから返していると、「単一ディレクトリに大量のエントリ」に
+    /// 予算が効かない(プラグインは `write` の繰り返しでそれを作れる)。
+    /// ここではエラーメッセージが報告する走査件数で、全件走査していないことを
+    /// 見る。
+    #[test]
+    fn the_scan_budget_stops_inside_a_single_huge_directory() {
+        const FILES: usize = 5_000;
+        const BUDGET: usize = 8;
+
+        let dir = tempfile::tempdir().unwrap();
+        for i in 0..FILES {
+            fs::write(dir.path().join(format!("f{i:05}.txt")), b"x").unwrap();
+        }
+        let d = FsDriver::new(READ_LIMIT, 10_000).with_scan_limit(BUDGET);
+
+        let err = d
+            .list(dir.path(), "")
+            .expect_err("a single huge directory must be cut off by the scan budget");
+        let FsError::TooLarge(message) = &err else {
+            panic!("expected TooLarge, got {err:?}");
+        };
+
+        // メッセージは実際に走査した件数を `scanned=N` で報告する。予算 + 1 を
+        // 超えていたら、積み終わってから判定している(= 全件 statat している)
+        // ということ。
+        let scanned: usize = message
+            .split("scanned=")
+            .nth(1)
+            .and_then(|rest| {
+                rest.split(|c: char| !c.is_ascii_digit())
+                    .next()
+                    .and_then(|digits| digits.parse().ok())
+            })
+            .unwrap_or_else(|| panic!("scan budget error must report `scanned=N`: {message}"));
+        assert!(
+            scanned <= BUDGET + 1,
+            "list walked {scanned} of {FILES} entries before hitting a budget of {BUDGET}; \
+             the budget must stop the scan while reading, not after"
+        );
     }
 
     /// `list_limit` は「返す通常ファイルの数」しか数えないので、ディレクトリや

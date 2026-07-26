@@ -129,19 +129,7 @@ impl Dir {
             OFlags::RDONLY | OFlags::NONBLOCK,
             false,
         ))?;
-
-        let stat = rustix::fs::fstat(&file).map_err(|e| errno_to_error(e, name))?;
-        if FileType::from_raw_mode(stat.st_mode as rustix::fs::RawMode) != FileType::RegularFile {
-            return Err(FsError::InvalidPath(format!(
-                "{name:?} is not a regular file"
-            )));
-        }
-
-        // ベストエフォート。失敗しても通常ファイルなら挙動は変わらない。
-        if let Ok(flags) = rustix::fs::fcntl_getfl(&file) {
-            let _ = rustix::fs::fcntl_setfl(&file, flags - OFlags::NONBLOCK);
-        }
-        Ok(file)
+        ensure_regular_file(file, name)
     }
 
     /// 新規作成専用に開く。tmp ファイル用。
@@ -156,12 +144,19 @@ impl Dir {
     /// 追記用に開く。無ければ作る。既存がシンボリックリンクなら拒否する
     /// (`O_NOFOLLOW` / `RESOLVE_NO_SYMLINKS`)。確認してから開くのでは
     /// なく、開く操作そのものが拒否するので TOCTOU にならない。
+    ///
+    /// [`Dir::open_read`] と同じく `O_NONBLOCK` を付けて開き、通常ファイル
+    /// でなければ拒否する。reader のいない FIFO に対する `open(O_WRONLY)` は
+    /// 永久に返らず、`read` と**完全に同じ故障モード**(プラグイン専用
+    /// スレッドが恒久的に固まる)になるため。`write` は `O_CREAT | O_EXCL` の
+    /// tmp を経由するので、既存の FIFO を開くことはない。
     pub fn open_append(&self, name: &str) -> Result<File, FsError> {
-        exists_is_impossible(self.open_with(
+        let file = exists_is_impossible(self.open_with(
             name,
-            OFlags::WRONLY | OFlags::APPEND | OFlags::CREATE,
+            OFlags::WRONLY | OFlags::APPEND | OFlags::CREATE | OFlags::NONBLOCK,
             true,
-        ))
+        ))?;
+        ensure_regular_file(file, name)
     }
 
     /// 直下のサブディレクトリを開く。ディレクトリでない、シンボリック
@@ -195,7 +190,17 @@ impl Dir {
     /// 種別とメタデータは `statat(AT_SYMLINK_NOFOLLOW)` で取る。名前が
     /// 指す先がリンクへ差し替えられていても、リンク自身の情報しか返らない
     /// (リンク先のメタデータが漏れない)。
-    pub fn entries(&self) -> Result<Vec<DirEntry>, FsError> {
+    ///
+    /// `scanned` は呼び出し側(`list` の走査全体)と共有する「見たエントリの
+    /// 総数」で、`limit` を超えた時点で **読みながら** 打ち切って
+    /// `TooLarge` を返す。全件読んでから判定してはならない: `statat` は
+    /// 1 件ごとに発行され、`Vec` も 1 件ごとに伸びるので、単一ディレクトリに
+    /// 大量のエントリを置かれると(プラグインは `write` の繰り返しでそれを
+    /// 作れる)判定に届く前に数十秒のブロックと数百 MB の確保になる。
+    ///
+    /// 予算超過は `.`/`..` を除いた 1 件を読み進めるたびに見る。`statat` を
+    /// 発行する**前**に判定するので、超過分のコストは 1 件も払わない。
+    pub fn entries(&self, scanned: &mut usize, limit: usize) -> Result<Vec<DirEntry>, FsError> {
         let dir =
             rustix::fs::Dir::read_from(&self.fd).map_err(|e| errno_to_error(e, "<directory>"))?;
 
@@ -205,6 +210,12 @@ impl Dir {
             let name = entry.file_name().to_bytes();
             if name == b"." || name == b".." {
                 continue;
+            }
+            *scanned += 1;
+            if *scanned > limit {
+                return Err(FsError::TooLarge(format!(
+                    "directory listing exceeded the {limit} entry scan budget (scanned={scanned})"
+                )));
             }
             let name = match std::str::from_utf8(name) {
                 Ok(name) => name.to_string(),
@@ -289,6 +300,26 @@ impl Dir {
             Err(e) => Err(errno_to_error(e, name)),
         }
     }
+}
+
+/// 開いた fd が通常ファイルであることを確認し、`O_NONBLOCK` を落とす。
+///
+/// 判定は**開いた後の fd** に対する `fstat` で行う。開く前に `statat` で
+/// 確かめると、確かめた相手と開く相手が別物になりうる(TOCTOU)。
+/// `O_NONBLOCK` を落とすのは、Linux が通常ファイルに対してこのフラグを無視する
+/// とはいえ、以後の `read`/`write` の意味論を普通のファイルと完全に同じに
+/// 保つため(ベストエフォート。失敗しても通常ファイルなら挙動は変わらない)。
+fn ensure_regular_file(file: File, name: &str) -> Result<File, FsError> {
+    let stat = rustix::fs::fstat(&file).map_err(|e| errno_to_error(e, name))?;
+    if FileType::from_raw_mode(stat.st_mode as rustix::fs::RawMode) != FileType::RegularFile {
+        return Err(FsError::InvalidPath(format!(
+            "{name:?} is not a regular file"
+        )));
+    }
+    if let Ok(flags) = rustix::fs::fcntl_getfl(&file) {
+        let _ = rustix::fs::fcntl_setfl(&file, flags - OFlags::NONBLOCK);
+    }
+    Ok(file)
 }
 
 /// `O_EXCL` を付けていない open で `Ok(None)`(= 既に存在する)が返ることは
