@@ -1,6 +1,7 @@
 //! 実行中プラグインの状態を保持する共有ビュー。`start_plugins` が構築し、以後は
 //! カーネル内の複数箇所(将来の RPC を含む)から `Clone` して読める。
 
+use std::collections::HashMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -127,25 +128,42 @@ pub struct Registry {
     /// same plugin's capability at once).
     capabilities_lock: Arc<Mutex<()>>,
     /// `set_sidecar_config` / `set_sidecar_grant` が呼ぶ
-    /// `refresh_sidecar_runtime` 全体(停止 → `sidecars_json` の作り直し →
-    /// `capabilities_json` の作り直し)を直列化するロック。`capabilities_lock`
-    /// と同じ理由(2 つの同時呼び出しがディスクと共有バッファを食い違わせない
-    /// ため)に加え、`sidecars_json` と `capabilities_json` の 2 バッファを
-    /// 同じ臨界区間で更新するためにも要る。`set_capabilities` の
-    /// `capabilities_lock` とは別ロックにしてある(片方は http capability
-    /// 専用、もう片方はサイドカー設定/承認専用の操作系列で、互いをブロック
-    /// する理由が無いため)。
+    /// `refresh_sidecar_runtime` の臨界区間(停止 → `sidecars_json` の作り
+    /// 直し → `capabilities_json` の作り直し)を **プラグイン ID ごとに**
+    /// 直列化するロックのマップ。id → 専用 `Arc<Mutex<()>>` を引く。
     ///
-    /// ロック取得順序: `set_capabilities` と同じ流儀で、`entries` は
-    /// 「manifest と共有ハンドルのクローンを取る」瞬間だけ握ってすぐ手放し、
-    /// それを終えてから `sidecar_runtime_lock` を取る(`entries` → 解放 →
-    /// `sidecar_runtime_lock` の順で、両者を同時に保持する区間は無い)。
-    /// `sidecar_runtime_lock` の臨界区間の中で `entries` を再度取る箇所
-    /// (`sidecars()` の呼び出し経由)があるが、その時点で
-    /// `sidecar_runtime_lock` を保持したまま新たに `entries` を取るだけで、
-    /// 逆方向(`entries` を保持したまま新たに `sidecar_runtime_lock` を
-    /// 取る)は無いので循環せず、デッドロックしない。
-    sidecar_runtime_lock: Arc<Mutex<()>>,
+    /// なぜプラグイン単位にしたか: `refresh_sidecar_runtime` は同期版
+    /// `ProcessDriver::stop` を臨界区間の中で呼ぶため、SIGTERM を無視する
+    /// サイドカーが 1 つあれば `shutdown_grace`(既定 3 秒)× 停止対象の
+    /// インスタンス数ブロックしうる。単一のグローバルロックだと、あるプラグ
+    /// インのサイドカー停止待ちの間、無関係な別プラグインの
+    /// `set_sidecar_config`/`set_sidecar_grant` まで足止めされてしまう。
+    /// `capabilities_lock`(こちらは全プラグイン共有のグローバルロックの
+    /// まま)が守っているのはインメモリのバッファ差し替えだけで済むのとは
+    /// リスクの質が違うため、こちらだけプラグイン単位に分けてある。
+    ///
+    /// マップ自体を保護する `Mutex`(`sidecar_runtime_lock_for` を参照)は
+    /// 「id からロックの `Arc` を引く/無ければ作る」間だけ保持し、返した
+    /// `Arc<Mutex<()>>` の実際の臨界区間(プロセス停止・ディスク読み書き)の
+    /// 間は保持しない。したがってマップの Mutex 自体がボトルネックになる
+    /// ことはない(id ごとの `Arc<Mutex<()>>` を作る/引くだけの一瞬)。
+    ///
+    /// ロック取得順序は変更前と同じ一方向を保っている: `entries` は
+    /// 「manifest と共有ハンドルのクローンを取る」瞬間だけ握ってすぐ手放し
+    /// (この時点でマップの Mutex も id 別ロックもまだ取っていない)、その後
+    /// `sidecar_runtime_lock_for(id)` でマップから id 別ロックを引いて
+    /// (マップの Mutex は取得直後に手放す)、最後にその id 別ロックを取る。
+    /// id 別ロックの臨界区間の中で `capabilities_lock` を(id をまたいで
+    /// 共有される `capabilities_json` バッファのため)追加で取ることがある
+    /// (`refresh_sidecar_runtime` を参照)が、逆方向(`capabilities_lock` を
+    /// 保持したまま id 別ロックやマップの Mutex を取る)は無い。
+    /// `set_capabilities` は `capabilities_lock` だけを取り、id 別ロックにも
+    /// マップの Mutex にも触れない。したがって
+    /// 「entries → マップの Mutex → id 別ロック → capabilities_lock」の
+    /// 一方向のみが成立し、循環しないのでデッドロックしない(別プラグイン
+    /// 同士の `refresh_sidecar_runtime` が異なる id 別ロックを取り合っても、
+    /// 互いに待ち合う関係にはならない)。
+    sidecar_runtime_locks: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
     plugins_dir: PathBuf,
 }
 
@@ -167,7 +185,7 @@ impl Registry {
             sidecar_config_store,
             process_driver,
             capabilities_lock: Arc::new(Mutex::new(())),
-            sidecar_runtime_lock: Arc::new(Mutex::new(())),
+            sidecar_runtime_locks: Arc::new(Mutex::new(HashMap::new())),
             plugins_dir,
         }
     }
@@ -250,21 +268,62 @@ impl Registry {
                     .cloned()
                     .unwrap_or_else(|| SidecarConfig::from_request(request));
                 let grant = self.grants_store.sidecar_state(manifest, &request.name);
-                let spec = ProcessSpec {
-                    command: PathBuf::from(&config.command),
-                    args: config.args.clone(),
-                    ports: assign_ports(&config),
-                };
-                let key = Self::sidecar_key(&manifest.id, &request.name);
-                let instances = self.process_driver.status(&key, &spec);
-                SidecarInfo {
-                    request: request.clone(),
-                    config,
-                    grant,
-                    instances,
-                }
+                self.sidecar_info_and_entry(manifest, request, config, grant).0
             })
             .collect()
+    }
+
+    /// `request` 1 件分の(既に取得済みの)設定・承認状態から、`SidecarInfo`
+    /// と(`sidecars_json` バッファ用の)`SidecarRuntimeEntry` を両方組み立
+    /// てる。`ProcessDriver::status` の呼び出しを両者で 1 回だけ共有する
+    /// (`config`/`grant` の取得元は呼び出し側に委ねているので、ここではもう
+    /// ディスクを読まない -- `refresh_sidecar_runtime` が前半で読んだ値を
+    /// そのまま渡し、末尾で読み直さずに済ませるための分離)。
+    fn sidecar_info_and_entry(
+        &self,
+        manifest: &Manifest,
+        request: &SidecarRequest,
+        config: SidecarConfig,
+        grant: GrantState,
+    ) -> (SidecarInfo, SidecarRuntimeEntry) {
+        let ports = assign_ports(&config);
+        let spec = ProcessSpec {
+            command: PathBuf::from(&config.command),
+            args: config.args.clone(),
+            ports: ports.clone(),
+        };
+        let key = Self::sidecar_key(&manifest.id, &request.name);
+        let instances = self.process_driver.status(&key, &spec);
+
+        let runtime_entry = SidecarRuntimeEntry {
+            name: request.name.clone(),
+            granted: grant.granted,
+            command: config.command.clone(),
+            args: config.args.clone(),
+            ports,
+        };
+        let info = SidecarInfo {
+            request: request.clone(),
+            config,
+            grant,
+            instances,
+        };
+        (info, runtime_entry)
+    }
+
+    /// `id` 用のサイドカー実行時ロック(`sidecar_runtime_locks`)を引く。
+    /// 無ければ作る。マップ自体を保護する `Mutex` は、id からロックの
+    /// `Arc` を引く/挿入する間だけ保持し、返した `Arc<Mutex<()>>` の
+    /// 実際の臨界区間(呼び出し側が別途 `.lock()` する)の間は保持しない。
+    fn sidecar_runtime_lock_for(&self, id: &str) -> Arc<Mutex<()>> {
+        let mut locks = self
+            .sidecar_runtime_locks
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        locks
+            .entry(id.to_string())
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone()
     }
 
     /// `id` のプラグインの capability 要求一覧と現在の承認状態を返す。
@@ -379,9 +438,10 @@ impl Registry {
     /// 承認/取消」と「サイドカーの設定/承認変更」が同時に起きても、
     /// このバッファへの 2 つの書き込みが交互実行で食い違うことはない
     /// (`refresh_sidecar_runtime` のドキュメントコメント参照。ロック順序は
-    /// 常に `sidecar_runtime_lock` → `capabilities_lock` の一方向のみで、
-    /// この関数は `capabilities_lock` だけを取り `sidecar_runtime_lock` には
-    /// 触れないため、両者を合わせてもデッドロックしない)。この関数自身は
+    /// 常に「id 別ロック(プラグイン単位)→ `capabilities_lock`」の一方向
+    /// のみで、この関数は `capabilities_lock` だけを取り id 別ロックにも
+    /// そのマップにも触れないため、両者を合わせてもデッドロックしない)。
+    /// この関数自身は
     /// サイドカーの設定/承認を変更しないので、現在の `sidecars_json` バッファ
     /// をそのまま読み(再計算はしない)、そこから暗黙許可ホストを合流させる。
     pub fn set_capabilities(&self, id: &str, granted: bool) -> Result<GrantState, RegistryError> {
@@ -488,18 +548,34 @@ impl Registry {
     /// 2 と 3 を同じ臨界区間で更新するのが重要で、片方だけ更新されると
     /// 「起動はできるが通信できない(2 だけ進んだ)」「通信できるが承認は消えて
     /// いる(3 だけ進んだ)」という中途半端な状態が観測されうる。そのため
-    /// 呼び出しごとに `sidecar_runtime_lock` を取り、停止からバッファ書き込み
-    /// までを 1 つの臨界区間として保持する(`set_capabilities` の
-    /// `capabilities_lock` と同じ理由: 2 つの同時呼び出し -- 例えば同じ
-    /// サイドカーの設定変更と承認取消を 2 つの RPC クライアントがほぼ同時に
-    /// 行う -- がディスクと共有バッファを食い違わせないようにするため)。
+    /// 呼び出しごとに `sidecar_runtime_lock_for(id)` で **`id` 専用の**
+    /// ロックを取り、停止からバッファ書き込みまでを 1 つの臨界区間として
+    /// 保持する(`set_capabilities` の `capabilities_lock` と同じ理由: 2 つの
+    /// 同時呼び出し -- 例えば同じサイドカーの設定変更と承認取消を 2 つの RPC
+    /// クライアントがほぼ同時に行う -- がディスクと共有バッファを食い違わせ
+    /// ないようにするため)。
+    ///
+    /// このロックは(`capabilities_lock` と違って)**プラグイン ID ごと**に
+    /// 分かれている(`sidecar_runtime_locks` のドキュメントコメント参照)。
+    /// 手順 1 の `ProcessDriver::stop` は SIGTERM 無視の子がいれば
+    /// `shutdown_grace` 秒ブロックしうる同期呼び出しであり、これを全プラグ
+    /// イン共有のロックの中で行うと、無関係な別プラグインのサイドカー操作
+    /// まで同じだけ足止めしてしまうため。
     ///
     /// `capabilities_json` への書き込みは、`set_capabilities` とも共有する
     /// 書き込み先であるため、内側で追加に `capabilities_lock` を取ってから
     /// 行う(`set_capabilities` のドキュメントコメント参照)。ロック順序は
-    /// 常に `sidecar_runtime_lock` → `capabilities_lock` の一方向のみで、
-    /// `set_capabilities` は `capabilities_lock` だけを取り
-    /// `sidecar_runtime_lock` には触れないため、循環せずデッドロックしない。
+    /// 常に「id 別ロック → `capabilities_lock`」の一方向のみで、
+    /// `set_capabilities` は `capabilities_lock` だけを取り id 別ロックにも
+    /// そのマップにも触れないため、循環せずデッドロックしない。
+    ///
+    /// 手順 2 の材料(`SidecarConfigStore::effective` / `GrantsStore::
+    /// sidecar_state`)はこの関数の中で 1 回だけディスクから読み、
+    /// `sidecar_info_and_entry` で `SidecarInfo`(戻り値用)と
+    /// `SidecarRuntimeEntry`(`sidecars_json` 用)を同時に組み立てる。
+    /// 末尾で改めて `self.sidecars(id)` を呼んで読み直すことはしない --
+    /// 以前の実装はそうしており、id 別ロックの臨界区間をディスク I/O 分
+    /// 余計に伸ばしていた。
     fn refresh_sidecar_runtime(
         &self,
         id: &str,
@@ -521,10 +597,8 @@ impl Registry {
             )
         };
 
-        let _runtime_guard = self
-            .sidecar_runtime_lock
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let runtime_lock = self.sidecar_runtime_lock_for(id);
+        let _runtime_guard = runtime_lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
 
         for name in stop_names {
             let key = Self::sidecar_key(&manifest.id, name);
@@ -532,30 +606,23 @@ impl Registry {
         }
 
         let sidecar_configs = self.sidecar_config_store.effective(&manifest);
-        let entries: Vec<SidecarRuntimeEntry> = manifest
-            .sidecars
-            .iter()
-            .map(|request| {
-                let config = sidecar_configs
-                    .get(&request.name)
-                    .cloned()
-                    .unwrap_or_else(|| SidecarConfig::from_request(request));
-                let granted = self
-                    .grants_store
-                    .sidecar_state(&manifest, &request.name)
-                    .granted;
-                SidecarRuntimeEntry {
-                    name: request.name.clone(),
-                    granted,
-                    command: config.command.clone(),
-                    args: config.args.clone(),
-                    ports: assign_ports(&config),
-                }
-            })
-            .collect();
+        let mut infos = Vec::with_capacity(manifest.sidecars.len());
+        let mut runtime_entries = Vec::with_capacity(manifest.sidecars.len());
+        for request in &manifest.sidecars {
+            let config = sidecar_configs
+                .get(&request.name)
+                .cloned()
+                .unwrap_or_else(|| SidecarConfig::from_request(request));
+            let grant = self.grants_store.sidecar_state(&manifest, &request.name);
+            let (info, runtime_entry) =
+                self.sidecar_info_and_entry(&manifest, request, config, grant);
+            infos.push(info);
+            runtime_entries.push(runtime_entry);
+        }
         *sidecars_json
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = sidecars_json_string(&entries);
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+            sidecars_json_string(&runtime_entries);
 
         {
             let _capabilities_guard = self
@@ -568,13 +635,13 @@ impl Registry {
             } else {
                 Vec::new()
             };
-            hosts.extend(implicit_http_hosts(&entries));
+            hosts.extend(implicit_http_hosts(&runtime_entries));
             *capabilities_json
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner()) = capabilities_json_string(&hosts);
         }
 
-        self.sidecars(id)
+        Ok(infos)
     }
 
     /// `id` のプラグインの `name` サイドカーの設定を検証・永続化し、稼働中の

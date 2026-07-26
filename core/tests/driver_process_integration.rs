@@ -2,7 +2,7 @@
 //! shutdown での確実な停止を、実 wasm を介さずに検証する。
 //! (wasm 側の呼び出し経路は `core/src/plugin/host.rs` の単体テストが担当。)
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use edlr_core::plugin::SidecarConfig;
 
@@ -144,4 +144,83 @@ fn stop_all_sidecars_leaves_nothing_running() {
 
     let sidecars = env.registry.sidecars("sc-plugin").unwrap();
     assert!(sidecars[0].instances.iter().all(|i| !i.running));
+}
+
+/// リグレッションテスト: `Registry::refresh_sidecar_runtime` は一時
+/// `sidecar_runtime_lock` を全プラグイン共有のグローバルロックにしていたが、
+/// このロックの臨界区間は同期版 `ProcessDriver::stop`(SIGTERM を無視する
+/// 子がいれば `shutdown_grace` 秒ブロックしうる)を含むため、あるプラグイン
+/// のサイドカー停止待ちの間、無関係な別プラグインの `set_sidecar_grant` /
+/// `set_sidecar_config` まで足止めしてしまっていた。ロックをプラグイン ID
+/// ごとに分けたことで、この足止めが起きないことを確認する。
+///
+/// タイミング依存のテストなので、実際の SIGTERM 無視プロセスの grace(3 秒、
+/// `SIDECAR_SHUTDOWN_GRACE`)に対して十分余裕を持たせた閾値(500ms)を使う。
+#[test]
+fn sidecar_operations_on_different_plugins_do_not_block_each_other() {
+    let env = support::two_plugin_sidecar_env("tts", 50341, 50342);
+
+    // plugin A: SIGTERM を無視する子を起動しておく。取消で `stop` が走ると
+    // `shutdown_grace`(既定 3 秒)まるまるブロックする(SIGKILL への昇格待ち)。
+    env.registry
+        .set_sidecar_config(
+            "sc-plugin-a",
+            "tts",
+            &SidecarConfig {
+                command: "/bin/sh".into(),
+                args: vec!["-c".into(), "trap '' TERM; sleep 30".into()],
+                port: 50341,
+                replicas: 1,
+            },
+        )
+        .unwrap();
+    env.registry
+        .set_sidecar_grant("sc-plugin-a", "tts", true)
+        .unwrap();
+    env.registry
+        .control_sidecar("sc-plugin-a", "tts", edlr_core::plugin::SidecarAction::Start)
+        .unwrap();
+
+    // plugin B: 承認/設定操作の対象になれるよう設定だけ済ませておく。
+    env.registry
+        .set_sidecar_config(
+            "sc-plugin-b",
+            "tts",
+            &SidecarConfig {
+                command: "/bin/sh".into(),
+                args: vec!["-c".into(), "sleep 30".into()],
+                port: 50342,
+                replicas: 1,
+            },
+        )
+        .unwrap();
+
+    // plugin A の承認を別スレッドで取り消す。これは stop() を経由するため、
+    // SIGTERM を無視する子が SIGKILL に昇格するまで(最大 grace 秒)ブロックする。
+    let registry_for_revoke = env.registry.clone();
+    let revoker = std::thread::spawn(move || {
+        registry_for_revoke
+            .set_sidecar_grant("sc-plugin-a", "tts", false)
+            .unwrap();
+    });
+
+    // revoker が実際に stop() のブロッキング区間へ入るのを待つ猶予。
+    std::thread::sleep(Duration::from_millis(150));
+
+    // plugin A の取消がまだ(grace 中で)進行中のはずのこのタイミングで、
+    // plugin B の操作が短時間で返ることを確認する: プラグイン単位ロックで
+    // あれば plugin A の id 別ロックとは無関係に即座に進むはず。
+    let started = Instant::now();
+    env.registry
+        .set_sidecar_grant("sc-plugin-b", "tts", true)
+        .expect("plugin B's grant must succeed independently of plugin A's in-flight stop");
+    let elapsed = started.elapsed();
+
+    revoker.join().expect("revoker thread should not panic");
+
+    assert!(
+        elapsed < Duration::from_millis(500),
+        "plugin B's set_sidecar_grant must not be blocked by plugin A's in-flight \
+         stop (a global sidecar_runtime_lock would serialize them); took {elapsed:?}"
+    );
 }
