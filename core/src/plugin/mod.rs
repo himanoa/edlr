@@ -19,7 +19,8 @@ pub use manifest::{
     ManifestError, SettingField, SidecarRequest,
 };
 pub use registry::{
-    PluginEntry, PluginInfo, PluginState, Registry, RegistryError, SidecarAction, SidecarInfo,
+    FilesystemInfo, PluginEntry, PluginInfo, PluginState, Registry, RegistryError, SidecarAction,
+    SidecarInfo,
 };
 pub use runner::start_plugins;
 pub use settings::{SettingsError, SettingsStore};

@@ -41,6 +41,8 @@ const PLUGIN_EVENT_QUEUE_CAPACITY: usize = 32;
 use tokio::sync::broadcast;
 
 use crate::event::Event;
+use crate::plugin::filesystem::FilesystemConfigStore;
+use crate::plugin::fs_runtime::{filesystem_json_string, FsRuntimeEntry};
 use crate::plugin::grants::GrantsStore;
 use crate::plugin::host::{capabilities_json_string, HostCtx, PluginHost};
 use crate::plugin::manifest::{load_manifest, matches_event};
@@ -64,6 +66,7 @@ pub fn start_plugins(
     plugins_dir: &Path,
     settings_store: SettingsStore,
     sidecar_config_store: SidecarConfigStore,
+    filesystem_config_store: FilesystemConfigStore,
     grants_store: GrantsStore,
     router: &Router,
     host: PluginHost,
@@ -72,12 +75,14 @@ pub fn start_plugins(
     let settings_store = Arc::new(settings_store);
     let grants_store = Arc::new(grants_store);
     let sidecar_config_store = Arc::new(sidecar_config_store);
+    let filesystem_config_store = Arc::new(filesystem_config_store);
     let process_driver = host.process_driver();
     let registry = Registry::new(
         host.clone(),
         settings_store.clone(),
         grants_store.clone(),
         sidecar_config_store.clone(),
+        filesystem_config_store.clone(),
         process_driver,
         plugins_dir.to_path_buf(),
     );
@@ -117,6 +122,7 @@ pub fn start_plugins(
             &settings_store,
             &grants_store,
             &sidecar_config_store,
+            &filesystem_config_store,
             router,
             &host,
             &registry,
@@ -135,6 +141,7 @@ fn load_and_run_plugin(
     settings_store: &SettingsStore,
     grants_store: &GrantsStore,
     sidecar_config_store: &SidecarConfigStore,
+    filesystem_config_store: &FilesystemConfigStore,
     router: &Router,
     host: &Arc<PluginHost>,
     registry: &Registry,
@@ -186,6 +193,31 @@ fn load_and_run_plugin(
     let initial_capabilities_json = capabilities_json_string(&initial_hosts);
     let capabilities_json = Arc::new(Mutex::new(initial_capabilities_json));
 
+    // ファイルアクセスのルートごとの設定(`FilesystemConfigStore`)・承認
+    // (`GrantsStore::filesystem_state`)を解決して `FsRuntimeEntry` にまと
+    // める。サイドカーの初期値組み立てと同じ流儀(未承認のルートは
+    // `filesystem_json_string` が `path` を落とす -- `fs_runtime` のドキュ
+    // メント参照)。
+    let filesystem_configs = filesystem_config_store.effective(manifest);
+    let filesystem_entries: Vec<FsRuntimeEntry> = manifest
+        .filesystem
+        .iter()
+        .map(|request| {
+            let path = filesystem_configs
+                .get(&request.name)
+                .map(|config| config.path.clone())
+                .unwrap_or_default();
+            let granted = grants_store.filesystem_state(manifest, &request.name).granted;
+            FsRuntimeEntry {
+                name: request.name.clone(),
+                granted,
+                mode: request.mode.as_str().to_string(),
+                path,
+            }
+        })
+        .collect();
+    let filesystem_json = Arc::new(Mutex::new(filesystem_json_string(&filesystem_entries)));
+
     let (events_tx, events_rx) = std_mpsc::sync_channel::<Arc<Event>>(PLUGIN_EVENT_QUEUE_CAPACITY);
     let (ready_tx, ready_rx) = std_mpsc::channel::<PluginState>();
 
@@ -195,6 +227,7 @@ fn load_and_run_plugin(
         let settings_json = settings_json.clone();
         let capabilities_json = capabilities_json.clone();
         let sidecars_json = sidecars_json.clone();
+        let filesystem_json = filesystem_json.clone();
         let registry = registry.clone();
         move || {
             run_plugin_thread(
@@ -204,6 +237,7 @@ fn load_and_run_plugin(
                 settings_json,
                 capabilities_json,
                 sidecars_json,
+                filesystem_json,
                 registry,
                 events_rx,
                 ready_tx,
@@ -222,6 +256,7 @@ fn load_and_run_plugin(
         settings_json,
         capabilities_json,
         sidecars_json,
+        filesystem_json,
     });
 
     if running {
@@ -241,6 +276,7 @@ fn run_plugin_thread(
     settings_json: Arc<Mutex<String>>,
     capabilities_json: Arc<Mutex<String>>,
     sidecars_json: Arc<Mutex<String>>,
+    filesystem_json: Arc<Mutex<String>>,
     registry: Registry,
     events_rx: std_mpsc::Receiver<Arc<Event>>,
     ready_tx: std_mpsc::Sender<PluginState>,
@@ -250,9 +286,7 @@ fn run_plugin_thread(
         settings_json,
         capabilities_json,
         sidecars_json,
-        // TODO(次タスク): `[[filesystem]]` の承認・設定配線が入るまでの
-        // 仮の空バッファ。実配線は Task 7 で `Registry` から渡す。
-        Arc::new(Mutex::new("[]".to_string())),
+        filesystem_json,
         host.http_driver(),
         host.process_driver(),
         host.fs_driver(),

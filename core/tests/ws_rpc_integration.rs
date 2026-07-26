@@ -1,4 +1,5 @@
 use edlr_core::event::Event;
+use edlr_core::plugin::filesystem::FilesystemConfigStore;
 use edlr_core::plugin::grants::GrantsStore;
 use edlr_core::plugin::host::PluginHost;
 use edlr_core::plugin::runner::start_plugins;
@@ -73,6 +74,7 @@ fn hello_logger_registry() -> (tempfile::TempDir, Registry) {
     let settings_store = SettingsStore::new(tmp.path().join("settings"));
     let grants_store = GrantsStore::new(tmp.path().join("grants"));
     let sidecar_config_store = SidecarConfigStore::new(tmp.path().join("settings"));
+    let filesystem_config_store = FilesystemConfigStore::new(tmp.path().join("settings"));
     let router = Router::new(16);
     let host = PluginHost::new().expect("host should start");
 
@@ -80,6 +82,7 @@ fn hello_logger_registry() -> (tempfile::TempDir, Registry) {
         &plugins_dir,
         settings_store,
         sidecar_config_store,
+        filesystem_config_store,
         grants_store,
         &router,
         host,
@@ -138,6 +141,7 @@ fn http_caller_registry() -> (tempfile::TempDir, Registry) {
     let settings_store = SettingsStore::new(tmp.path().join("settings"));
     let grants_store = GrantsStore::new(tmp.path().join("grants"));
     let sidecar_config_store = SidecarConfigStore::new(tmp.path().join("settings"));
+    let filesystem_config_store = FilesystemConfigStore::new(tmp.path().join("settings"));
     let router = Router::new(16);
     let host = PluginHost::new().expect("host should start");
 
@@ -145,6 +149,7 @@ fn http_caller_registry() -> (tempfile::TempDir, Registry) {
         &plugins_dir,
         settings_store,
         sidecar_config_store,
+        filesystem_config_store,
         grants_store,
         &router,
         host,
@@ -771,6 +776,142 @@ async fn unknown_sidecar_name_is_an_rpc_error() {
         .call(
             "plugins/get-sidecars",
             serde_json::json!({"plugin": "nope"}),
+        )
+        .await
+        .expect_err("unknown plugin must be rejected");
+    assert!(err.contains("unknown plugin"));
+}
+
+/// `[[filesystem]]`(`name = "exports"`, `mode = "read-write"`)を 1 件持つ
+/// `fs-plugin` の manifest を置いた plugins-dir でサーバを起動し、接続済みの
+/// `SidecarTestEnv` を返す(`spawn_server_with_sidecar_plugin` と同じ流儀 --
+/// この構造体は WS 接続と RPC 往復の足回りをまとめているだけで、
+/// サイドカー固有ではない)。
+async fn spawn_server_with_filesystem_plugin() -> SidecarTestEnv {
+    let filesystem_env = support::filesystem_env("exports", "read-write");
+    let registry = filesystem_env.registry.clone();
+    let (_router, addr) = setup(Some(registry)).await;
+    let mut ws = connect(addr).await;
+    recv_hello(&mut ws).await;
+    SidecarTestEnv {
+        _sidecar_env: filesystem_env,
+        ws,
+        next_id: 0,
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn filesystem_rpc_round_trip() {
+    let mut env = spawn_server_with_filesystem_plugin().await;
+
+    let roots = env
+        .call(
+            "plugins/get-filesystem",
+            serde_json::json!({"plugin": "fs-plugin"}),
+        )
+        .await
+        .expect("get-filesystem should succeed");
+    let list = roots["roots"].as_array().expect("roots array");
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0]["name"], "exports");
+    assert_eq!(list[0]["mode"], "read-write");
+    assert_eq!(list[0]["granted"], serde_json::json!(false));
+    assert_eq!(list[0]["config"]["path"], serde_json::json!(""));
+
+    let dir = env._sidecar_env.tmp.path().join("exports");
+    std::fs::create_dir(&dir).unwrap();
+    let updated = env
+        .call(
+            "plugins/set-filesystem-config",
+            serde_json::json!({
+                "plugin": "fs-plugin",
+                "name": "exports",
+                "config": {"path": dir.to_string_lossy()}
+            }),
+        )
+        .await
+        .expect("set-filesystem-config should succeed");
+    assert_eq!(
+        updated["roots"][0]["config"]["path"],
+        serde_json::json!(dir.to_string_lossy())
+    );
+
+    let granted = env
+        .call(
+            "plugins/set-filesystem-grant",
+            serde_json::json!({"plugin": "fs-plugin", "name": "exports", "granted": true}),
+        )
+        .await
+        .expect("set-filesystem-grant should succeed");
+    assert_eq!(granted["roots"][0]["granted"], serde_json::json!(true));
+
+    let revoked = env
+        .call(
+            "plugins/set-filesystem-grant",
+            serde_json::json!({"plugin": "fs-plugin", "name": "exports", "granted": false}),
+        )
+        .await
+        .expect("revoke should succeed");
+    assert_eq!(revoked["roots"][0]["granted"], serde_json::json!(false));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn filesystem_grant_without_a_configured_directory_is_an_rpc_error() {
+    let mut env = spawn_server_with_filesystem_plugin().await;
+
+    let err = env
+        .call(
+            "plugins/set-filesystem-grant",
+            serde_json::json!({"plugin": "fs-plugin", "name": "exports", "granted": true}),
+        )
+        .await
+        .expect_err("granting without a configured directory must be rejected");
+    assert!(err.contains("directory"));
+
+    let roots = env
+        .call(
+            "plugins/get-filesystem",
+            serde_json::json!({"plugin": "fs-plugin"}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        roots["roots"][0]["granted"],
+        serde_json::json!(false),
+        "a rejected grant must not be persisted"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn unknown_plugin_is_an_rpc_error_for_filesystem_methods() {
+    let mut env = spawn_server_with_filesystem_plugin().await;
+
+    let err = env
+        .call(
+            "plugins/get-filesystem",
+            serde_json::json!({"plugin": "nope"}),
+        )
+        .await
+        .expect_err("unknown plugin must be rejected");
+    assert!(err.contains("unknown plugin"));
+
+    let err = env
+        .call(
+            "plugins/set-filesystem-config",
+            serde_json::json!({
+                "plugin": "nope",
+                "name": "exports",
+                "config": {"path": "/tmp"}
+            }),
+        )
+        .await
+        .expect_err("unknown plugin must be rejected");
+    assert!(err.contains("unknown plugin"));
+
+    let err = env
+        .call(
+            "plugins/set-filesystem-grant",
+            serde_json::json!({"plugin": "nope", "name": "exports", "granted": true}),
         )
         .await
         .expect_err("unknown plugin must be rejected");
