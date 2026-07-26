@@ -36,6 +36,12 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::time::UNIX_EPOCH;
 
+/// [`FsDriver::list`] が降りるディレクトリ階層の上限。
+///
+/// 再帰の停止条件。ルート配下にはいくらでも深いツリーを作れてしまうので、
+/// 深さで止める(スタックの深さと、同時に保持する fd 数の上限でもある)。
+pub const MAX_LIST_DEPTH: usize = 64;
+
 /// 1 ファイル分のメタデータ。
 #[derive(Debug, Clone, PartialEq)]
 pub struct Entry {
@@ -166,49 +172,81 @@ impl FsDriver {
     /// 拒否される(`read` と同じ扱い)。
     ///
     /// シンボリックリンクは、リンク先がルート内でも列挙しない。
+    ///
+    /// 走査は深さ優先で、子へ降りる前に兄弟の fd を開かない。同時に保持する
+    /// fd はツリーの**深さ**に比例する(幅ではない)。幅に比例させると、
+    /// ディレクトリだけの浅く広いツリー(プラグインが `write` を繰り返すだけで
+    /// 作れる)に対して `list` 1 回でプロセス全体の fd を食い潰せてしまう —
+    /// `list_limit` は通常ファイルしか数えないので、それでは止まらない。
+    /// 深さには [`MAX_LIST_DEPTH`] の上限を掛ける。
     pub fn list(&self, root: &Path, prefix: &str) -> Result<Vec<Entry>, FsError> {
         // 1・2 段目 + 3 段目。`prefix` がリンクならここで `InvalidPath`。
         let base = openat::Dir::open(root, prefix)?;
 
         let mut entries = Vec::new();
-        let mut stack = vec![(base, prefix.to_string())];
-        while let Some((dir, dir_path)) = stack.pop() {
-            for item in dir.entries()? {
-                let relative = if dir_path.is_empty() {
-                    item.name.clone()
-                } else {
-                    format!("{dir_path}/{}", item.name)
-                };
+        self.walk(&base, prefix, 0, &mut entries)?;
+        Ok(entries)
+    }
 
-                match item.kind {
-                    openat::EntryKind::RegularFile => {}
-                    openat::EntryKind::Directory => {
-                        // `open_dir` は親 fd 相対に `O_NOFOLLOW` で開くので、
-                        // 列挙してから開くまでにリンクへ差し替えられていれば
-                        // `None` になって読み飛ばされる。
-                        if let Some(child) = dir.open_dir(&item.name)? {
-                            stack.push((child, relative));
-                        }
-                        continue;
-                    }
-                    // シンボリックリンク・FIFO・デバイスは列挙しない。
-                    openat::EntryKind::Other => continue,
-                }
+    /// [`FsDriver::list`] の再帰本体。`dir` の fd は再帰の間だけ生きており、
+    /// 子から戻った時点で `drop` される。
+    fn walk(
+        &self,
+        dir: &openat::Dir,
+        dir_path: &str,
+        depth: usize,
+        entries: &mut Vec<Entry>,
+    ) -> Result<(), FsError> {
+        if depth >= MAX_LIST_DEPTH {
+            return Err(FsError::TooLarge(format!(
+                "{dir_path:?} is deeper than the {MAX_LIST_DEPTH} directory level limit"
+            )));
+        }
 
-                entries.push(Entry {
-                    path: relative,
-                    size: item.size,
-                    modified: item.modified,
-                });
-                if entries.len() > self.list_limit {
-                    return Err(FsError::TooLarge(format!(
-                        "more than {} entries under {prefix:?}",
-                        self.list_limit
-                    )));
+        // 子へ降りる前に、このディレクトリの一覧を確定させる。降りている
+        // 間このディレクトリの dirent ストリームを開いたままにしないため。
+        let mut subdirectories = Vec::new();
+        for item in dir.entries()? {
+            let relative = if dir_path.is_empty() {
+                item.name.clone()
+            } else {
+                format!("{dir_path}/{}", item.name)
+            };
+
+            match item.kind {
+                openat::EntryKind::RegularFile => {}
+                openat::EntryKind::Directory => {
+                    // ここではまだ開かない(開くと幅に比例した fd を抱える)。
+                    subdirectories.push((item.name, relative));
+                    continue;
                 }
+                // シンボリックリンク・FIFO・デバイスは列挙しない。
+                openat::EntryKind::Other => continue,
+            }
+
+            entries.push(Entry {
+                path: relative,
+                size: item.size,
+                modified: item.modified,
+            });
+            if entries.len() > self.list_limit {
+                return Err(FsError::TooLarge(format!(
+                    "more than {} entries under {dir_path:?}",
+                    self.list_limit
+                )));
             }
         }
-        Ok(entries)
+
+        for (name, relative) in subdirectories {
+            // `open_dir` は親 fd 相対に `O_NOFOLLOW` で開くので、列挙してから
+            // 開くまでにリンクへ差し替えられていれば `None` になって
+            // 読み飛ばされる。
+            if let Some(child) = dir.open_dir(&name)? {
+                self.walk(&child, &relative, depth + 1, entries)?;
+                // ここで `child` が drop され、次の兄弟を開く前に fd が返る。
+            }
+        }
+        Ok(())
     }
 
     /// 原子的に書き込む。同一ディレクトリに tmp を作って `rename` する
@@ -605,5 +643,94 @@ mod tests {
             vec!["sub/real.txt".to_string()],
             "list must neither follow symlinked directories nor report the links themselves"
         );
+    }
+
+    /// `list` が同時に抱える fd はツリーの**幅**に比例してはならない。
+    ///
+    /// 幅に比例すると、ディレクトリだけの浅く広いツリー(プラグインが
+    /// `write` を繰り返すだけで作れる。`list_limit` は通常ファイルしか
+    /// 数えないので発火しない)に対して `list` 1 回でプロセス全体の fd を
+    /// 食い潰せる。fd テーブルはプロセス共有なので、デーモンの他の機能
+    /// (WebSocket の accept など)まで巻き添えになる。
+    ///
+    /// 走査中に別スレッドから `/proc/self/fd` を数えて、ピークが幅に
+    /// 比例しないことを確認する(Linux 前提)。
+    #[test]
+    fn list_does_not_hold_one_file_descriptor_per_sibling_directory() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        const WIDTH: usize = 500;
+
+        fn open_fds() -> usize {
+            fs::read_dir("/proc/self/fd")
+                .map(|d| d.count())
+                .unwrap_or(0)
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let d = driver();
+        for i in 0..WIDTH {
+            d.write(dir.path(), &format!("d{i:04}/x.txt"), b"x").unwrap();
+        }
+
+        let baseline = open_fds();
+        let running = Arc::new(AtomicBool::new(true));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let samples = Arc::new(AtomicUsize::new(0));
+
+        let sampler = {
+            let running = Arc::clone(&running);
+            let peak = Arc::clone(&peak);
+            let samples = Arc::clone(&samples);
+            std::thread::spawn(move || {
+                while running.load(Ordering::Relaxed) {
+                    peak.fetch_max(open_fds(), Ordering::Relaxed);
+                    samples.fetch_add(1, Ordering::Relaxed);
+                    std::thread::yield_now();
+                }
+            })
+        };
+
+        let listed = d.list(dir.path(), "").unwrap();
+        running.store(false, Ordering::Relaxed);
+        sampler.join().unwrap();
+
+        assert_eq!(listed.len(), WIDTH);
+        assert!(
+            samples.load(Ordering::Relaxed) >= 5,
+            "the sampler never got to run; this test would not detect a regression"
+        );
+
+        // 深さ優先なら同時に開くのは「深さぶん + 数本」で足りる。幅に
+        // 比例していれば WIDTH 本前後まで伸びる。
+        let peak = peak.load(Ordering::Relaxed);
+        assert!(
+            peak < baseline + WIDTH / 10,
+            "list held {peak} fds (baseline {baseline}) while walking {WIDTH} sibling \
+             directories; it must not open one per sibling"
+        );
+    }
+
+    /// 深すぎるツリーは再帰が止まらないので、深さの上限で拒否する。
+    #[test]
+    fn a_tree_deeper_than_the_depth_limit_is_too_large() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = driver();
+
+        let deep = format!("{}x.txt", "d/".repeat(MAX_LIST_DEPTH + 2));
+        d.write(dir.path(), &deep, b"x").unwrap();
+
+        assert!(matches!(
+            d.list(dir.path(), "")
+                .expect_err("a tree deeper than the limit must be refused"),
+            FsError::TooLarge(_)
+        ));
+
+        // 上限のすぐ内側は通ること(上限が実質ゼロになっていないこと)。
+        let shallow = tempfile::tempdir().unwrap();
+        let ok = format!("{}x.txt", "d/".repeat(MAX_LIST_DEPTH - 1));
+        d.write(shallow.path(), &ok, b"x").unwrap();
+        assert_eq!(d.list(shallow.path(), "").unwrap().len(), 1);
     }
 }
