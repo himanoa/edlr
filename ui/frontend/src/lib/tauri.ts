@@ -6,10 +6,13 @@ export function isTauri(): boolean {
 }
 
 export type AppConfigDto = {
+  /** 実効値。EDLR_JOURNAL_DIR が設定されていれば設定ファイルより優先される。 */
   journalDir: string | null;
   /** false なら外部起動のデーモン。設定は保存できるが再起動はされない。 */
   daemonManaged: boolean;
   configError: string | null;
+  /** EDLR_JOURNAL_DIR が journalDir を上書きしているか。 */
+  envOverride: boolean;
 };
 
 /** Tauri コマンドを呼ぶ。非 Tauri 環境では呼び出し自体が誤りなので明示的に失敗させる。 */

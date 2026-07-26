@@ -8,8 +8,13 @@ Elite Dangerous の Journal / Status.json を監視し、イベントをドラ�
 - `core/` — Rust 製カーネル。Journal tail(inotify + ポーリング常時併用)、JSON Lines パース、
   Status.json 監視、broadcast によるイベント配信。バイナリ名 `edlr`
 - `drivers/` — 特権 capability を持つドライバ層(http / channel、現在はスケルトン)
-- `ui/` — GUI クライアント。`frontend/`(React + Vite の SPA: Logs / Plugins / Dashboard)と
-  `src-tauri/`(Tauri 2 の薄い皮)。デーモンとは WebSocket(既定 `ws://127.0.0.1:8137/ws`)で通信
+- `config/` — `edlr-config` クレート。Tauri アプリが読み書きする設定ファイル
+  (`$XDG_CONFIG_HOME/edlr/config.json`)のパス解決とシリアライズ、Proton 既定
+  Journal パスの探索を担う純粋ロジック。デーモン本体(`core/`)はこのクレートに
+  依存しない
+- `ui/` — GUI クライアント。`frontend/`(React + Vite の SPA: Logs / Plugins /
+  Dashboard / Settings)と `src-tauri/`(Tauri 2 の薄い皮)。デーモンとは
+  WebSocket(既定 `ws://127.0.0.1:8137/ws`)で通信
 
 ## 使い方
 
@@ -236,3 +241,24 @@ capability 承認の保存先ディレクトリ。未指定時の既定は
 
     # Tauri アプリはデーモン未起動なら自動で spawn し、終了時に道連れで止める。
     # 既に起動済みのデーモンには手を出さない。EDLR_BIN / EDLR_JOURNAL_DIR で上書き可。
+
+### Journal ディレクトリの設定(Tauri アプリ)
+
+`edlr` バイナリ自身は `--journal-dir` を渡さない限り、Proton の既定パスを
+自動探索する(前述)。Steam のセカンダリライブラリにゲームを入れている場合
+などはこの既定パスに当たらず、探索は失敗する。
+
+Tauri アプリはこれを設定ファイルで補う:
+
+- 設定ファイルは `$XDG_CONFIG_HOME/edlr/config.json`(`XDG_CONFIG_HOME`
+  未設定なら `~/.config/edlr/config.json`)。`journalDir` キー
+  (文字列 or 省略)を持つ
+- Settings 画面から Journal ディレクトリを選択・保存できる。保存すると
+  Tauri が spawn したデーモンを保存先ディレクトリで再起動する
+  (外部起動のデーモンを掴んでいる場合は保存のみで再起動はしない)
+- `journalDir` が未設定なら、デーモンには `--journal-dir` を渡さず
+  Proton 既定パスの自動探索に委ねる
+- 環境変数 `EDLR_JOURNAL_DIR` が設定されている場合はそちらが常に優先される
+  (spawn 時・Settings 画面での再起動時・Settings 画面の表示のすべてで
+  同じ実効値になる)。設定ファイルに値があっても `EDLR_JOURNAL_DIR` が
+  勝つので、Settings から保存しても実際の反映先は変わらない

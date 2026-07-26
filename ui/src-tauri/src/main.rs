@@ -25,7 +25,11 @@ fn resolve_bin() -> Option<PathBuf> {
 }
 
 /// 未起動ならデーモンを spawn して Child を返す。起動済み・失敗時は None。
-fn autostart_daemon(config_journal_dir: Option<PathBuf>) -> Option<std::process::Child> {
+///
+/// `journal_dir` は呼び出し元(`main`)が `config::resolve_journal_dir` で
+/// env と設定ファイルを解決済みの実効値。restart / display と同じ解決
+/// ロジックを一箇所に集約するため、ここでは重ねて解決しない。
+fn autostart_daemon(journal_dir: Option<PathBuf>) -> Option<std::process::Child> {
     if daemon::daemon_running(daemon::DAEMON_ADDR) {
         eprintln!(
             "edlr daemon already running on {}; leaving it alone",
@@ -39,10 +43,6 @@ fn autostart_daemon(config_journal_dir: Option<PathBuf>) -> Option<std::process:
         );
         return None;
     };
-    let journal_dir = config::resolve_journal_dir(
-        std::env::var_os("EDLR_JOURNAL_DIR").map(PathBuf::from),
-        config_journal_dir,
-    );
     match daemon::spawn_daemon(&bin, journal_dir.as_deref()) {
         Ok(child) => {
             eprintln!(
@@ -76,6 +76,15 @@ struct AppState {
     config_path: PathBuf,
     config: Mutex<edlr_config::AppConfig>,
     config_error: Mutex<Option<String>>,
+    /// `EDLR_JOURNAL_DIR` の値。`main` 起動時に一度だけ読み、以降は不変。
+    ///
+    /// spawn(起動時)・restart(`set_journal_dir`)・display(`snapshot`)の
+    /// 3 箇所全てがこの値と `config.journal_dir` を
+    /// `config::resolve_journal_dir` に通して実効値を求める。3 箇所が
+    /// 別々に env を読んだり読まなかったりすると、UI の表示・再起動時の
+    /// ディレクトリ・次回起動時の spawn 先が食い違いうるため、
+    /// 1 箇所で読んで共有することでその不変条件を保証する。
+    env_journal_dir: Option<PathBuf>,
 }
 
 /// デーモンを停止して回収する。`Child::kill()`(SIGKILL)を呼ぶ唯一の場所。
@@ -112,13 +121,13 @@ fn restart_daemon(
 fn snapshot(state: &AppState) -> config::ConfigDto {
     let config = state.config.lock().unwrap_or_else(|p| p.into_inner());
     let error = state.config_error.lock().unwrap_or_else(|p| p.into_inner());
+    let resolved =
+        config::resolve_journal_dir(state.env_journal_dir.clone(), config.journal_dir.clone());
     config::ConfigDto {
-        journal_dir: config
-            .journal_dir
-            .as_ref()
-            .map(|p| p.to_string_lossy().to_string()),
+        journal_dir: resolved.map(|p| p.to_string_lossy().to_string()),
         daemon_managed: state.owns_daemon,
         config_error: error.clone(),
+        env_override: state.env_journal_dir.is_some(),
     }
 }
 
@@ -133,7 +142,7 @@ fn get_config(state: tauri::State<'_, AppState>) -> config::ConfigDto {
 /// (`daemonManaged: false` を返して UI 側に反映を促す)。
 /// 再起動に失敗しても保存はロールバックしない。ユーザーが入力した正しい値まで
 /// 失われるため。
-#[tauri::command]
+#[tauri::command(async)]
 fn set_journal_dir(
     state: tauri::State<'_, AppState>,
     path: String,
@@ -160,7 +169,13 @@ fn set_journal_dir(
     }
 
     if state.owns_daemon {
-        restart_daemon(&state.daemon, Some(&dir))?;
+        // 保存した値そのものではなく、env を含めた実効値で再起動する。
+        // `snapshot` の表示・次回起動時の spawn 先と常に同じ値になるように
+        // (env が設定されていればそちらが優先される)。
+        let resolved = config::resolve_journal_dir(state.env_journal_dir.clone(), Some(dir));
+        restart_daemon(&state.daemon, resolved.as_deref()).map_err(|e| {
+            format!("設定は保存されました。ただしデーモンの再起動に失敗しました: {e}")
+        })?;
     }
 
     Ok(snapshot(&state))
@@ -184,7 +199,13 @@ fn main() {
     if let Some(error) = &loaded.error {
         eprintln!("failed to load {}: {error}", loaded.path.display());
     }
-    let child = autostart_daemon(loaded.config.journal_dir.clone());
+    // env_journal_dir はここで一度だけ読み、以降は AppState 経由で使い回す。
+    // spawn(ここ)・restart(set_journal_dir)・display(snapshot)が同じ値を
+    // 見るようにするため(3 箇所がそれぞれ env を読むと食い違いうる)。
+    let env_journal_dir = std::env::var_os("EDLR_JOURNAL_DIR").map(PathBuf::from);
+    let resolved_journal_dir =
+        config::resolve_journal_dir(env_journal_dir.clone(), loaded.config.journal_dir.clone());
+    let child = autostart_daemon(resolved_journal_dir);
     let owns_daemon = child.is_some();
 
     // state は manage へムーブされるため、停止用にこのハンドルを手元へ残す。
@@ -196,6 +217,7 @@ fn main() {
         config_path: loaded.path,
         config: Mutex::new(loaded.config),
         config_error: Mutex::new(loaded.error),
+        env_journal_dir,
     };
 
     let app = match tauri::Builder::default()

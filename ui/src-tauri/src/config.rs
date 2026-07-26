@@ -44,11 +44,18 @@ use serde::Serialize;
 #[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ConfigDto {
+    /// 実際にデーモンへ渡される(渡された)実効値。
+    /// `resolve_journal_dir` で env と設定ファイルを解決した後の値であり、
+    /// spawn・restart・この表示の 3 箇所は常にこの値で一致する。
     pub journal_dir: Option<String>,
     /// Tauri が spawn したデーモンを保持しているか。`false` の場合は
     /// 外部起動のデーモンなので再起動できない(勝手に殺さない)。
     pub daemon_managed: bool,
     pub config_error: Option<String>,
+    /// `EDLR_JOURNAL_DIR` が設定されており、`journal_dir` がそれに
+    /// 由来しているか。true の間は設定ファイルを保存しても実効値は
+    /// 変わらない(env が優先される)。
+    pub env_override: bool,
 }
 
 #[cfg(test)]
@@ -82,6 +89,7 @@ mod tests {
             journal_dir: Some("/mnt/game/ED".to_string()),
             daemon_managed: true,
             config_error: None,
+            env_override: false,
         };
 
         let json = serde_json::to_value(&dto).unwrap();
@@ -89,5 +97,16 @@ mod tests {
         assert_eq!(json["journalDir"], "/mnt/game/ED");
         assert_eq!(json["daemonManaged"], true);
         assert!(json["configError"].is_null());
+        assert_eq!(json["envOverride"], false);
+    }
+
+    #[test]
+    fn resolve_journal_dir_is_used_for_env_override_detection() {
+        // env が優先されるケースでは resolved == env であり、UI 側は
+        // `env.is_some()` から env_override を導ける(main.rs 側の配線と同じ前提)。
+        let env = Some(PathBuf::from("/from/env"));
+        let config = Some(PathBuf::from("/from/config"));
+        let resolved = resolve_journal_dir(env.clone(), config);
+        assert_eq!(resolved, env);
     }
 }

@@ -79,6 +79,26 @@ describe("Tauri 環境", () => {
     expect(await screen.findByText(/ディレクトリが存在しません/)).toBeInTheDocument();
   });
 
+  it("再起動に失敗しても保存済みであることが分かるメッセージを出す", async () => {
+    mockIsTauri.mockReturnValue(true);
+    mockInvoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "get_config") {
+        return { journalDir: null, daemonManaged: true, configError: null };
+      }
+      throw new Error(
+        "設定は保存されました。ただしデーモンの再起動に失敗しました: failed to spawn edlr daemon: No such file or directory",
+      );
+    });
+
+    render(<Settings />);
+    const input = await screen.findByLabelText("Journal ディレクトリ");
+    await userEvent.type(input, "/mnt/game/ED");
+    await userEvent.click(screen.getByRole("button", { name: "保存" }));
+
+    expect(await screen.findByText(/設定は保存されました/)).toBeInTheDocument();
+    expect(screen.getByText(/デーモンの再起動に失敗しました/)).toBeInTheDocument();
+  });
+
   it("外部起動デーモンなら再起動されない旨を出す", async () => {
     mockIsTauri.mockReturnValue(true);
     mockInvoke.mockImplementation(async (cmd: string) => {

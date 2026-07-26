@@ -97,6 +97,13 @@ export default function Settings() {
             </p>
           )}
 
+          {config?.envOverride && (
+            <p className="note">
+              環境変数 EDLR_JOURNAL_DIR が設定されているため、ここで保存してもデーモンには
+              環境変数の値が優先して使われます。
+            </p>
+          )}
+
           <label htmlFor="journal-dir">Journal ディレクトリ</label>
           <input
             id="journal-dir"
