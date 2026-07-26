@@ -75,6 +75,40 @@ pub struct SidecarRequest {
     pub scalable: bool,
 }
 
+/// `[[filesystem]]` の `mode`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum FilesystemMode {
+    Read,
+    ReadWrite,
+}
+
+impl FilesystemMode {
+    /// フィンガープリント・RPC 応答で使う安定した文字列表現。
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            FilesystemMode::Read => "read",
+            FilesystemMode::ReadWrite => "read-write",
+        }
+    }
+
+    pub fn allows_write(&self) -> bool {
+        matches!(self, FilesystemMode::ReadWrite)
+    }
+}
+
+/// プラグインが要求するファイルアクセス 1 件。
+///
+/// **ディレクトリの実パスはここに書けない** -- 必ずユーザーが UI で選ぶ。
+/// 承認画面に出る内容と実際にアクセスされる場所を、ユーザー自身の指定に
+/// よって一致させるため(`[[sidecar]]` の `command` と同じ原則)。
+#[derive(Debug, Clone, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct FilesystemRequest {
+    pub name: String,
+    pub reason: String,
+    pub mode: FilesystemMode,
+}
+
 /// `manifest.toml` のパース結果。
 #[derive(Debug, Clone, PartialEq, serde::Deserialize)]
 pub struct Manifest {
@@ -92,6 +126,8 @@ pub struct Manifest {
     pub capabilities: Vec<CapabilityRequest>,
     #[serde(default, rename = "sidecar")]
     pub sidecars: Vec<SidecarRequest>,
+    #[serde(default)]
+    pub filesystem: Vec<FilesystemRequest>,
 }
 
 impl Manifest {
@@ -191,6 +227,22 @@ impl Manifest {
 
         Some(sha256_hex(&canonical))
     }
+
+    pub fn filesystem_root(&self, name: &str) -> Option<&FilesystemRequest> {
+        self.filesystem.iter().find(|r| r.name == name)
+    }
+
+    /// ファイルアクセス要求 1 件の安定フィンガープリント。
+    /// `capabilities_fingerprint` と同じ長さ接頭辞エンコード + SHA-256。
+    /// **ユーザーが選ぶ path は含めない**(パス変更は再承認を要さない)。
+    pub fn filesystem_fingerprint(&self, name: &str) -> Option<String> {
+        let request = self.filesystem_root(name)?;
+        let mut canonical = encode_field("filesystem");
+        canonical.push_str(&encode_field(&request.name));
+        canonical.push_str(&encode_field(&request.reason));
+        canonical.push_str(&encode_field(request.mode.as_str()));
+        Some(sha256_hex(&canonical))
+    }
 }
 
 /// 可変長文字列フィールドを長さ接頭辞方式でエンコードする: `"{byte_len}:{content}"`。
@@ -237,6 +289,8 @@ pub enum ManifestError {
     BadCapability(String),
     /// `sidecar` の内容が不正(name の形式・重複・reason 空など)。
     BadSidecar(String),
+    /// `filesystem` の内容が不正(name の形式・重複・reason 空など)。
+    BadFilesystem(String),
 }
 
 impl fmt::Display for ManifestError {
@@ -252,6 +306,7 @@ impl fmt::Display for ManifestError {
             ManifestError::DuplicateKey => write!(f, "duplicate settings key"),
             ManifestError::BadCapability(msg) => write!(f, "invalid capability request: {msg}"),
             ManifestError::BadSidecar(msg) => write!(f, "invalid sidecar request: {msg}"),
+            ManifestError::BadFilesystem(msg) => write!(f, "invalid filesystem request: {msg}"),
         }
     }
 }
@@ -405,6 +460,34 @@ fn validate_sidecars(sidecars: &mut [SidecarRequest]) -> Result<(), ManifestErro
     Ok(())
 }
 
+fn validate_filesystem(requests: &mut [FilesystemRequest]) -> Result<(), ManifestError> {
+    let mut seen = HashSet::new();
+    for request in requests.iter_mut() {
+        if !is_valid_id(&request.name) {
+            return Err(ManifestError::BadFilesystem(format!(
+                "filesystem name must match [a-z0-9-]+: {}",
+                request.name
+            )));
+        }
+        if !seen.insert(request.name.clone()) {
+            return Err(ManifestError::BadFilesystem(format!(
+                "duplicate filesystem name: {}",
+                request.name
+            )));
+        }
+
+        let trimmed = request.reason.trim().to_string();
+        if trimmed.is_empty() {
+            return Err(ManifestError::BadFilesystem(
+                "filesystem request requires a non-empty reason".to_string(),
+            ));
+        }
+        reject_invisible_chars("reason", &trimmed).map_err(ManifestError::BadFilesystem)?;
+        request.reason = trimmed;
+    }
+    Ok(())
+}
+
 /// `dir/manifest.toml` を読み込み、検証して返す。
 ///
 /// 検証エラーは `Err` として返す(panic しない)。呼び出し側は当該プラグインのみ
@@ -437,6 +520,7 @@ pub fn load_manifest(dir: &Path) -> Result<Manifest, ManifestError> {
 
     validate_capabilities(&mut manifest.capabilities)?;
     validate_sidecars(&mut manifest.sidecars)?;
+    validate_filesystem(&mut manifest.filesystem)?;
 
     Ok(manifest)
 }
@@ -946,6 +1030,7 @@ reason = ""
                     reason: "fetch data".into(),
                 }],
                 sidecars: vec![],
+                filesystem: vec![],
             }
         }
 
@@ -1005,6 +1090,7 @@ reason = ""
                 reason: "foo;http|hosts=https://h2.com|reason=bar".into(),
             }],
             sidecars: vec![],
+            filesystem: vec![],
         };
 
         // Set B: two separate requests that request an additional host
@@ -1028,6 +1114,7 @@ reason = ""
                 },
             ],
             sidecars: vec![],
+            filesystem: vec![],
         };
 
         let fp_a = set_a
@@ -1098,6 +1185,7 @@ reason = "fetch data"
                     reason: reason.to_string(),
                 }],
                 sidecars: vec![],
+                filesystem: vec![],
             }
         }
 
@@ -1227,6 +1315,7 @@ reason = "foo"
                 reason: "fetch data".to_string(),
             }],
             sidecars: vec![],
+            filesystem: vec![],
         };
 
         let old_style_fingerprint = "0123456789abcdef"; // 16 hex chars, FNV-1a-64 shape
@@ -1377,5 +1466,86 @@ port = 50030
         )
         .unwrap();
         assert_ne!(first, changed.sidecar_fingerprint("tts").unwrap());
+    }
+
+    fn parse_fs_manifest(body: &str) -> Result<Manifest, ManifestError> {
+        let dir = tempfile::tempdir().unwrap();
+        let plugin_dir = dir.path().join("fs-plugin");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        std::fs::write(plugin_dir.join("plugin.wasm"), b"\0asm").unwrap();
+        std::fs::write(
+            plugin_dir.join("manifest.toml"),
+            format!(
+                "id = \"fs-plugin\"\nname = \"FS\"\nversion = \"0.1.0\"\nentry = \"plugin.wasm\"\n{body}"
+            ),
+        )
+        .unwrap();
+        load_manifest(&plugin_dir)
+    }
+
+    #[test]
+    fn filesystem_block_is_parsed() {
+        let manifest = parse_fs_manifest(
+            "[[filesystem]]\nname = \"exports\"\nreason = \"CSV を書き出すため\"\nmode = \"read-write\"\n",
+        )
+        .expect("valid filesystem manifest should load");
+
+        assert_eq!(manifest.filesystem.len(), 1);
+        assert_eq!(manifest.filesystem[0].name, "exports");
+        assert_eq!(manifest.filesystem[0].mode, FilesystemMode::ReadWrite);
+    }
+
+    #[test]
+    fn read_only_mode_is_parsed() {
+        let manifest = parse_fs_manifest(
+            "[[filesystem]]\nname = \"input\"\nreason = \"読むだけ\"\nmode = \"read\"\n",
+        )
+        .unwrap();
+        assert_eq!(manifest.filesystem[0].mode, FilesystemMode::Read);
+    }
+
+    #[test]
+    fn unknown_mode_duplicate_name_and_blank_reason_are_rejected() {
+        assert!(matches!(
+            parse_fs_manifest("[[filesystem]]\nname = \"a\"\nreason = \"r\"\nmode = \"write\"\n")
+                .expect_err("unknown mode"),
+            ManifestError::Parse(_) | ManifestError::BadFilesystem(_)
+        ));
+        assert!(matches!(
+            parse_fs_manifest(
+                "[[filesystem]]\nname = \"a\"\nreason = \"r\"\nmode = \"read\"\n\n[[filesystem]]\nname = \"a\"\nreason = \"r2\"\nmode = \"read\"\n"
+            )
+            .expect_err("duplicate name"),
+            ManifestError::BadFilesystem(_)
+        ));
+        assert!(matches!(
+            parse_fs_manifest("[[filesystem]]\nname = \"a\"\nreason = \"  \"\nmode = \"read\"\n")
+                .expect_err("blank reason"),
+            ManifestError::BadFilesystem(_)
+        ));
+        assert!(matches!(
+            parse_fs_manifest(
+                "[[filesystem]]\nname = \"Exports\"\nreason = \"r\"\nmode = \"read\"\n"
+            )
+            .expect_err("uppercase name"),
+            ManifestError::BadFilesystem(_)
+        ));
+    }
+
+    #[test]
+    fn filesystem_fingerprint_is_stable_and_changes_with_the_request() {
+        let manifest = parse_fs_manifest(
+            "[[filesystem]]\nname = \"exports\"\nreason = \"r\"\nmode = \"read\"\n",
+        )
+        .unwrap();
+        let first = manifest.filesystem_fingerprint("exports").unwrap();
+        assert_eq!(first, manifest.filesystem_fingerprint("exports").unwrap());
+        assert_eq!(manifest.filesystem_fingerprint("nope"), None);
+
+        let changed = parse_fs_manifest(
+            "[[filesystem]]\nname = \"exports\"\nreason = \"r\"\nmode = \"read-write\"\n",
+        )
+        .unwrap();
+        assert_ne!(first, changed.filesystem_fingerprint("exports").unwrap());
     }
 }

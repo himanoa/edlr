@@ -11,8 +11,8 @@ pub mod sidecar_runtime;
 pub use grants::{GrantState, GrantsError, GrantsStore};
 pub use host::PluginHost;
 pub use manifest::{
-    load_manifest, matches_event, CapabilityRequest, Manifest, ManifestError, SettingField,
-    SidecarRequest,
+    load_manifest, matches_event, CapabilityRequest, FilesystemMode, FilesystemRequest, Manifest,
+    ManifestError, SettingField, SidecarRequest,
 };
 pub use registry::{
     PluginEntry, PluginInfo, PluginState, Registry, RegistryError, SidecarAction, SidecarInfo,

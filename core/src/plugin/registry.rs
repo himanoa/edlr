@@ -1017,6 +1017,7 @@ mod tests {
                 port,
                 scalable: false,
             }],
+            filesystem: vec![],
         }
     }
 
@@ -1324,6 +1325,7 @@ mod tests {
                 reason: "test".into(),
             }],
             sidecars: vec![],
+            filesystem: vec![],
         }
     }
 

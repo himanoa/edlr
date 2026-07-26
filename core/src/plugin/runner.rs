@@ -379,6 +379,7 @@ mod tests {
             settings: vec![],
             capabilities: vec![],
             sidecars: vec![],
+            filesystem: vec![],
         }
     }
 

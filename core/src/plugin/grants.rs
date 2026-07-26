@@ -249,6 +249,7 @@ mod tests {
                 reason: "fetch data".into(),
             }],
             sidecars: vec![],
+            filesystem: vec![],
         }
     }
 
@@ -263,6 +264,7 @@ mod tests {
             settings: vec![],
             capabilities: vec![],
             sidecars: vec![],
+            filesystem: vec![],
         }
     }
 
@@ -484,6 +486,7 @@ mod tests {
                 port,
                 scalable: true,
             }],
+            filesystem: vec![],
         }
     }
 
