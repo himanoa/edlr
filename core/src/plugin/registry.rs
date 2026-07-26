@@ -74,6 +74,14 @@ pub struct Registry {
     _host: Arc<PluginHost>,
     settings_store: Arc<SettingsStore>,
     grants_store: Arc<GrantsStore>,
+    /// Serializes the whole "persist to `GrantsStore` + overwrite the shared
+    /// `capabilities_json` buffer" sequence in `set_capabilities`, so the two
+    /// writes for a given call always land together and in order relative to
+    /// any other concurrent `set_capabilities` call. See `set_capabilities`
+    /// for why this is needed (disk and the live buffer could otherwise
+    /// disagree under concurrent callers, e.g. two RPC clients toggling the
+    /// same plugin's capability at once).
+    capabilities_lock: Arc<Mutex<()>>,
     plugins_dir: PathBuf,
 }
 
@@ -89,6 +97,7 @@ impl Registry {
             _host: host,
             settings_store,
             grants_store,
+            capabilities_lock: Arc::new(Mutex::new(())),
             plugins_dir,
         }
     }
@@ -207,11 +216,34 @@ impl Registry {
     /// `id` のプラグインの capability 承認/取消を `GrantsStore` に永続化し、
     /// 稼働中プラグインが参照する共有 `capabilities_json` も更新する。
     ///
-    /// `set_values` と同様、`entries` ロックは manifest と `capabilities_json`
-    /// の共有ハンドルを取得する間だけ保持し、`GrantsStore::set` のファイル
-    /// I/O はロックを解放した後に行う。これにより、承認/取消は次回以降の
-    /// `driver-http.send` 呼び出しから即座に有効になる(プラグインの再起動
-    /// 不要)。
+    /// `entries` ロックは manifest と `capabilities_json` の共有ハンドルを
+    /// 取得する間だけ保持し、`GrantsStore::set` のファイル I/O はロックを
+    /// 解放した後に行う(`set_values` と同じ流儀。`entries` ロックをファイル
+    /// I/O の間保持すると、他プラグインの settings/capabilities 操作や
+    /// `set_disabled` までブロックしてしまうため)。
+    ///
+    /// 一方で、「ディスクへの永続化」と「共有バッファへの反映」の 2 ステップは
+    /// 同じ呼び出しの中で不可分に行う必要がある。呼び出しごとに
+    /// `capabilities_lock` を取り、`GrantsStore::set` の呼び出しから
+    /// `capabilities_json` バッファへの書き込みまでを 1 つの臨界区間として
+    /// 保持する。これが無いと、2 つの同時呼び出し(例: 2 つの RPC クライアントが
+    /// 同じプラグインを同時に許可/取消)が
+    /// `A.set(true) → B.set(false) → B が buffer に false を書く →
+    /// A が buffer に true を書く` のように交互実行され、ディスク上は
+    /// 取消済みなのに稼働中プラグインのバッファは許可済みのまま、という
+    /// fail-open な不整合が起こりうる(このロックはそれぞれの呼び出しの
+    /// 「永続化 + バッファ反映」を丸ごと直列化することで、ディスクとバッファの
+    /// 最終状態が必ず「最後にこの臨界区間を抜けた呼び出し」の結果で一致する
+    /// ことを保証する)。
+    ///
+    /// `GrantsStore` 自身も内部に別の `Mutex<()>` を持つが、それは
+    /// `GrantsStore::set` 単体(ファイル書き込みとその直後の読み出し)の
+    /// アトミック性のためのものであり、バッファ書き込みまでは面倒を見ない。
+    /// そのため `capabilities_lock` は `GrantsStore` の内部ロックとは別に
+    /// `Registry` 側で持つ(`GrantsStore` に `capabilities_json` の形を
+    /// 知らせたくない、という関心の分離の意味もある)。2 つのロックの取得
+    /// 順序は常に `capabilities_lock` → (`GrantsStore` 内部ロック) の一方向
+    /// のみなのでデッドロックの心配もない。
     pub fn set_capabilities(&self, id: &str, granted: bool) -> Result<GrantState, RegistryError> {
         let (manifest, capabilities_json) = {
             let guard = self
@@ -224,6 +256,11 @@ impl Registry {
                 .ok_or_else(|| RegistryError::UnknownPlugin(id.to_string()))?;
             (entry.manifest.clone(), entry.capabilities_json.clone())
         };
+
+        let _capabilities_guard = self
+            .capabilities_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
 
         let state = self
             .grants_store
@@ -276,6 +313,7 @@ impl Registry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::thread;
 
     fn empty_registry() -> Registry {
         let host = Arc::new(PluginHost::new().expect("host should start"));
@@ -379,5 +417,84 @@ mod tests {
         let stored = capabilities_json.lock().unwrap().clone();
         let parsed: serde_json::Value = serde_json::from_str(&stored).unwrap();
         assert_eq!(parsed["granted"], serde_json::json!(false));
+    }
+
+    /// Regression test for a race the security review flagged: without
+    /// serializing "persist to `GrantsStore`" + "overwrite the shared
+    /// `capabilities_json` buffer" as one unit, two concurrent
+    /// `set_capabilities` calls could interleave so that the on-disk grant
+    /// and the live buffer end up disagreeing (see `set_capabilities`'s doc
+    /// comment for the exact interleaving). This hammers the same plugin
+    /// from many threads at once and asserts the buffer always agrees with
+    /// what `GrantsStore` reports from disk once every thread has finished.
+    ///
+    /// This test is inherently about scheduling: with organic OS scheduling
+    /// alone the race window here is narrow enough that this plain
+    /// N-threads-hammering-the-same-plugin form did not reliably fail on the
+    /// pre-fix code in local runs (see the task report for how the race was
+    /// actually forced open and confirmed, using a temporary artificial
+    /// stall). Kept here anyway as a standing regression guard under real
+    /// concurrent load; it is deterministic (always passes) with the
+    /// `capabilities_lock` fix in place, since the fix removes the race
+    /// window entirely (single critical section) rather than narrowing it,
+    /// so no amount of scheduling luck can reintroduce a disagreement.
+    #[test]
+    fn concurrent_set_capabilities_keeps_shared_buffer_consistent_with_disk() {
+        let host = Arc::new(PluginHost::new().expect("host should start"));
+        let tmp = tempfile::tempdir().unwrap();
+        let settings_store = Arc::new(SettingsStore::new(tmp.path().join("settings")));
+        let grants_store = Arc::new(GrantsStore::new(tmp.path().join("grants")));
+        let registry = Registry::new(
+            host,
+            settings_store,
+            grants_store.clone(),
+            tmp.path().join("plugins"),
+        );
+
+        let manifest = manifest_with_http_capability("cap-plugin");
+        let capabilities_json = Arc::new(Mutex::new(
+            crate::plugin::host::capabilities_json_string(false, &[]),
+        ));
+        registry.push(PluginEntry {
+            manifest: manifest.clone(),
+            state: PluginState::Running,
+            settings_json: Arc::new(Mutex::new("{}".to_string())),
+            capabilities_json: capabilities_json.clone(),
+        });
+
+        const THREADS: usize = 16;
+        const ITERATIONS: usize = 30;
+        let barrier = Arc::new(std::sync::Barrier::new(THREADS));
+
+        let handles: Vec<_> = (0..THREADS)
+            .map(|t| {
+                let registry = registry.clone();
+                let barrier = barrier.clone();
+                thread::spawn(move || {
+                    barrier.wait();
+                    for i in 0..ITERATIONS {
+                        let granted = (t + i) % 2 == 0;
+                        let _ = registry.set_capabilities("cap-plugin", granted);
+                    }
+                })
+            })
+            .collect();
+        for handle in handles {
+            handle.join().expect("worker thread should not panic");
+        }
+
+        let disk_granted = grants_store.state(&manifest).granted;
+        let buffer_granted: bool = {
+            let stored = capabilities_json.lock().unwrap().clone();
+            let parsed: serde_json::Value = serde_json::from_str(&stored).unwrap();
+            parsed["granted"].as_bool().unwrap()
+        };
+
+        assert_eq!(
+            disk_granted, buffer_granted,
+            "shared capabilities_json buffer (granted={buffer_granted}) disagrees \
+             with GrantsStore's on-disk state (granted={disk_granted}) after \
+             concurrent set_capabilities calls"
+        );
     }
 }

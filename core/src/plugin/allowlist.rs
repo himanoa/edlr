@@ -140,4 +140,56 @@ mod tests {
         let granted: Vec<String> = vec![];
         assert!(check_url(&granted, "https://api.example.com").is_err());
     }
+
+    // -- Regressions locked in by manual security review (see task-3
+    // fix-up): each of these previously-tested-by-hand bypass vectors must
+    // stay denied/allowed as documented, so they get an explicit test here
+    // rather than relying on the reviewer re-deriving them each time.
+
+    #[test]
+    fn userinfo_in_requested_url_does_not_smuggle_a_different_host() {
+        // The `allowed` before `@` is HTTP userinfo (a username), not the
+        // host; the actual host is `evil.com`. A granted list of exactly
+        // `https://allowed` must not be tricked into matching this URL.
+        let granted = hosts(&["https://allowed"]);
+        assert!(check_url(&granted, "https://allowed@evil.com").is_err());
+    }
+
+    #[test]
+    fn fragment_does_not_smuggle_a_different_host() {
+        // Everything after `#` is a fragment, not part of the host; the
+        // actual host is `evil.com`, not `allowed.com`.
+        let granted = hosts(&["https://allowed.com"]);
+        assert!(check_url(&granted, "https://evil.com#@allowed.com").is_err());
+    }
+
+    #[test]
+    fn uppercase_scheme_and_host_in_requested_url_still_match() {
+        let granted = hosts(&["https://api.example.com"]);
+        assert!(check_url(&granted, "HTTPS://API.EXAMPLE.COM").is_ok());
+    }
+
+    #[test]
+    fn matching_port_but_different_scheme_is_rejected() {
+        // `http://host:443` has the same port number `https://host` would
+        // default to, but a different scheme; scheme must still match.
+        let granted = hosts(&["https://host"]);
+        assert!(check_url(&granted, "http://host:443").is_err());
+    }
+
+    #[test]
+    fn trailing_dot_fqdn_is_not_treated_as_equal_to_the_bare_host() {
+        let granted = hosts(&["https://example.com"]);
+        assert!(check_url(&granted, "https://example.com.").is_err());
+    }
+
+    #[test]
+    fn homograph_host_is_rejected() {
+        // Cyrillic "а" (U+0430) in place of the Latin "a" in "api"; IDNA
+        // punycode-encodes this to a different ASCII host
+        // (`xn--pi-6kc.example.com`), so it does not match the granted
+        // Latin-ASCII host.
+        let granted = hosts(&["https://api.example.com"]);
+        assert!(check_url(&granted, "https://\u{0430}pi.example.com").is_err());
+    }
 }

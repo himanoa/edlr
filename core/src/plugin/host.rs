@@ -139,12 +139,15 @@ impl HostSettingsHost for HostCtx {
 }
 
 /// Serializes the `capabilities_json` shape (`{"granted": bool, "hosts":
-/// [...]}`) shared between `HostCtx` and `Registry`. `hosts` are only
-/// consulted by `driver-http.send` when `granted` is true, but are included
-/// unconditionally here for simplicity -- an ungranted plugin's `send` calls
-/// are already rejected before `hosts` would ever be read (see
-/// `DriverHttpHost::send` below).
+/// [...]}`) shared between `HostCtx` and `Registry`. `hosts` are only ever
+/// consulted by `driver-http.send` when `granted` is true (see
+/// `DriverHttpHost::send` below), and the ungranted case emits an empty
+/// `hosts` list regardless of what's passed in, so the serialized buffer
+/// itself carries no host information at all while ungranted -- there's
+/// nothing to observe even if some future caller reads `hosts` without
+/// checking `granted` first.
 pub fn capabilities_json_string(granted: bool, hosts: &[String]) -> String {
+    let hosts: &[String] = if granted { hosts } else { &[] };
     serde_json::to_string(&serde_json::json!({
         "granted": granted,
         "hosts": hosts,
@@ -360,6 +363,31 @@ mod tests {
             headers: Vec::new(),
             body: None,
         }
+    }
+
+    #[test]
+    fn capabilities_json_string_omits_hosts_when_ungranted() {
+        let json = capabilities_json_string(
+            false,
+            &[
+                "https://api.example.com".to_string(),
+                "https://x.com".to_string(),
+            ],
+        );
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["granted"], serde_json::json!(false));
+        assert_eq!(parsed["hosts"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn capabilities_json_string_includes_hosts_when_granted() {
+        let json = capabilities_json_string(true, &["https://api.example.com".to_string()]);
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["granted"], serde_json::json!(true));
+        assert_eq!(
+            parsed["hosts"],
+            serde_json::json!(["https://api.example.com"])
+        );
     }
 
     #[test]
