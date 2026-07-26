@@ -250,8 +250,12 @@ fn run_plugin_thread(
         settings_json,
         capabilities_json,
         sidecars_json,
+        // TODO(次タスク): `[[filesystem]]` の承認・設定配線が入るまでの
+        // 仮の空バッファ。実配線は Task 7 で `Registry` から渡す。
+        Arc::new(Mutex::new("[]".to_string())),
         host.http_driver(),
         host.process_driver(),
+        host.fs_driver(),
     );
     let mut instance = match host.load(&entry_path, ctx) {
         Ok(instance) => instance,

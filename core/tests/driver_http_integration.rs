@@ -9,7 +9,7 @@
 
 use edlr_core::plugin::host::{
     capabilities_json_string, HostCtx, WitDriverHttpHost as _, WitHttpError, WitHttpRequest,
-    HTTP_MAX_BODY, HTTP_TIMEOUT,
+    FS_LIST_LIMIT, FS_READ_LIMIT, HTTP_MAX_BODY, HTTP_TIMEOUT,
 };
 use edlr_driver_http::HttpDriver;
 use std::net::TcpListener as StdTcpListener;
@@ -99,11 +99,13 @@ fn ctx_with_driver(driver: Arc<HttpDriver>, hosts: &[&str]) -> HostCtx {
         Arc::new(Mutex::new("{}".to_string())),
         Arc::new(Mutex::new(capabilities_json)),
         Arc::new(Mutex::new("[]".to_string())),
+        Arc::new(Mutex::new("[]".to_string())),
         driver,
         Arc::new(edlr_driver_process::ProcessDriver::new(
             Duration::from_secs(3),
             Duration::from_secs(1),
         )),
+        Arc::new(edlr_driver_fs::FsDriver::new(FS_READ_LIMIT, FS_LIST_LIMIT)),
     )
 }
 
