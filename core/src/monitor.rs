@@ -16,9 +16,9 @@ pub async fn run(dir: PathBuf, router: Router, interval: Duration) {
         match tailer.poll() {
             Ok(lines) => {
                 for line in lines {
-                    match parser::parse_line(&line) {
+                    match parser::parse_line(&line.text) {
                         Some(event) => router.publish(event),
-                        None => tracing::warn!("skipping unparsable journal line: {line}"),
+                        None => tracing::warn!("skipping unparsable journal line: {}", line.text),
                     }
                 }
             }
