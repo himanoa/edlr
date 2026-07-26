@@ -22,7 +22,7 @@
 | 置き場所 | 内容 | 誰が決めるか |
 |---|---|---|
 | プラグインの `manifest.toml` の `[[sidecar]]` | サイドカーが要るという**要求**、`args` / `port` の既定値提案 | プラグイン作者 |
-| `<settings-dir>/<plugin-id>.json` の sidecar 名前空間 | `command` / `args` / `port` / `replicas` の**実値** | ユーザー(UI) |
+| `<settings-dir>/<plugin-id>.sidecars.json` | `command` / `args` / `port` / `replicas` の**実値** | ユーザー(UI) |
 | `<grants-dir>/<plugin-id>.json` | どのサイドカーを許可したかの**承認結果** | ユーザー(UI) |
 | `drivers/process` crate | プロセスを起動・監視・確実に殺す能力そのもの | — |
 
@@ -67,15 +67,17 @@ port = 8080
 
 ## ユーザー設定
 
-保存先は `<settings-dir>/<plugin-id>.json` の sidecar 名前空間:
+保存先は `<settings-dir>/<plugin-id>.sidecars.json`:
 
 ```jsonc
 {
-  "sidecars": {
-    "tts": { "command": "/usr/bin/piper", "args": ["--port", "{port}"], "port": 50021, "replicas": 2 }
-  }
+  "tts": { "command": "/usr/bin/piper", "args": ["--port", "{port}"], "port": 50021, "replicas": 2 }
 }
 ```
+
+通常の `[[settings]]`(`<settings-dir>/<plugin-id>.json`)と別ファイルにするのは、
+`SettingsStore::update` が manifest の `[[settings]]` に無いキーをディスクから
+間引く実装であり、同居させると設定保存のたびにサイドカー設定が消えるため。
 
 - 未設定のキーは manifest の既定値にフォールバックする(`command` には既定値がない)
 - `replicas` 個のインスタンスに `port, port+1, …, port+replicas-1` を採番する
@@ -106,6 +108,13 @@ port = 8080
 サイドカーが承認されている間に限り、そのサイドカーに**採番された全ポート**について
 `http://127.0.0.1:<port>` を `driver-http` の許可リストへ暗黙に加える(`allowlist.rs` に暗黙エントリとして
 合流させる)。承認が取消・失効した時点で暗黙許可も消える。隣接ポートや他ホストは許可されない。
+
+この暗黙許可は **http capability の承認とは独立に効く**(`[[capabilities]]` を
+一切宣言していないプラグインでも、承認済みサイドカーとは通信できる)。そのため
+`capabilities_json` の形を `{"granted": bool, "hosts": [...]}` から
+`{"hosts": [...]}`(= 実効的に許可されたホストだけを載せる)へ変更し、
+`driver-http.send` は「空なら全部拒否、そうでなければ allowlist 判定」を見る。
+承認状態の解決は `Registry` 側で行う。
 
 ## WIT 追加
 
