@@ -157,59 +157,59 @@ pub struct Registry {
     capabilities_lock: Arc<Mutex<()>>,
     /// `set_sidecar_config` / `set_sidecar_grant` が呼ぶ
     /// `refresh_sidecar_runtime`(停止 → `sidecars_json` の作り直し →
-    /// `capabilities_json` の作り直し)、および `set_filesystem_config` /
-    /// `set_filesystem_grant` が呼ぶ `refresh_filesystem_runtime`
-    /// (`filesystem_json` の作り直し)の臨界区間を **プラグイン ID ごとに**
+    /// `capabilities_json` の作り直し)の臨界区間を **プラグイン ID ごとに**
     /// 直列化するロックのマップ。id → 専用 `Arc<Mutex<()>>` を引く。
-    ///
-    /// サイドカーとファイルアクセスで同じ id 別ロックを共有する(名前も
-    /// `sidecar_runtime_locks` から `runtime_locks` に改めた)。両者は別の
-    /// 資源(プロセス起動 vs. ディレクトリアクセス)を扱うが、「同じプラグ
-    /// インの実行時状態(サイドカー稼働状況・ファイルアクセス許可)を、
-    /// 永続化とバッファ反映を不可分にしつつ id 単位で直列化したい」という
-    /// 要件は同一であり、ロックを分ける実利(サイドカー停止のブロッキング
-    /// -- 後述 -- からファイルアクセス操作を守る)は無い。ファイルアクセス
-    /// 側の臨界区間はディスク読み書きのみで、`ProcessDriver::stop` のような
-    /// 数秒ブロックしうる同期呼び出しを含まないため、同じロックに相乗りして
-    /// もファイルアクセス操作がサイドカー停止待ちで長時間足止めされるリスク
-    /// は低い(それでも "id 別" である以上、影響を受けるのは同じプラグイン
-    /// 内のサイドカー/ファイルアクセス操作同士だけで、他プラグインには波及
-    /// しない)。
     ///
     /// なぜプラグイン単位にしたか: `refresh_sidecar_runtime` は同期版
     /// `ProcessDriver::stop` を臨界区間の中で呼ぶため、SIGTERM を無視する
     /// サイドカーが 1 つあれば `shutdown_grace`(既定 3 秒)× 停止対象の
     /// インスタンス数ブロックしうる。単一のグローバルロックだと、あるプラグ
     /// インのサイドカー停止待ちの間、無関係な別プラグインの
-    /// `set_sidecar_config`/`set_sidecar_grant`/`set_filesystem_config`/
-    /// `set_filesystem_grant` まで足止めされてしまう。`capabilities_lock`
-    /// (こちらは全プラグイン共有のグローバルロックのまま)が守っているのは
-    /// インメモリのバッファ差し替えだけで済むのとはリスクの質が違うため、
-    /// こちらだけプラグイン単位に分けてある。
+    /// `set_sidecar_config`/`set_sidecar_grant` まで足止めされてしまう。
+    /// `capabilities_lock`(こちらは全プラグイン共有のグローバルロックの
+    /// まま)が守っているのはインメモリのバッファ差し替えだけで済むのとは
+    /// リスクの質が違うため、こちらだけプラグイン単位に分けてある。
     ///
-    /// マップ自体を保護する `Mutex`(`runtime_lock_for` を参照)は
+    /// マップ自体を保護する `Mutex`(`sidecar_runtime_lock_for` を参照)は
     /// 「id からロックの `Arc` を引く/無ければ作る」間だけ保持し、返した
     /// `Arc<Mutex<()>>` の実際の臨界区間(プロセス停止・ディスク読み書き)の
     /// 間は保持しない。したがってマップの Mutex 自体がボトルネックになる
     /// ことはない(id ごとの `Arc<Mutex<()>>` を作る/引くだけの一瞬)。
     ///
-    /// ロック取得順序は変更前と同じ一方向を保っている: `entries` は
-    /// 「manifest と共有ハンドルのクローンを取る」瞬間だけ握ってすぐ手放し
-    /// (この時点でマップの Mutex も id 別ロックもまだ取っていない)、その後
-    /// `runtime_lock_for(id)` でマップから id 別ロックを引いて(マップの
-    /// Mutex は取得直後に手放す)、最後にその id 別ロックを取る。id 別
-    /// ロックの臨界区間の中で `capabilities_lock` を(id をまたいで共有
+    /// ロック取得順序は一方向を保っている: `entries` は「manifest と共有
+    /// ハンドルのクローンを取る」瞬間だけ握ってすぐ手放し(この時点でマップの
+    /// Mutex も id 別ロックもまだ取っていない)、その後
+    /// `sidecar_runtime_lock_for(id)` でマップから id 別ロックを引いて
+    /// (マップの Mutex は取得直後に手放す)、最後にその id 別ロックを取る。
+    /// id 別ロックの臨界区間の中で `capabilities_lock` を(id をまたいで共有
     /// される `capabilities_json` バッファのため)追加で取ることがある
-    /// (`refresh_sidecar_runtime` を参照。`refresh_filesystem_runtime` は
-    /// `capabilities_json` に触れないので追加取得しない)が、逆方向
-    /// (`capabilities_lock` を保持したまま id 別ロックやマップの Mutex を
-    /// 取る)は無い。`set_capabilities` は `capabilities_lock` だけを取り、
-    /// id 別ロックにもマップの Mutex にも触れない。したがって
-    /// 「entries → マップの Mutex → id 別ロック → capabilities_lock」の
-    /// 一方向のみが成立し、循環しないのでデッドロックしない(別プラグイン
-    /// 同士の `refresh_sidecar_runtime`/`refresh_filesystem_runtime` が
-    /// 異なる id 別ロックを取り合っても、互いに待ち合う関係にはならない)。
-    runtime_locks: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
+    /// (`refresh_sidecar_runtime` を参照)が、逆方向(`capabilities_lock` を
+    /// 保持したまま id 別ロックやマップの Mutex を取る)は無い。
+    /// `set_capabilities` は `capabilities_lock` だけを取り、id 別ロックにも
+    /// マップの Mutex にも触れない。したがって「entries → マップの Mutex →
+    /// id 別ロック → capabilities_lock」の一方向のみが成立し、循環しないので
+    /// デッドロックしない。
+    sidecar_runtime_locks: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
+    /// `set_filesystem_config` / `set_filesystem_grant` が呼ぶ
+    /// `refresh_filesystem_runtime`(`filesystem_json` の作り直し)の臨界
+    /// 区間を **プラグイン ID ごとに** 直列化するロックのマップ。
+    ///
+    /// **サイドカーとは別のマップにしてある。** かつては
+    /// `sidecar_runtime_locks` に相乗りしており、その根拠は「ファイルアクセス
+    /// 側の臨界区間はディスク読み書きだけで短いから相乗りしてよい」だったが、
+    /// 問題は逆向きだった: 長いのは**サイドカー側**で、`ProcessDriver::stop`
+    /// が SIGTERM を無視するサイドカー × インスタンス数だけブロックする間、
+    /// 同じプラグインのファイルアクセス承認取消がロック待ちで足止めされる。
+    /// その間 `filesystem_json` は古い `granted:true` と path を保持したまま
+    /// なので、ディスク上は取り消された承認でプラグインが読み書きを続けられて
+    /// しまう(fail-open。設計書の「承認・取消は即座に反映される」に反する)。
+    ///
+    /// 両者が扱う資源は独立している(プロセス起動 vs. ディレクトリアクセス)
+    /// ので、分けてもロック順序の一方向性は壊れない: どちらの臨界区間からも
+    /// もう一方のマップ・id 別ロックを取ることは無く、
+    /// `refresh_filesystem_runtime` は `capabilities_json` に触れないため
+    /// `capabilities_lock` も取らない。
+    filesystem_runtime_locks: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
     plugins_dir: PathBuf,
 }
 
@@ -233,7 +233,8 @@ impl Registry {
             filesystem_config_store,
             process_driver,
             capabilities_lock: Arc::new(Mutex::new(())),
-            runtime_locks: Arc::new(Mutex::new(HashMap::new())),
+            sidecar_runtime_locks: Arc::new(Mutex::new(HashMap::new())),
+            filesystem_runtime_locks: Arc::new(Mutex::new(HashMap::new())),
             plugins_dir,
         }
     }
@@ -387,17 +388,23 @@ impl Registry {
             .collect()
     }
 
-    /// `id` 用の実行時ロック(`runtime_locks`)を引く。無ければ作る。
-    /// マップ自体を保護する `Mutex` は、id からロックの `Arc` を引く/
-    /// 挿入する間だけ保持し、返した `Arc<Mutex<()>>` の実際の臨界区間
-    /// (呼び出し側が別途 `.lock()` する)の間は保持しない。サイドカーと
-    /// ファイルアクセスの両方の `refresh_*_runtime` が同じマップ・同じ
-    /// id 別ロックを引く(`runtime_locks` のドキュメント参照)。
-    fn runtime_lock_for(&self, id: &str) -> Arc<Mutex<()>> {
-        let mut locks = self
-            .runtime_locks
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+    /// `id` 用のサイドカー実行時ロック(`sidecar_runtime_locks`)を引く。
+    /// 無ければ作る。マップ自体を保護する `Mutex` は、id からロックの `Arc`
+    /// を引く/挿入する間だけ保持し、返した `Arc<Mutex<()>>` の実際の臨界
+    /// 区間(呼び出し側が別途 `.lock()` する)の間は保持しない。
+    fn sidecar_runtime_lock_for(&self, id: &str) -> Arc<Mutex<()>> {
+        Self::lock_for(&self.sidecar_runtime_locks, id)
+    }
+
+    /// `id` 用のファイルアクセス実行時ロック(`filesystem_runtime_locks`)を
+    /// 引く。サイドカー側とは**別のマップ**であることが要点
+    /// (`filesystem_runtime_locks` のドキュメント参照)。
+    fn filesystem_runtime_lock_for(&self, id: &str) -> Arc<Mutex<()>> {
+        Self::lock_for(&self.filesystem_runtime_locks, id)
+    }
+
+    fn lock_for(map: &Mutex<HashMap<String, Arc<Mutex<()>>>>, id: &str) -> Arc<Mutex<()>> {
+        let mut locks = map.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         locks
             .entry(id.to_string())
             .or_insert_with(|| Arc::new(Mutex::new(())))
@@ -666,11 +673,15 @@ impl Registry {
     /// 同じルートの設定変更と承認取消を 2 つの RPC クライアントがほぼ同時に
     /// 行う)がディスクと共有バッファを食い違わせないようにするため。
     ///
-    /// ロックは `runtime_lock_for(id)` を通じてサイドカーと共有する
-    /// (`runtime_locks` のドキュメント参照)。取得順序は既存の一方向
-    /// (`entries` → マップの Mutex → id 別ロック)のままで、この関数は
-    /// `capabilities_lock` を取らない(ファイルアクセスの承認は
-    /// `capabilities_json` に影響しない)ため、`set_capabilities`/
+    /// ロックは `filesystem_runtime_lock_for(id)` -- **サイドカーとは別の
+    /// マップ** から引く(`filesystem_runtime_locks` のドキュメント参照)。
+    /// 共有していた頃は、同じプラグインのサイドカー停止
+    /// (`ProcessDriver::stop`)が終わるまで承認取消がロック待ちになり、その
+    /// 間 `filesystem_json` が古い `granted:true` と path を持ち続けていた
+    /// (最大で `shutdown_grace` × インスタンス数の fail-open)。
+    /// 取得順序は既存の一方向(`entries` → マップの Mutex → id 別ロック)の
+    /// ままで、この関数は `capabilities_lock` を取らない(ファイルアクセスの
+    /// 承認は `capabilities_json` に影響しない)ため、`set_capabilities`/
     /// `refresh_sidecar_runtime` との間に新たな循環は生じない。
     fn refresh_filesystem_runtime(&self, id: &str) -> Result<Vec<FilesystemInfo>, RegistryError> {
         let (manifest, filesystem_json) = {
@@ -685,7 +696,7 @@ impl Registry {
             (entry.manifest.clone(), entry.filesystem_json.clone())
         };
 
-        let runtime_lock = self.runtime_lock_for(id);
+        let runtime_lock = self.filesystem_runtime_lock_for(id);
         let _runtime_guard = runtime_lock
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -789,7 +800,7 @@ impl Registry {
     /// 2 と 3 を同じ臨界区間で更新するのが重要で、片方だけ更新されると
     /// 「起動はできるが通信できない(2 だけ進んだ)」「通信できるが承認は消えて
     /// いる(3 だけ進んだ)」という中途半端な状態が観測されうる。そのため
-    /// 呼び出しごとに `runtime_lock_for(id)` で **`id` 専用の**
+    /// 呼び出しごとに `sidecar_runtime_lock_for(id)` で **`id` 専用の**
     /// ロックを取り、停止からバッファ書き込みまでを 1 つの臨界区間として
     /// 保持する(`set_capabilities` の `capabilities_lock` と同じ理由: 2 つの
     /// 同時呼び出し -- 例えば同じサイドカーの設定変更と承認取消を 2 つの RPC
@@ -838,7 +849,7 @@ impl Registry {
             )
         };
 
-        let runtime_lock = self.runtime_lock_for(id);
+        let runtime_lock = self.sidecar_runtime_lock_for(id);
         let _runtime_guard = runtime_lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
 
         for name in stop_names {
@@ -961,7 +972,7 @@ impl Registry {
     /// `RegistryError::Sidecar` として拒否する(`refresh_sidecar_runtime` の
     /// ような JSON バッファの作り直しは、設定・承認自体は変わらないので行わない)。
     ///
-    /// **TOCTOU 対策**: `Start`/`Restart` は `runtime_lock_for(id)`
+    /// **TOCTOU 対策**: `Start`/`Restart` は `sidecar_runtime_lock_for(id)`
     /// (`refresh_sidecar_runtime` -- `set_sidecar_config`/`set_sidecar_grant`
     /// が呼ぶ -- と共有する、プラグイン単位のロック)を、承認・設定を読む
     /// 前から `ensure_started` を呼び終えるまで保持する。これが無いと、
@@ -994,7 +1005,7 @@ impl Registry {
     /// 全サイドカーを停止するが、`control_sidecar` が `PluginState` を見て
     /// いなかったため、無効化後(あるいは並行中)に `sidecar-control` の
     /// `start` が来ると、もう生きているプラグインスレッドが無いサイドカーが
-    /// 再び起動してしまっていた。この関数は `runtime_lock_for(id)`
+    /// 再び起動してしまっていた。この関数は `sidecar_runtime_lock_for(id)`
     /// を取った**後**に現在の `PluginState` を読み、`Disabled` なら拒否する
     /// -- `set_disabled` 自身もサイドカー停止の前に同じ id 別ロックを取る
     /// ように直したので(`set_disabled` のドキュメント参照)、「状態を
@@ -1019,7 +1030,7 @@ impl Registry {
                 self.process_driver.stop(&key);
             }
             SidecarAction::Start | SidecarAction::Restart => {
-                let runtime_lock = self.runtime_lock_for(id);
+                let runtime_lock = self.sidecar_runtime_lock_for(id);
                 let _runtime_guard = runtime_lock
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -1149,7 +1160,7 @@ impl Registry {
             return;
         };
 
-        // `entries` ロックを既に手放した後で `runtime_lock_for(id)`
+        // `entries` ロックを既に手放した後で `sidecar_runtime_lock_for(id)`
         // を取る(ロック取得順序は他の箇所と同じ: `entries` → id 別ロック)。
         // ここで id 別ロックを取ることで、`control_sidecar` の `Start`/
         // `Restart`(こちらも同じロックを取ってから `PluginState` を読む)と
@@ -1157,7 +1168,7 @@ impl Registry {
         // 止める」の一連と、「(無効化前の)状態を読む」→「spawn する」が
         // 交差して、無効化の裏でサイドカーが起動されたまま残ることはない
         // (`control_sidecar` のドキュメント参照)。
-        let runtime_lock = self.runtime_lock_for(id);
+        let runtime_lock = self.sidecar_runtime_lock_for(id);
         let _runtime_guard = runtime_lock
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -1230,6 +1241,125 @@ mod tests {
             .expect_err("unknown id should be rejected");
 
         assert!(matches!(err, RegistryError::UnknownPlugin(id) if id == "does-not-exist"));
+    }
+
+    fn manifest_with_filesystem(id: &str) -> Manifest {
+        Manifest {
+            id: id.to_string(),
+            name: id.to_string(),
+            version: "0.1.0".into(),
+            description: String::new(),
+            entry: "plugin.wasm".into(),
+            events: vec![],
+            settings: vec![],
+            capabilities: vec![],
+            sidecars: vec![],
+            filesystem: vec![crate::plugin::manifest::FilesystemRequest {
+                name: "exports".into(),
+                reason: "reason".into(),
+                mode: crate::plugin::manifest::FilesystemMode::ReadWrite,
+            }],
+        }
+    }
+
+    /// 承認取消は、同じプラグインのサイドカー停止の裏で待たされてはならない。
+    ///
+    /// `refresh_sidecar_runtime` は同期 `ProcessDriver::stop` を臨界区間に
+    /// 含み、SIGTERM を無視するサイドカー × インスタンス数だけブロックしうる。
+    /// ファイルアクセスがその id 別ロックを共有していると、その間
+    /// `filesystem_json` は古い `granted:true` と path を保持したままになり、
+    /// ディスク上は取り消された承認で読み書きが続く(fail-open)。
+    /// ここではサイドカー側の臨界区間をロックを掴んだまま模し、その間でも
+    /// ファイルアクセスの取消が共有バッファへ速やかに反映されることを見る。
+    #[test]
+    fn revoking_filesystem_access_is_not_blocked_by_a_sidecar_stop_in_progress() {
+        let host = Arc::new(PluginHost::new().expect("host should start"));
+        let tmp = tempfile::tempdir().unwrap();
+        let settings_store = Arc::new(SettingsStore::new(tmp.path().join("settings")));
+        let grants_store = Arc::new(GrantsStore::new(tmp.path().join("grants")));
+        let sidecar_config_store = Arc::new(SidecarConfigStore::new(tmp.path().join("settings")));
+        let filesystem_config_store = Arc::new(FilesystemConfigStore::new(
+            tmp.path().join("settings"),
+            Vec::new(),
+        ));
+        let process_driver = Arc::new(ProcessDriver::new(
+            Duration::from_millis(200),
+            Duration::from_millis(0),
+        ));
+        let registry = Registry::new(
+            host,
+            settings_store,
+            grants_store,
+            sidecar_config_store,
+            filesystem_config_store,
+            process_driver,
+            tmp.path().join("plugins"),
+        );
+
+        let manifest = manifest_with_filesystem("fs-plugin");
+        let filesystem_json = Arc::new(Mutex::new("[]".to_string()));
+        registry.push(PluginEntry {
+            manifest,
+            state: PluginState::Running,
+            settings_json: Arc::new(Mutex::new("{}".to_string())),
+            capabilities_json: Arc::new(Mutex::new(
+                crate::plugin::host::capabilities_json_string(&[]),
+            )),
+            sidecars_json: Arc::new(Mutex::new("[]".to_string())),
+            filesystem_json: filesystem_json.clone(),
+        });
+
+        let root = tmp.path().join("exports");
+        std::fs::create_dir(&root).unwrap();
+        registry
+            .set_filesystem_config(
+                "fs-plugin",
+                "exports",
+                &FilesystemConfig {
+                    path: root.to_string_lossy().to_string(),
+                },
+            )
+            .expect("configuring the directory should succeed");
+        registry
+            .set_filesystem_grant("fs-plugin", "exports", true)
+            .expect("granting should succeed");
+        let granted = crate::plugin::fs_runtime::parse_filesystem(
+            &filesystem_json.lock().unwrap().clone(),
+        );
+        assert!(granted["exports"].granted);
+        assert!(!granted["exports"].path.is_empty());
+
+        // サイドカー停止(`ProcessDriver::stop`)がまだ終わっていない状態を、
+        // その臨界区間で使われる id 別ロックを掴んだまま模す。
+        let sidecar_lock = registry.sidecar_runtime_lock_for("fs-plugin");
+        let sidecar_guard = sidecar_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let revoker = {
+            let registry = registry.clone();
+            thread::spawn(move || {
+                let _ = tx.send(registry.set_filesystem_grant("fs-plugin", "exports", false));
+            })
+        };
+
+        let result = rx
+            .recv_timeout(Duration::from_secs(3))
+            .expect("revoking filesystem access must not wait for the sidecar critical section");
+        result.expect("revoking should succeed");
+        revoker.join().expect("revoker thread should not panic");
+
+        let revoked = crate::plugin::fs_runtime::parse_filesystem(
+            &filesystem_json.lock().unwrap().clone(),
+        );
+        assert!(!revoked["exports"].granted);
+        assert_eq!(
+            revoked["exports"].path, "",
+            "a revoked root must not keep its path in the shared buffer"
+        );
+
+        drop(sidecar_guard);
     }
 
     fn manifest_with_sidecar(id: &str, port: u16) -> Manifest {
@@ -1383,7 +1513,7 @@ mod tests {
     /// and `control_sidecar` would spawn (or leave running) an instance
     /// using the grant it read *before* the revocation, even though the
     /// on-disk grant is now revoked. `control_sidecar`'s fix takes the same
-    /// per-plugin `runtime_lock_for(id)` that `set_sidecar_grant`
+    /// per-plugin `sidecar_runtime_lock_for(id)` that `set_sidecar_grant`
     /// (via `refresh_sidecar_runtime`) takes, so the two calls can no longer
     /// interleave.
     ///
