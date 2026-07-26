@@ -164,3 +164,8 @@ body {
   margin: 0.4rem 0 0;
   font-weight: 600;
 }
+.capability-pending {
+  color: #8a93a2;
+  font-size: 0.8rem;
+  margin-left: 0.4rem;
+}
