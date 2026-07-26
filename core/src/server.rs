@@ -121,6 +121,7 @@ pub fn handle_rpc(
                             &info.grant_state,
                         ),
                     });
+                    value["sidecars"] = sidecars_result_json(&info.sidecars)["sidecars"].clone();
                     match info.state {
                         crate::plugin::PluginState::Running => {
                             value["state"] = serde_json::json!("running");
@@ -184,6 +185,52 @@ pub fn handle_rpc(
             let (requests, _) = registry.capabilities(plugin).map_err(|e| e.to_string())?;
             Ok(capabilities_result_json(&requests, &grant_state))
         }
+        "plugins/get-sidecars" => {
+            let plugin = param_str(params, "plugin")?;
+            let sidecars = registry.sidecars(plugin).map_err(|e| e.to_string())?;
+            Ok(sidecars_result_json(&sidecars))
+        }
+        "plugins/set-sidecar-config" => {
+            let plugin = param_str(params, "plugin")?;
+            let name = param_str(params, "name")?;
+            let config: crate::plugin::SidecarConfig = serde_json::from_value(
+                params
+                    .get("config")
+                    .cloned()
+                    .ok_or_else(|| "params.config must be an object".to_string())?,
+            )
+            .map_err(|e| format!("params.config is invalid: {e}"))?;
+            let sidecars = registry
+                .set_sidecar_config(plugin, name, &config)
+                .map_err(|e| e.to_string())?;
+            Ok(sidecars_result_json(&sidecars))
+        }
+        "plugins/set-sidecar-grant" => {
+            let plugin = param_str(params, "plugin")?;
+            let name = param_str(params, "name")?;
+            let granted = params
+                .get("granted")
+                .and_then(|v| v.as_bool())
+                .ok_or_else(|| "params.granted must be a bool".to_string())?;
+            let sidecars = registry
+                .set_sidecar_grant(plugin, name, granted)
+                .map_err(|e| e.to_string())?;
+            Ok(sidecars_result_json(&sidecars))
+        }
+        "plugins/sidecar-control" => {
+            let plugin = param_str(params, "plugin")?;
+            let name = param_str(params, "name")?;
+            let action = match param_str(params, "action")? {
+                "start" => crate::plugin::SidecarAction::Start,
+                "stop" => crate::plugin::SidecarAction::Stop,
+                "restart" => crate::plugin::SidecarAction::Restart,
+                other => return Err(format!("unknown action: {other}")),
+            };
+            let sidecars = registry
+                .control_sidecar(plugin, name, action)
+                .map_err(|e| e.to_string())?;
+            Ok(sidecars_result_json(&sidecars))
+        }
         other => Err(format!("unknown method: {other}")),
     }
 }
@@ -199,6 +246,42 @@ fn capabilities_result_json(
         "granted": grant_state.granted,
         "staleGrant": grant_state.stale,
     })
+}
+
+/// `params` から `key` の文字列値を取り出す。無い・文字列でない場合は
+/// `Err`(RPC 層の流儀どおり panic しない)。
+fn param_str<'a>(params: &'a serde_json::Value, key: &str) -> Result<&'a str, String> {
+    params
+        .get(key)
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| format!("params.{key} must be a string"))
+}
+
+/// `get-sidecars` / `set-sidecar-*` / `sidecar-control` の共通 result 形と、
+/// `plugins/list` の各要素の `sidecars` フィールドに使う JSON。
+fn sidecars_result_json(sidecars: &[crate::plugin::SidecarInfo]) -> serde_json::Value {
+    let items: Vec<serde_json::Value> = sidecars
+        .iter()
+        .map(|info| {
+            serde_json::json!({
+                "name": info.request.name,
+                "reason": info.request.reason,
+                "args": info.request.args,
+                "port": info.request.port,
+                "scalable": info.request.scalable,
+                "granted": info.grant.granted,
+                "staleGrant": info.grant.stale,
+                "config": info.config,
+                "instances": info.instances.iter().map(|instance| serde_json::json!({
+                    "index": instance.index,
+                    "port": instance.port,
+                    "state": if instance.running { "running" } else { "exited" },
+                    "exitCode": instance.exit_code,
+                })).collect::<Vec<_>>(),
+            })
+        })
+        .collect();
+    serde_json::json!({ "sidecars": items })
 }
 
 pub fn app(state: ServerState, ui_dir: Option<PathBuf>) -> axum::Router {

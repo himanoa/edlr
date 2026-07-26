@@ -9,7 +9,7 @@ path = "src/bin/edlr.rs"
 
 [dependencies]
 edlr-config = { path = "../config" }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "signal"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.8"
@@ -25,8 +25,10 @@ wasmtime-wasi = "47.0.2"
 url = "2.5.8"
 sha2 = "0.10"
 edlr-driver-http = { path = "../drivers/http" }
+edlr-driver-process = { path = "../drivers/process" }
 
 [dev-dependencies]
 tempfile = "3"
 tokio-tungstenite = "0.26"
 futures-util = "0.3"
+libc = "0.2"

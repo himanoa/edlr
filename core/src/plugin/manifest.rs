@@ -59,6 +59,22 @@ pub enum CapabilityRequest {
     Http { hosts: Vec<String>, reason: String },
 }
 
+/// プラグインが要求するサイドカープロセス 1 件。
+///
+/// **実行ファイルのパス(`command`)はここに書けない** — 必ずユーザーが
+/// UI で入力する。承認画面に出る内容と実際に走るプログラムを、ユーザー自身の
+/// 明示的な指定によって一致させるため。
+#[derive(Debug, Clone, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct SidecarRequest {
+    pub name: String,
+    pub reason: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    pub port: u16,
+    #[serde(default)]
+    pub scalable: bool,
+}
+
 /// `manifest.toml` のパース結果。
 #[derive(Debug, Clone, PartialEq, serde::Deserialize)]
 pub struct Manifest {
@@ -74,6 +90,8 @@ pub struct Manifest {
     pub settings: Vec<SettingField>,
     #[serde(default)]
     pub capabilities: Vec<CapabilityRequest>,
+    #[serde(default, rename = "sidecar")]
+    pub sidecars: Vec<SidecarRequest>,
 }
 
 impl Manifest {
@@ -147,6 +165,32 @@ impl Manifest {
             })
             .collect()
     }
+
+    pub fn sidecar(&self, name: &str) -> Option<&SidecarRequest> {
+        self.sidecars.iter().find(|s| s.name == name)
+    }
+
+    /// サイドカー 1 件の要求内容の安定フィンガープリント(grants の失効判定に使う)。
+    ///
+    /// `capabilities_fingerprint` と同じ長さ接頭辞エンコード + SHA-256。
+    /// **ユーザーが入力する `command` は含めない** — パスの変更は再承認ではなく
+    /// 「設定変更 → 停止 → 次の ensure-started で新パスを起動」として扱うため
+    /// (設計書「付与(grants)」の節を参照)。
+    pub fn sidecar_fingerprint(&self, name: &str) -> Option<String> {
+        let sidecar = self.sidecar(name)?;
+
+        let mut canonical = encode_field("sidecar");
+        canonical.push_str(&encode_field(&sidecar.name));
+        canonical.push_str(&encode_field(&sidecar.reason));
+        canonical.push_str(&encode_field(&sidecar.args.len().to_string()));
+        for arg in &sidecar.args {
+            canonical.push_str(&encode_field(arg));
+        }
+        canonical.push_str(&encode_field(&sidecar.port.to_string()));
+        canonical.push_str(&encode_field(if sidecar.scalable { "1" } else { "0" }));
+
+        Some(sha256_hex(&canonical))
+    }
 }
 
 /// 可変長文字列フィールドを長さ接頭辞方式でエンコードする: `"{byte_len}:{content}"`。
@@ -191,6 +235,8 @@ pub enum ManifestError {
     DuplicateKey,
     /// `capabilities` の内容が不正(host の形式・空リストなど)。
     BadCapability(String),
+    /// `sidecar` の内容が不正(name の形式・重複・reason 空など)。
+    BadSidecar(String),
 }
 
 impl fmt::Display for ManifestError {
@@ -205,6 +251,7 @@ impl fmt::Display for ManifestError {
             ManifestError::MissingEntry => write!(f, "entry file does not exist"),
             ManifestError::DuplicateKey => write!(f, "duplicate settings key"),
             ManifestError::BadCapability(msg) => write!(f, "invalid capability request: {msg}"),
+            ManifestError::BadSidecar(msg) => write!(f, "invalid sidecar request: {msg}"),
         }
     }
 }
@@ -318,6 +365,46 @@ fn validate_capabilities(capabilities: &mut [CapabilityRequest]) -> Result<(), M
     Ok(())
 }
 
+/// `[[sidecar]]` を検証・正規化する。`reason` は `capabilities` と同じく
+/// trim して不可視文字を拒否する(承認画面に出る文字列とフィンガープリントの
+/// 元になる文字列を byte 単位で一致させるため)。
+fn validate_sidecars(sidecars: &mut [SidecarRequest]) -> Result<(), ManifestError> {
+    let mut seen = HashSet::new();
+    for sidecar in sidecars.iter_mut() {
+        if !is_valid_id(&sidecar.name) {
+            return Err(ManifestError::BadSidecar(format!(
+                "sidecar name must match [a-z0-9-]+: {}",
+                sidecar.name
+            )));
+        }
+        if !seen.insert(sidecar.name.clone()) {
+            return Err(ManifestError::BadSidecar(format!(
+                "duplicate sidecar name: {}",
+                sidecar.name
+            )));
+        }
+        if sidecar.port == 0 {
+            return Err(ManifestError::BadSidecar(
+                "sidecar port must be 1..=65535".to_string(),
+            ));
+        }
+
+        let trimmed = sidecar.reason.trim().to_string();
+        if trimmed.is_empty() {
+            return Err(ManifestError::BadSidecar(
+                "sidecar requires a non-empty reason".to_string(),
+            ));
+        }
+        reject_invisible_chars("reason", &trimmed).map_err(ManifestError::BadSidecar)?;
+        sidecar.reason = trimmed;
+
+        for arg in &sidecar.args {
+            reject_invisible_chars("args", arg).map_err(ManifestError::BadSidecar)?;
+        }
+    }
+    Ok(())
+}
+
 /// `dir/manifest.toml` を読み込み、検証して返す。
 ///
 /// 検証エラーは `Err` として返す(panic しない)。呼び出し側は当該プラグインのみ
@@ -349,6 +436,7 @@ pub fn load_manifest(dir: &Path) -> Result<Manifest, ManifestError> {
     }
 
     validate_capabilities(&mut manifest.capabilities)?;
+    validate_sidecars(&mut manifest.sidecars)?;
 
     Ok(manifest)
 }
@@ -857,6 +945,7 @@ reason = ""
                     hosts: hosts.into_iter().map(String::from).collect(),
                     reason: "fetch data".into(),
                 }],
+                sidecars: vec![],
             }
         }
 
@@ -915,6 +1004,7 @@ reason = ""
                 hosts: vec!["https://h1.com".into()],
                 reason: "foo;http|hosts=https://h2.com|reason=bar".into(),
             }],
+            sidecars: vec![],
         };
 
         // Set B: two separate requests that request an additional host
@@ -937,6 +1027,7 @@ reason = ""
                     reason: "bar".into(),
                 },
             ],
+            sidecars: vec![],
         };
 
         let fp_a = set_a
@@ -1006,6 +1097,7 @@ reason = "fetch data"
                     hosts: hosts.into_iter().map(String::from).collect(),
                     reason: reason.to_string(),
                 }],
+                sidecars: vec![],
             }
         }
 
@@ -1134,6 +1226,7 @@ reason = "foo"
                 hosts: vec!["https://api.example.com".to_string()],
                 reason: "fetch data".to_string(),
             }],
+            sidecars: vec![],
         };
 
         let old_style_fingerprint = "0123456789abcdef"; // 16 hex chars, FNV-1a-64 shape
@@ -1178,5 +1271,111 @@ reason = "fetch data"
                 reason: "fetch data".to_string(),
             }
         );
+    }
+
+    fn parse_sidecar_manifest(body: &str) -> Result<Manifest, ManifestError> {
+        let dir = tempfile::tempdir().unwrap();
+        let plugin_dir = dir.path().join("sc-plugin");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        std::fs::write(plugin_dir.join("plugin.wasm"), b"\0asm").unwrap();
+        std::fs::write(
+            plugin_dir.join("manifest.toml"),
+            format!(
+                "id = \"sc-plugin\"\nname = \"SC\"\nversion = \"0.1.0\"\nentry = \"plugin.wasm\"\n{body}"
+            ),
+        )
+        .unwrap();
+        load_manifest(&plugin_dir)
+    }
+
+    #[test]
+    fn sidecar_block_is_parsed() {
+        let manifest = parse_sidecar_manifest(
+            r#"
+[[sidecar]]
+name = "tts"
+reason = "音声合成エンジンをローカルで動かすため"
+args = ["--port", "{port}"]
+port = 50021
+scalable = true
+"#,
+        )
+        .expect("valid sidecar manifest should load");
+
+        assert_eq!(manifest.sidecars.len(), 1);
+        let sidecar = &manifest.sidecars[0];
+        assert_eq!(sidecar.name, "tts");
+        assert_eq!(sidecar.port, 50021);
+        assert!(sidecar.scalable);
+        assert_eq!(
+            sidecar.args,
+            vec!["--port".to_string(), "{port}".to_string()]
+        );
+    }
+
+    #[test]
+    fn scalable_defaults_to_false_and_args_default_to_empty() {
+        let manifest = parse_sidecar_manifest(
+            r#"
+[[sidecar]]
+name = "tts"
+reason = "reason"
+port = 50021
+"#,
+        )
+        .expect("minimal sidecar manifest should load");
+
+        assert!(!manifest.sidecars[0].scalable);
+        assert!(manifest.sidecars[0].args.is_empty());
+    }
+
+    #[test]
+    fn duplicate_sidecar_name_is_rejected() {
+        let err = parse_sidecar_manifest(
+            r#"
+[[sidecar]]
+name = "tts"
+reason = "a"
+port = 50021
+
+[[sidecar]]
+name = "tts"
+reason = "b"
+port = 50030
+"#,
+        )
+        .expect_err("duplicate sidecar names must be rejected");
+        assert!(matches!(err, ManifestError::BadSidecar(_)));
+    }
+
+    #[test]
+    fn bad_sidecar_name_and_empty_reason_are_rejected() {
+        assert!(matches!(
+            parse_sidecar_manifest("[[sidecar]]\nname = \"TTS\"\nreason = \"a\"\nport = 1\n")
+                .expect_err("uppercase name must be rejected"),
+            ManifestError::BadSidecar(_)
+        ));
+        assert!(matches!(
+            parse_sidecar_manifest("[[sidecar]]\nname = \"tts\"\nreason = \"  \"\nport = 1\n")
+                .expect_err("blank reason must be rejected"),
+            ManifestError::BadSidecar(_)
+        ));
+    }
+
+    #[test]
+    fn sidecar_fingerprint_is_stable_and_changes_with_the_request() {
+        let manifest = parse_sidecar_manifest(
+            "[[sidecar]]\nname = \"tts\"\nreason = \"a\"\nargs = [\"--port\", \"{port}\"]\nport = 50021\n",
+        )
+        .unwrap();
+        let first = manifest.sidecar_fingerprint("tts").expect("fingerprint");
+        assert_eq!(first, manifest.sidecar_fingerprint("tts").unwrap());
+        assert_eq!(manifest.sidecar_fingerprint("nope"), None);
+
+        let changed = parse_sidecar_manifest(
+            "[[sidecar]]\nname = \"tts\"\nreason = \"a\"\nargs = [\"--port\", \"{port}\"]\nport = 50022\n",
+        )
+        .unwrap();
+        assert_ne!(first, changed.sidecar_fingerprint("tts").unwrap());
     }
 }

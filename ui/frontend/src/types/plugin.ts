@@ -17,6 +17,36 @@ export interface Capabilities {
   staleGrant: boolean;
 }
 
+export interface SidecarConfig {
+  command: string;
+  args: string[];
+  port: number;
+  replicas: number;
+}
+
+export interface SidecarInstance {
+  index: number;
+  port: number;
+  state: "running" | "exited";
+  exitCode: number | null;
+}
+
+export interface Sidecar {
+  name: string;
+  reason: string;
+  args: string[];
+  port: number;
+  scalable: boolean;
+  granted: boolean;
+  staleGrant: boolean;
+  config: SidecarConfig;
+  instances: SidecarInstance[];
+}
+
+export interface Sidecars {
+  sidecars: Sidecar[];
+}
+
 export interface PluginInfo {
   id: string;
   name: string;
@@ -27,6 +57,7 @@ export interface PluginInfo {
   settings: SettingField[];
   values: Record<string, unknown>;
   capabilities: Capabilities;
+  sidecars: Sidecar[];
 }
 
 export interface PluginsList {

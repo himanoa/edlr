@@ -23,11 +23,25 @@ use bindings::edlr::plugin::driver_http::{
     DriverError as WitDriverError, Host as DriverHttpHost, Request as WitRequest,
     Response as WitResponse,
 };
+use bindings::edlr::plugin::driver_process::{
+    DriverError as WitProcessError, Host as DriverProcessHost, Instance as WitInstance,
+    InstanceState as WitInstanceState,
+};
 use bindings::edlr::plugin::host_log::{Host as HostLogHost, Level as WitLevel};
 use bindings::edlr::plugin::host_settings::Host as HostSettingsHost;
 use bindings::{Event as WitEvent, Plugin as PluginBindings};
 
 use crate::plugin::allowlist::check_url;
+
+/// Public re-exports of the generated `driver-process` WIT types, for the
+/// same reason `driver-http`'s equivalents are re-exported above: in-tree
+/// consumers (unit tests here and, later, integration tests) call
+/// `HostCtx::ensure_started`/`stop`/`status` directly rather than through a
+/// full wasm round-trip.
+pub use bindings::edlr::plugin::driver_process::{
+    DriverError as WitSidecarError, Host as WitDriverProcessHost, Instance as WitSidecarInstance,
+    InstanceState as WitSidecarInstanceState,
+};
 
 /// Public re-exports of the generated `driver-http` WIT types, under names
 /// that don't collide with `edlr_driver_http`'s own (structurally identical
@@ -74,6 +88,20 @@ const _: () = assert!(
 /// header).
 pub const HTTP_MAX_BODY: usize = 8 * 1024 * 1024;
 
+/// サイドカー停止時、SIGTERM から SIGKILL へ昇格するまでの猶予。
+///
+/// 値は `edlr_config::SIDECAR_SHUTDOWN_GRACE_SECS` から取る(ハードコードしない)。
+/// `ui/src-tauri` の `daemon::STOP_GRACE` はこの値(× 想定インスタンス数上限)を
+/// 超えることをコンパイル時アサーションで固定しているため、ここを直接
+/// `Duration::from_secs(3)` のように書き直すと、その関係が経由する共有定数の
+/// 意味が壊れる(2 つの crate の猶予が独立に変更されうる状態に戻ってしまう)。
+pub const SIDECAR_SHUTDOWN_GRACE: Duration =
+    Duration::from_secs(edlr_config::SIDECAR_SHUTDOWN_GRACE_SECS);
+
+/// 同一サイドカーの spawn 試行の最短間隔。プラグインがループで
+/// `ensure-started` を呼んでも spawn 嵐にならないための下限。
+pub const SIDECAR_SPAWN_MIN_INTERVAL: Duration = Duration::from_secs(1);
+
 /// Maximum linear memory (bytes) a single plugin instance may allocate.
 ///
 /// The epoch deadline (see `PluginInstance::CALL_DEADLINE`) bounds how long a
@@ -104,12 +132,15 @@ pub struct HostCtx {
     /// Effective settings JSON string. Wrapped so the runner can swap the
     /// value in place between calls without reloading the plugin.
     pub settings_json: Arc<Mutex<String>>,
-    /// Capability grant state JSON string, shape `{"granted": bool, "hosts":
-    /// ["https://..."]}`. Built by the runner at startup from `GrantsStore` +
-    /// the manifest's requested hosts, and readable/writable live via the
-    /// same `Arc` the `Registry` holds -- so approving/revoking a capability
-    /// takes effect on the very next `driver-http.send` call, no plugin
-    /// restart required.
+    /// Capability grant state JSON string, shape `{"hosts": ["https://..."]}`
+    /// -- the *effective* set of hosts this plugin instance may reach via
+    /// `driver-http.send`. Built by the runner/`Registry` from `GrantsStore`,
+    /// the manifest's requested hosts, and any approved sidecars' implicit
+    /// `127.0.0.1` origins (see `sidecar_runtime::implicit_http_hosts`
+    /// combined together), and readable/writable live via the same `Arc`
+    /// the `Registry` holds -- so approving/revoking a capability takes
+    /// effect on the very next `driver-http.send` call, no plugin restart
+    /// required.
     ///
     /// This is the *only* source the `driver-http` host implementation
     /// consults to decide whether a call is permitted: the guest never
@@ -117,6 +148,10 @@ pub struct HostCtx {
     /// forge or observe another plugin's capability state, nor influence
     /// the decision through its inputs.
     pub capabilities_json: Arc<Mutex<String>>,
+    /// サイドカーの承認状態と実行に必要な値の共有バッファ。形は
+    /// `sidecar_runtime::sidecars_json_string` を参照。`capabilities_json`
+    /// と同じく `Registry` が承認・設定変更のたびに上書きする。
+    pub sidecars_json: Arc<Mutex<String>>,
     /// The HTTP client used by `driver-http.send` once a call has passed
     /// the permission check above. Shared (via `Arc`) across every plugin
     /// instance the owning `PluginHost` loads -- see `PluginHost::new`,
@@ -124,6 +159,11 @@ pub struct HostCtx {
     /// construction cost (TLS setup, etc.) is paid once rather than per
     /// call or per plugin.
     http_driver: Arc<edlr_driver_http::HttpDriver>,
+    /// サイドカープロセスを実際に所有するドライバ。`http_driver` と同様、
+    /// `PluginHost` が 1 つだけ持ち、全プラグインインスタンスで共有する。
+    /// プロセスは `<plugin-id>/<sidecar-name>` をキーに分離されるため、
+    /// 共有していても他プラグインのプロセスには触れられない。
+    process_driver: Arc<edlr_driver_process::ProcessDriver>,
     /// WASI state. The `plugin` world itself does not import WASI, but
     /// components built for the `wasm32-wasip2` target still import a
     /// baseline set of WASI interfaces (io, random, clocks, ...) from the
@@ -140,13 +180,17 @@ impl HostCtx {
         plugin_id: String,
         settings_json: Arc<Mutex<String>>,
         capabilities_json: Arc<Mutex<String>>,
+        sidecars_json: Arc<Mutex<String>>,
         http_driver: Arc<edlr_driver_http::HttpDriver>,
+        process_driver: Arc<edlr_driver_process::ProcessDriver>,
     ) -> HostCtx {
         HostCtx {
             plugin_id,
             settings_json,
             capabilities_json,
+            sidecars_json,
             http_driver,
+            process_driver,
             // Deliberately empty sandbox default: no preopened directories,
             // no stdio, no network access, so a plugin can only interact
             // with the host through the `plugin` world's explicit imports.
@@ -192,48 +236,33 @@ impl HostSettingsHost for HostCtx {
     }
 }
 
-/// Serializes the `capabilities_json` shape (`{"granted": bool, "hosts":
-/// [...]}`) shared between `HostCtx` and `Registry`. `hosts` are only ever
-/// consulted by `driver-http.send` when `granted` is true (see
-/// `DriverHttpHost::send` below), and the ungranted case emits an empty
-/// `hosts` list regardless of what's passed in, so the serialized buffer
-/// itself carries no host information at all while ungranted -- there's
-/// nothing to observe even if some future caller reads `hosts` without
-/// checking `granted` first.
-pub fn capabilities_json_string(granted: bool, hosts: &[String]) -> String {
-    let hosts: &[String] = if granted { hosts } else { &[] };
-    serde_json::to_string(&serde_json::json!({
-        "granted": granted,
-        "hosts": hosts,
-    }))
-    .unwrap_or_else(|_| r#"{"granted":false,"hosts":[]}"#.to_string())
+/// `capabilities_json` の形(`{"hosts": [...]}`)。ここに載るのは
+/// **実効的に許可されたホストだけ**である:
+/// - `[[capabilities]]` の hosts は、その capability が承認済みのときだけ
+/// - 承認済みサイドカーの `http://127.0.0.1:<port>` は常に(暗黙許可)
+///
+/// 呼び出し側(`Registry`)が承認状態を解決してからこの関数に渡すため、
+/// `driver-http.send` は「空なら全部拒否、そうでなければ allowlist 判定」
+/// だけを見ればよい。サイドカーの暗黙許可は http capability の承認とは
+/// 独立に効く(サイドカーだけ承認したプラグインも自分のサイドカーとは
+/// 通信できる)。
+pub fn capabilities_json_string(hosts: &[String]) -> String {
+    serde_json::to_string(&serde_json::json!({ "hosts": hosts }))
+        .unwrap_or_else(|_| r#"{"hosts":[]}"#.to_string())
 }
 
-/// Parsed view of `capabilities_json`, defaulting to "nothing granted" if the
-/// shared buffer somehow holds unparseable or unexpected-shape JSON (this
-/// host implementation never writes such a value, but the field is a shared
-/// `Arc<Mutex<String>>` deliberately parsed defensively rather than trusted).
-struct Capabilities {
-    granted: bool,
-    hosts: Vec<String>,
-}
-
-fn parse_capabilities(raw: &str) -> Capabilities {
+/// `capabilities_json` から許可ホスト一覧だけを取り出す。シリアライズ形式は
+/// `capabilities_json_string` を参照。共有バッファが万一不正な/想定外の
+/// 形の JSON を持っていても(このホスト実装自身はそのような値を書かないが、
+/// `Arc<Mutex<String>>` は防御的にパースする)「何も許可されていない」に
+/// フォールバックする。
+pub(crate) fn parse_capability_hosts(raw: &str) -> Vec<String> {
     let value: serde_json::Value = match serde_json::from_str(raw) {
         Ok(value) => value,
-        Err(_) => {
-            return Capabilities {
-                granted: false,
-                hosts: Vec::new(),
-            }
-        }
+        Err(_) => return Vec::new(),
     };
 
-    let granted = value
-        .get("granted")
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(false);
-    let hosts = value
+    value
         .get("hosts")
         .and_then(serde_json::Value::as_array)
         .map(|hosts| {
@@ -242,9 +271,7 @@ fn parse_capabilities(raw: &str) -> Capabilities {
                 .filter_map(|h| h.as_str().map(str::to_string))
                 .collect()
         })
-        .unwrap_or_default();
-
-    Capabilities { granted, hosts }
+        .unwrap_or_default()
 }
 
 impl DriverHttpHost for HostCtx {
@@ -269,15 +296,13 @@ impl DriverHttpHost for HostCtx {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone();
-        let capabilities = parse_capabilities(&raw);
-
-        if !capabilities.granted {
+        let hosts = parse_capability_hosts(&raw);
+        if hosts.is_empty() {
             return Err(WitDriverError::PermissionDenied(
                 "capability not granted".to_string(),
             ));
         }
-
-        check_url(&capabilities.hosts, &req.url).map_err(WitDriverError::PermissionDenied)?;
+        check_url(&hosts, &req.url).map_err(WitDriverError::PermissionDenied)?;
 
         let driver_request = edlr_driver_http::HttpRequest {
             method: req.method,
@@ -302,6 +327,141 @@ impl DriverHttpHost for HostCtx {
     }
 }
 
+impl HostCtx {
+    /// `sidecars_json` から当該サイドカーの実行仕様を解決する。
+    ///
+    /// 判定順は「manifest に存在するか」→「承認済みか」→「設定済みか」。
+    /// `driver-http.send` と同じく、判定材料は全て `HostCtx` 側にあり、
+    /// ゲストが渡すのはサイドカー名だけ。
+    fn resolve_sidecar(
+        &self,
+        name: &str,
+    ) -> Result<edlr_driver_process::ProcessSpec, WitProcessError> {
+        let raw = self
+            .sidecars_json
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        let entries = crate::plugin::sidecar_runtime::parse_sidecars(&raw);
+
+        let Some(entry) = entries.get(name) else {
+            return Err(WitProcessError::UnknownSidecar(format!(
+                "no such sidecar: {name}"
+            )));
+        };
+        if !entry.granted {
+            return Err(WitProcessError::PermissionDenied(format!(
+                "sidecar not granted: {name}"
+            )));
+        }
+        if entry.command.is_empty() {
+            return Err(WitProcessError::NotConfigured(format!(
+                "sidecar {name} has no executable configured"
+            )));
+        }
+
+        Ok(edlr_driver_process::ProcessSpec {
+            command: std::path::PathBuf::from(&entry.command),
+            args: entry.args.clone(),
+            ports: entry.ports.clone(),
+        })
+    }
+
+    fn sidecar_key(&self, name: &str) -> String {
+        format!("{}/{name}", self.plugin_id)
+    }
+}
+
+fn to_wit_instances(statuses: Vec<edlr_driver_process::InstanceStatus>) -> Vec<WitInstance> {
+    statuses
+        .into_iter()
+        .map(|status| WitInstance {
+            index: status.index,
+            port: status.port,
+            state: if status.running {
+                WitInstanceState::Running
+            } else {
+                WitInstanceState::Exited
+            },
+            exit_code: status.exit_code,
+        })
+        .collect()
+}
+
+impl DriverProcessHost for HostCtx {
+    /// **既知の残存レース(意図的、`Registry::control_sidecar` のドキュメント
+    /// コメント参照)**: `resolve_sidecar` は `sidecars_json` を読んだ
+    /// あと、何のロックも保持せずに `process_driver.ensure_started` を呼ぶ。
+    /// `Registry::control_sidecar`(ホスト起点/RPC 経路)は
+    /// `sidecar_runtime_lock_for(id)` を取ってこの TOCTOU を閉じたが、
+    /// ここ(ゲスト起点の経路)には同じロックを取らせていない: そうすると
+    /// `refresh_sidecar_runtime`(承認取消・設定変更)が同じロックを持って
+    /// `shutdown_grace`(既定 3 秒)まで `stop` を待つ間、この呼び出しをした
+    /// プラグインの専用スレッドがブロックされ、`PluginInstance::
+    /// CALL_DEADLINE`(2 秒)を超えて trap してしまう -- このブランチで
+    /// 繰り返し守ってきた「ゲスト呼び出しをブロックさせない」制約に反する。
+    /// 残るレース窓は「承認取消/設定変更が `sidecars_json` バッファに反映
+    /// されてから、この呼び出しが次にそれを読むまで」の間だけで、次回の
+    /// `ensure-started`/`status` 呼び出しでは新しい状態が見え、既に走って
+    /// しまったインスタンスはホスト側(UI/RPC の `sidecar-control` や
+    /// `set_sidecar_grant`/`set_sidecar_config` 経由の停止)から止められる。
+    fn ensure_started(&mut self, name: String) -> Result<Vec<WitInstance>, WitProcessError> {
+        let spec = self.resolve_sidecar(&name)?;
+        let key = self.sidecar_key(&name);
+        self.process_driver
+            .ensure_started(&key, &spec)
+            .map(to_wit_instances)
+            .map_err(|e| match e {
+                edlr_driver_process::ProcessError::RateLimited(msg) => {
+                    WitProcessError::RateLimited(msg)
+                }
+                edlr_driver_process::ProcessError::Spawn(msg) => WitProcessError::SpawnFailed(msg),
+            })
+    }
+
+    fn stop(&mut self, name: String) -> Result<(), WitProcessError> {
+        // 停止は「承認済みで設定済み」まで解決できなくても許したいが、
+        // 未知の名前は誤りとして返す(承認取消後に自分で止める経路のため、
+        // permission-denied では停止できないと困る)。この非対称性
+        // (`status`/`ensure_started` は `resolve_sidecar` を通るので承認
+        // 取消直後は permission-denied になるが、`stop` は取消後も動く)は
+        // 意図的: 承認を取り消された直後でも、プラグイン自身が起動した
+        // サイドカーを自分で止められる経路は残しておきたい。
+        let key = self.sidecar_key(&name);
+        let raw = self
+            .sidecars_json
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        if !crate::plugin::sidecar_runtime::parse_sidecars(&raw).contains_key(&name) {
+            return Err(WitProcessError::UnknownSidecar(format!(
+                "no such sidecar: {name}"
+            )));
+        }
+        // ゲスト呼び出し向けに fire-and-forget 版を使う: 同期版の `stop` は
+        // SIGTERM 送信から `shutdown_grace`(既定 3 秒)経過後の SIGKILL まで
+        // 呼び出しスレッドをブロックしうるが、これは
+        // `PluginInstance::CALL_DEADLINE`(2 秒)を超え、かつエポック割り込み
+        // はホスト呼び出し中は作動しないため trap もされない -- プラグイン
+        // 専用スレッドが最大 3 秒詰まり、その間のイベントキューが滞留する。
+        // `stop_detached` は「`Child` を detach し `terminating` を立てる」
+        // ところまでを同期的に行ってから返るので、`status`/`ensure_started`
+        // から見た効果(re-spawn 抑止・running=false の報告)は即座に効く。
+        // 実際の kill/wait 待ちだけをバックグラウンドスレッドへ逃がす。
+        // ホスト起点の停止(デーモン shutdown の `stop_all` や、将来
+        // `Registry` が呼ぶ停止)は「戻った時点で確実に死んでいる」ことに
+        // 依存するため、そちらは同期版のままにする。
+        self.process_driver.clone().stop_detached(&key);
+        Ok(())
+    }
+
+    fn status(&mut self, name: String) -> Result<Vec<WitInstance>, WitProcessError> {
+        let spec = self.resolve_sidecar(&name)?;
+        let key = self.sidecar_key(&name);
+        Ok(to_wit_instances(self.process_driver.status(&key, &spec)))
+    }
+}
+
 /// Owns the wasmtime `Engine` and a background thread that periodically
 /// increments the engine's epoch counter, driving epoch-interruption-based
 /// call deadlines for every plugin instance loaded from this host.
@@ -313,6 +473,12 @@ pub struct PluginHost {
     /// constructing a `reqwest::blocking::Client` sets up TLS/connection
     /// pool state that's meant to be reused.
     http_driver: Arc<edlr_driver_http::HttpDriver>,
+    /// The single `ProcessDriver` shared by every plugin instance this host
+    /// loads, mirroring `http_driver` above. Sidecar processes are keyed by
+    /// `<plugin-id>/<sidecar-name>` (see `HostCtx::sidecar_key`), so sharing
+    /// this one driver across all plugins does not let one plugin observe or
+    /// touch another's sidecars.
+    process_driver: Arc<edlr_driver_process::ProcessDriver>,
 }
 
 impl PluginHost {
@@ -337,11 +503,16 @@ impl PluginHost {
             edlr_driver_http::HttpDriver::new(HTTP_TIMEOUT, HTTP_MAX_BODY)
                 .map_err(|e| anyhow::anyhow!("failed to build http driver: {e}"))?,
         );
+        let process_driver = Arc::new(edlr_driver_process::ProcessDriver::new(
+            SIDECAR_SHUTDOWN_GRACE,
+            SIDECAR_SPAWN_MIN_INTERVAL,
+        ));
 
         Ok(PluginHost {
             engine,
             ticker_stop,
             http_driver,
+            process_driver,
         })
     }
 
@@ -350,6 +521,13 @@ impl PluginHost {
     /// build a new HTTP client.
     pub fn http_driver(&self) -> Arc<edlr_driver_http::HttpDriver> {
         self.http_driver.clone()
+    }
+
+    /// Returns a clone of the shared `ProcessDriver` `Arc` for wiring into a
+    /// new plugin's `HostCtx`. Cloning an `Arc` is cheap; this does not spawn
+    /// or otherwise touch any sidecar process.
+    pub fn process_driver(&self) -> Arc<edlr_driver_process::ProcessDriver> {
+        self.process_driver.clone()
     }
 
     pub fn load(&self, wasm_path: &Path, ctx: HostCtx) -> anyhow::Result<PluginInstance> {
@@ -381,6 +559,10 @@ impl PluginHost {
 impl Drop for PluginHost {
     fn drop(&mut self) {
         self.ticker_stop.store(true, Ordering::Relaxed);
+        // 明示 shutdown 経路(daemon 終了時の一括停止など)は Task 6 で配線
+        // する。ここでは「`PluginHost` が消えるときにサイドカーの孤児を
+        // 残さない」という最後の砦として、無条件に全サイドカーを止める。
+        self.process_driver.stop_all();
     }
 }
 
@@ -433,14 +615,15 @@ impl PluginInstance {
 
 #[cfg(test)]
 mod tests {
-    //! Unit tests for `DriverHttpHost::send` called directly against
-    //! `HostCtx`, without going through wasm at all. This is possible (and
-    //! preferable to a full wasm round-trip for exercising the permission
-    //! logic) because the whole point of the design is that the decision is
-    //! made purely from `HostCtx`'s own `capabilities_json`, never from
-    //! anything the guest passes in `req` -- so a host-side call with a
-    //! hand-built `WitRequest` exercises exactly the same decision path a
-    //! real guest call would.
+    //! Unit tests for `DriverHttpHost::send` and `DriverProcessHost::{
+    //! ensure_started, stop, status}` called directly against `HostCtx`,
+    //! without going through wasm at all. This is possible (and preferable
+    //! to a full wasm round-trip for exercising the permission logic)
+    //! because the whole point of the design is that the decision is made
+    //! purely from `HostCtx`'s own `capabilities_json`/`sidecars_json`,
+    //! never from anything the guest passes in as an argument -- so a
+    //! host-side call with a hand-built request exercises exactly the same
+    //! decision path a real guest call would.
     use super::*;
 
     fn test_http_driver() -> Arc<edlr_driver_http::HttpDriver> {
@@ -455,7 +638,12 @@ mod tests {
             "test-plugin".to_string(),
             Arc::new(Mutex::new("{}".to_string())),
             Arc::new(Mutex::new(capabilities_json.to_string())),
+            Arc::new(Mutex::new("[]".to_string())),
             test_http_driver(),
+            Arc::new(edlr_driver_process::ProcessDriver::new(
+                SIDECAR_SHUTDOWN_GRACE,
+                SIDECAR_SPAWN_MIN_INTERVAL,
+            )),
         )
     }
 
@@ -469,49 +657,26 @@ mod tests {
     }
 
     #[test]
-    fn capabilities_json_string_omits_hosts_when_ungranted() {
-        let json = capabilities_json_string(
-            false,
-            &[
-                "https://api.example.com".to_string(),
-                "https://x.com".to_string(),
-            ],
-        );
+    fn capabilities_json_string_carries_the_effective_hosts() {
+        let json = capabilities_json_string(&["https://api.example.com".to_string()]);
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed["granted"], serde_json::json!(false));
-        assert_eq!(parsed["hosts"], serde_json::json!([]));
+        assert_eq!(parsed["hosts"], serde_json::json!(["https://api.example.com"]));
     }
 
     #[test]
-    fn capabilities_json_string_includes_hosts_when_granted() {
-        let json = capabilities_json_string(true, &["https://api.example.com".to_string()]);
-        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed["granted"], serde_json::json!(true));
-        assert_eq!(
-            parsed["hosts"],
-            serde_json::json!(["https://api.example.com"])
-        );
-    }
-
-    #[test]
-    fn send_without_grant_is_permission_denied() {
-        let mut ctx = ctx(&capabilities_json_string(false, &[]));
-
+    fn empty_effective_hosts_means_nothing_is_permitted() {
+        let mut ctx = ctx(&capabilities_json_string(&[]));
         let err = ctx
             .send(request("https://api.example.com/ping"))
-            .expect_err("ungranted call should be rejected");
-
-        assert!(
-            matches!(err, WitDriverError::PermissionDenied(msg) if msg == "capability not granted")
-        );
+            .expect_err("no effective hosts means every call is denied");
+        assert!(matches!(err, WitDriverError::PermissionDenied(_)));
     }
 
     #[test]
     fn send_granted_but_disallowed_host_is_permission_denied() {
-        let mut ctx = ctx(&capabilities_json_string(
-            true,
-            &["https://api.example.com".to_string()],
-        ));
+        let mut ctx = ctx(&capabilities_json_string(&[
+            "https://api.example.com".to_string(),
+        ]));
 
         let err = ctx
             .send(request("https://evil.example.com/ping"))
@@ -536,12 +701,133 @@ mod tests {
         drop(listener);
         let url = format!("http://{addr}/ping");
 
-        let mut ctx = ctx(&capabilities_json_string(true, &[format!("http://{addr}")]));
+        let mut ctx = ctx(&capabilities_json_string(&[format!("http://{addr}")]));
 
         let err = ctx
             .send(request(&url))
             .expect_err("connection to a closed local port should fail");
 
         assert!(matches!(err, WitDriverError::Transport(_)));
+    }
+
+    fn sidecar_ctx(sidecars_json: &str) -> HostCtx {
+        HostCtx::new(
+            "test-plugin".to_string(),
+            Arc::new(Mutex::new("{}".to_string())),
+            Arc::new(Mutex::new(capabilities_json_string(&[]))),
+            Arc::new(Mutex::new(sidecars_json.to_string())),
+            test_http_driver(),
+            Arc::new(edlr_driver_process::ProcessDriver::new(
+                Duration::from_millis(200),
+                Duration::from_secs(1),
+            )),
+        )
+    }
+
+    fn runtime_entry(granted: bool, command: &str) -> crate::plugin::sidecar_runtime::SidecarRuntimeEntry {
+        crate::plugin::sidecar_runtime::SidecarRuntimeEntry {
+            name: "tts".to_string(),
+            granted,
+            command: command.to_string(),
+            args: vec!["-c".to_string(), "sleep 30".to_string()],
+            ports: vec![50201],
+        }
+    }
+
+    #[test]
+    fn ensure_started_without_grant_is_permission_denied() {
+        use crate::plugin::sidecar_runtime::sidecars_json_string;
+        let mut ctx = sidecar_ctx(&sidecars_json_string(&[runtime_entry(false, "/bin/sh")]));
+
+        let err = ctx
+            .ensure_started("tts".to_string())
+            .expect_err("ungranted sidecar must not start");
+        assert!(matches!(err, WitProcessError::PermissionDenied(_)));
+    }
+
+    #[test]
+    fn unknown_sidecar_name_is_reported_as_such() {
+        use crate::plugin::sidecar_runtime::sidecars_json_string;
+        let mut ctx = sidecar_ctx(&sidecars_json_string(&[runtime_entry(true, "/bin/sh")]));
+
+        let err = ctx
+            .ensure_started("nope".to_string())
+            .expect_err("unknown sidecar must be rejected");
+        assert!(matches!(err, WitProcessError::UnknownSidecar(_)));
+    }
+
+    #[test]
+    fn granted_but_unconfigured_command_is_not_configured() {
+        use crate::plugin::sidecar_runtime::sidecars_json_string;
+        let mut ctx = sidecar_ctx(&sidecars_json_string(&[runtime_entry(true, "")]));
+
+        let err = ctx
+            .ensure_started("tts".to_string())
+            .expect_err("an empty command must be reported as not-configured");
+        assert!(matches!(err, WitProcessError::NotConfigured(_)));
+    }
+
+    #[test]
+    fn granted_and_configured_sidecar_starts_and_stops() {
+        use crate::plugin::sidecar_runtime::sidecars_json_string;
+        let mut ctx = sidecar_ctx(&sidecars_json_string(&[runtime_entry(true, "/bin/sh")]));
+
+        let instances = ctx.ensure_started("tts".to_string()).expect("start");
+        assert_eq!(instances.len(), 1);
+        assert_eq!(instances[0].port, 50201);
+        assert!(matches!(instances[0].state, WitInstanceState::Running));
+
+        ctx.stop("tts".to_string()).expect("stop");
+        let after = ctx.status("tts".to_string()).expect("status");
+        assert!(matches!(after[0].state, WitInstanceState::Exited));
+    }
+
+    /// Regression test for a review finding: `DriverProcessHost::stop` used
+    /// to call `ProcessDriver::stop` (the synchronous version), which waits
+    /// out `shutdown_grace` (SIGTERM -> grace -> SIGKILL) on the calling
+    /// thread. Against a sidecar that ignores SIGTERM, that meant the
+    /// guest's `stop` call -- and therefore the plugin's dedicated thread --
+    /// blocked for the full grace period, which can exceed
+    /// `PluginInstance::CALL_DEADLINE` and stalls that plugin's event queue
+    /// in the meantime. `stop` must now return promptly regardless of how
+    /// long the sidecar takes to actually die (see `stop`'s doc comment and
+    /// `ProcessDriver::stop_detached`).
+    #[test]
+    fn stop_returns_promptly_even_when_the_sidecar_ignores_sigterm() {
+        use crate::plugin::sidecar_runtime::{sidecars_json_string, SidecarRuntimeEntry};
+
+        let sidecars_json = sidecars_json_string(&[SidecarRuntimeEntry {
+            name: "tts".to_string(),
+            granted: true,
+            command: "/bin/sh".to_string(),
+            args: vec!["-c".to_string(), "trap '' TERM; sleep 30".to_string()],
+            ports: vec![50202],
+        }]);
+        let mut ctx = HostCtx::new(
+            "test-plugin".to_string(),
+            Arc::new(Mutex::new("{}".to_string())),
+            Arc::new(Mutex::new(capabilities_json_string(&[]))),
+            Arc::new(Mutex::new(sidecars_json)),
+            test_http_driver(),
+            // A grace period long enough that waiting it out synchronously
+            // would trivially blow past both the assertion below and
+            // `PluginInstance::CALL_DEADLINE`.
+            Arc::new(edlr_driver_process::ProcessDriver::new(
+                Duration::from_secs(2),
+                Duration::from_secs(1),
+            )),
+        );
+
+        ctx.ensure_started("tts".to_string()).expect("start");
+
+        let started = std::time::Instant::now();
+        ctx.stop("tts".to_string()).expect("stop");
+        let elapsed = started.elapsed();
+
+        assert!(
+            elapsed < Duration::from_millis(500),
+            "guest-facing stop() must not wait out the sidecar's shutdown \
+             grace period; took {elapsed:?}"
+        );
     }
 }

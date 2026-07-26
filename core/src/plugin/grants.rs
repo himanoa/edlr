@@ -47,8 +47,21 @@ impl fmt::Display for GrantsError {
 impl std::error::Error for GrantsError {}
 
 /// ディスクに保存された grant のパース結果。
-#[derive(Debug, serde::Deserialize, serde::Serialize)]
+#[derive(Debug, Default, serde::Deserialize, serde::Serialize)]
 struct SavedGrant {
+    #[serde(default)]
+    granted: bool,
+    #[serde(default)]
+    fingerprint: String,
+    /// サイドカー名 → その 1 件の承認状態。既存(サイドカー導入前)の
+    /// grant ファイルにはこのキーが無いため `default` で空マップになる。
+    #[serde(default)]
+    sidecars: std::collections::BTreeMap<String, SavedSidecarGrant>,
+}
+
+/// サイドカー 1 件分の保存済み承認状態。
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+struct SavedSidecarGrant {
     granted: bool,
     fingerprint: String,
 }
@@ -129,21 +142,91 @@ impl GrantsStore {
             });
         };
 
-        let saved = SavedGrant {
-            granted,
-            fingerprint: current_fingerprint,
-        };
+        let mut saved = self.read_saved(manifest).unwrap_or_default();
+        saved.granted = granted;
+        saved.fingerprint = current_fingerprint;
+        self.write_saved(manifest, &saved)?;
 
+        Ok(self.state_locked(manifest))
+    }
+
+    /// `SavedGrant` 全体を原子的に書き込む(呼び出し元が `self.lock` 保持済み)。
+    fn write_saved(&self, manifest: &Manifest, saved: &SavedGrant) -> Result<(), GrantsError> {
         fs::create_dir_all(&self.dir).map_err(GrantsError::Io)?;
-        let serialized = serde_json::to_string_pretty(&saved).map_err(GrantsError::Serialize)?;
+        let serialized = serde_json::to_string_pretty(saved).map_err(GrantsError::Serialize)?;
         let target = self.path_for(manifest);
         let tmp_path = self
             .dir
             .join(format!("{}.json.tmp.{}", manifest.id, std::process::id()));
         fs::write(&tmp_path, serialized).map_err(GrantsError::Io)?;
-        fs::rename(&tmp_path, &target).map_err(GrantsError::Io)?;
+        fs::rename(&tmp_path, &target).map_err(GrantsError::Io)
+    }
 
-        Ok(self.state_locked(manifest))
+    /// サイドカー 1 件の承認状態。判定規則は `state()` と同じ
+    /// (未保存 → 未承認 / fingerprint 不一致 → stale / 一致 → 保存値)。
+    pub fn sidecar_state(&self, manifest: &Manifest, name: &str) -> GrantState {
+        let _guard = self.lock.lock().unwrap_or_else(|p| p.into_inner());
+        self.sidecar_state_locked(manifest, name)
+    }
+
+    fn sidecar_state_locked(&self, manifest: &Manifest, name: &str) -> GrantState {
+        let Some(current) = manifest.sidecar_fingerprint(name) else {
+            return GrantState {
+                granted: false,
+                stale: false,
+            };
+        };
+        let Some(saved) = self.read_saved(manifest) else {
+            return GrantState {
+                granted: false,
+                stale: false,
+            };
+        };
+        let Some(entry) = saved.sidecars.get(name) else {
+            return GrantState {
+                granted: false,
+                stale: false,
+            };
+        };
+        if entry.fingerprint != current {
+            return GrantState {
+                granted: false,
+                stale: true,
+            };
+        }
+        GrantState {
+            granted: entry.granted,
+            stale: false,
+        }
+    }
+
+    /// サイドカー 1 件の承認/取消を保存する。manifest にない `name` は no-op。
+    pub fn set_sidecar(
+        &self,
+        manifest: &Manifest,
+        name: &str,
+        granted: bool,
+    ) -> Result<GrantState, GrantsError> {
+        let _guard = self.lock.lock().unwrap_or_else(|p| p.into_inner());
+
+        let Some(current) = manifest.sidecar_fingerprint(name) else {
+            return Ok(GrantState {
+                granted: false,
+                stale: false,
+            });
+        };
+
+        let mut saved = self.read_saved(manifest).unwrap_or_default();
+        saved.sidecars.insert(
+            name.to_string(),
+            SavedSidecarGrant {
+                granted,
+                fingerprint: current,
+            },
+        );
+        self.write_saved(manifest, &saved)?;
+
+        Ok(self.sidecar_state_locked(manifest, name))
     }
 }
 
@@ -165,6 +248,7 @@ mod tests {
                 hosts: hosts.into_iter().map(String::from).collect(),
                 reason: "fetch data".into(),
             }],
+            sidecars: vec![],
         }
     }
 
@@ -178,6 +262,7 @@ mod tests {
             events: vec![],
             settings: vec![],
             capabilities: vec![],
+            sidecars: vec![],
         }
     }
 
@@ -380,6 +465,137 @@ mod tests {
         );
 
         assert!(!dir.join("no-cap-plugin.json").exists());
+    }
+
+    fn manifest_with_sidecar(port: u16) -> Manifest {
+        Manifest {
+            id: "sc-plugin".into(),
+            name: "SC".into(),
+            version: "0.1.0".into(),
+            description: String::new(),
+            entry: "plugin.wasm".into(),
+            events: vec![],
+            settings: vec![],
+            capabilities: vec![],
+            sidecars: vec![crate::plugin::manifest::SidecarRequest {
+                name: "tts".into(),
+                reason: "reason".into(),
+                args: vec!["--port".into(), "{port}".into()],
+                port,
+                scalable: true,
+            }],
+        }
+    }
+
+    #[test]
+    fn sidecar_grant_defaults_to_ungranted_and_persists_per_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = GrantsStore::new(tmp.path().join("grants"));
+        let manifest = manifest_with_sidecar(50021);
+
+        assert_eq!(
+            store.sidecar_state(&manifest, "tts"),
+            GrantState { granted: false, stale: false }
+        );
+
+        let state = store
+            .set_sidecar(&manifest, "tts", true)
+            .expect("grant should succeed");
+        assert_eq!(state, GrantState { granted: true, stale: false });
+        assert_eq!(
+            store.sidecar_state(&manifest, "tts"),
+            GrantState { granted: true, stale: false }
+        );
+    }
+
+    #[test]
+    fn changed_sidecar_request_makes_the_grant_stale() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = GrantsStore::new(tmp.path().join("grants"));
+        let manifest = manifest_with_sidecar(50021);
+        store.set_sidecar(&manifest, "tts", true).unwrap();
+
+        let changed = manifest_with_sidecar(50099);
+        assert_eq!(
+            store.sidecar_state(&changed, "tts"),
+            GrantState { granted: false, stale: true }
+        );
+    }
+
+    #[test]
+    fn sidecar_grant_and_http_grant_are_independent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = GrantsStore::new(tmp.path().join("grants"));
+        let mut manifest = manifest_with_sidecar(50021);
+        manifest.capabilities = vec![CapabilityRequest::Http {
+            hosts: vec!["https://api.example.com".into()],
+            reason: "fetch".into(),
+        }];
+
+        store.set_sidecar(&manifest, "tts", true).unwrap();
+        assert!(store.sidecar_state(&manifest, "tts").granted);
+        assert!(
+            !store.state(&manifest).granted,
+            "granting a sidecar must not grant the http capability"
+        );
+
+        store.set(&manifest, true).unwrap();
+        assert!(store.state(&manifest).granted);
+        assert!(
+            store.sidecar_state(&manifest, "tts").granted,
+            "granting http must not clobber the sidecar grant"
+        );
+    }
+
+    #[test]
+    fn unknown_sidecar_name_is_never_granted() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = GrantsStore::new(tmp.path().join("grants"));
+        let manifest = manifest_with_sidecar(50021);
+
+        assert_eq!(
+            store.sidecar_state(&manifest, "nope"),
+            GrantState { granted: false, stale: false }
+        );
+        let state = store
+            .set_sidecar(&manifest, "nope", true)
+            .expect("set on an unknown sidecar is a no-op, not an error");
+        assert_eq!(state, GrantState { granted: false, stale: false });
+    }
+
+    /// Minor(最終レビュー指摘): 壊れた grants JSON がディスクにある状態で
+    /// `sidecar_state`/`set_sidecar` を呼んでも fail-closed(未承認扱い)の
+    /// まま動くことを固定する回帰テスト。`state`/`set` 側には既に
+    /// `broken_json_is_treated_as_unsaved` があるが、サイドカー単位の
+    /// `sidecar_state`/`set_sidecar` には同等のテストが無かった。
+    #[test]
+    fn broken_grants_json_is_treated_as_unsaved_for_sidecar_state_and_set_sidecar() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("grants");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("sc-plugin.json"), "not valid json {{{").unwrap();
+
+        let store = GrantsStore::new(dir);
+        let manifest = manifest_with_sidecar(50021);
+
+        // 壊れたファイルは「未承認」扱い(stale でもない -- fail-closed だが
+        // 「保存されているが不一致」とは違う無害な扱い)。
+        assert_eq!(
+            store.sidecar_state(&manifest, "tts"),
+            GrantState { granted: false, stale: false },
+            "broken grants JSON must fail closed as ungranted, not panic or resurrect a grant"
+        );
+
+        // `set_sidecar` は壊れたファイルの上に安全に新しい状態を書ける
+        // (`read_saved` が `None` を返すので `unwrap_or_default` から出発する)。
+        let state = store
+            .set_sidecar(&manifest, "tts", true)
+            .expect("set_sidecar must recover from a broken grants file, not fail or panic");
+        assert_eq!(state, GrantState { granted: true, stale: false });
+        assert_eq!(
+            store.sidecar_state(&manifest, "tts"),
+            GrantState { granted: true, stale: false }
+        );
     }
 
     #[test]

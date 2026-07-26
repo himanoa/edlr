@@ -46,6 +46,8 @@ use crate::plugin::host::{capabilities_json_string, HostCtx, PluginHost};
 use crate::plugin::manifest::{load_manifest, matches_event};
 use crate::plugin::registry::{PluginEntry, PluginState, Registry};
 use crate::plugin::settings::SettingsStore;
+use crate::plugin::sidecar::{assign_ports, SidecarConfig, SidecarConfigStore};
+use crate::plugin::sidecar_runtime::{implicit_http_hosts, sidecars_json_string, SidecarRuntimeEntry};
 use crate::plugin::Manifest;
 use crate::router::Router;
 
@@ -53,9 +55,15 @@ use crate::router::Router;
 ///
 /// 戻り値の `Registry` は起動直後から `snapshot` 可能(= 各プラグインの
 /// `load`/`init` 結果が確定した後に返る)。
+///
+/// **起動時にサイドカーを自動 spawn することはない**: ここで組み立てる
+/// `sidecars_json`/`capabilities_json` はあくまで承認・設定状態のスナップ
+/// ショットで、実プロセスの起動はプラグイン自身の `ensure-started` 呼び出し
+/// か、ユーザー操作(`Registry::control_sidecar`)を経て初めて行われる。
 pub fn start_plugins(
     plugins_dir: &Path,
     settings_store: SettingsStore,
+    sidecar_config_store: SidecarConfigStore,
     grants_store: GrantsStore,
     router: &Router,
     host: PluginHost,
@@ -63,10 +71,14 @@ pub fn start_plugins(
     let host = Arc::new(host);
     let settings_store = Arc::new(settings_store);
     let grants_store = Arc::new(grants_store);
+    let sidecar_config_store = Arc::new(sidecar_config_store);
+    let process_driver = host.process_driver();
     let registry = Registry::new(
         host.clone(),
         settings_store.clone(),
         grants_store.clone(),
+        sidecar_config_store.clone(),
+        process_driver,
         plugins_dir.to_path_buf(),
     );
 
@@ -104,6 +116,7 @@ pub fn start_plugins(
             &path,
             &settings_store,
             &grants_store,
+            &sidecar_config_store,
             router,
             &host,
             &registry,
@@ -121,6 +134,7 @@ fn load_and_run_plugin(
     dir: &Path,
     settings_store: &SettingsStore,
     grants_store: &GrantsStore,
+    sidecar_config_store: &SidecarConfigStore,
     router: &Router,
     host: &Arc<PluginHost>,
     registry: &Registry,
@@ -132,8 +146,44 @@ fn load_and_run_plugin(
     let settings_json = Arc::new(Mutex::new(settings_json_string));
 
     let grant_state = grants_store.state(manifest);
-    let initial_capabilities_json =
-        capabilities_json_string(grant_state.granted, &manifest.capability_hosts());
+
+    // サイドカー 1 件ずつの設定(`SidecarConfigStore`)・承認
+    // (`GrantsStore::sidecar_state`)を解決して `SidecarRuntimeEntry` に
+    // まとめる。これは `Registry::refresh_sidecar_runtime` が承認・設定変更
+    // のたびに作り直すのと同じ組み立て方(見た目の重複はあるが、あちらは
+    // `Registry` 経由の更新用、こちらは起動直後の初期値用で、依存する
+    // ライフサイクルの起点が異なるため 1 箇所に共通化はしていない)。
+    let sidecar_configs = sidecar_config_store.effective(manifest);
+    let sidecar_entries: Vec<SidecarRuntimeEntry> = manifest
+        .sidecars
+        .iter()
+        .map(|request| {
+            let config = sidecar_configs
+                .get(&request.name)
+                .cloned()
+                .unwrap_or_else(|| SidecarConfig::from_request(request));
+            let granted = grants_store.sidecar_state(manifest, &request.name).granted;
+            SidecarRuntimeEntry {
+                name: request.name.clone(),
+                granted,
+                command: config.command.clone(),
+                args: config.args.clone(),
+                ports: assign_ports(&config),
+            }
+        })
+        .collect();
+    let sidecars_json = Arc::new(Mutex::new(sidecars_json_string(&sidecar_entries)));
+
+    // http capability の承認済み hosts と、承認済みサイドカーの暗黙許可を
+    // 合流させる(`capabilities_json` に載るのは実効的に許可されたホストの
+    // みで、サイドカーの暗黙許可は http capability の承認とは独立に効く)。
+    let mut initial_hosts = if grant_state.granted {
+        manifest.capability_hosts()
+    } else {
+        Vec::new()
+    };
+    initial_hosts.extend(implicit_http_hosts(&sidecar_entries));
+    let initial_capabilities_json = capabilities_json_string(&initial_hosts);
     let capabilities_json = Arc::new(Mutex::new(initial_capabilities_json));
 
     let (events_tx, events_rx) = std_mpsc::sync_channel::<Arc<Event>>(PLUGIN_EVENT_QUEUE_CAPACITY);
@@ -144,6 +194,7 @@ fn load_and_run_plugin(
         let manifest = manifest.clone();
         let settings_json = settings_json.clone();
         let capabilities_json = capabilities_json.clone();
+        let sidecars_json = sidecars_json.clone();
         let registry = registry.clone();
         move || {
             run_plugin_thread(
@@ -152,6 +203,7 @@ fn load_and_run_plugin(
                 entry_path,
                 settings_json,
                 capabilities_json,
+                sidecars_json,
                 registry,
                 events_rx,
                 ready_tx,
@@ -169,6 +221,7 @@ fn load_and_run_plugin(
         state,
         settings_json,
         capabilities_json,
+        sidecars_json,
     });
 
     if running {
@@ -187,6 +240,7 @@ fn run_plugin_thread(
     entry_path: PathBuf,
     settings_json: Arc<Mutex<String>>,
     capabilities_json: Arc<Mutex<String>>,
+    sidecars_json: Arc<Mutex<String>>,
     registry: Registry,
     events_rx: std_mpsc::Receiver<Arc<Event>>,
     ready_tx: std_mpsc::Sender<PluginState>,
@@ -195,7 +249,9 @@ fn run_plugin_thread(
         manifest.id.clone(),
         settings_json,
         capabilities_json,
+        sidecars_json,
         host.http_driver(),
+        host.process_driver(),
     );
     let mut instance = match host.load(&entry_path, ctx) {
         Ok(instance) => instance,
@@ -322,6 +378,7 @@ mod tests {
             events: vec!["*".to_string()],
             settings: vec![],
             capabilities: vec![],
+            sidecars: vec![],
         }
     }
 

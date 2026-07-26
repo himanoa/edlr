@@ -99,13 +99,16 @@ struct AppState {
     env_journal_dir: Option<PathBuf>,
 }
 
-/// デーモンを停止して回収する。`Child::kill()`(SIGKILL)を呼ぶ唯一の場所。
+/// デーモンを停止して回収する。
 ///
-/// 将来サイドカーを導入する際は、ここだけを SIGTERM + プロセスグループ化へ
-/// 差し替えれば済むようにしてある(設計書「スコープ外」の前提条件を参照)。
+/// SIGTERM を送って `daemon::STOP_GRACE` 待ち、デーモンが自ら
+/// `stop_all_sidecars` を終えて終了する猶予を与える。それでも死ななければ
+/// `Child::kill()`(SIGKILL)にフォールバックする。デーモン側に
+/// SIGTERM/SIGINT ハンドラを足す前は、ここが無条件に `Child::kill()` を
+/// 呼んでいたため、デーモンが後始末する隙もなく即死し、稼働中のサイドカーが
+/// 孤児として残っていた(Critical: 最終レビューで見つかった取りこぼし)。
 fn stop_child(child: &mut std::process::Child) {
-    let _ = child.kill();
-    let _ = child.wait();
+    daemon::stop_child_gracefully(child, daemon::STOP_GRACE);
 }
 
 /// 保持しているデーモンを停止し、`journal_dir` で再 spawn する。
@@ -268,6 +271,18 @@ async fn pick_journal_dir(app: tauri::AppHandle) -> Option<String> {
     rx.await.ok().flatten().map(|path| path.to_string())
 }
 
+/// ネイティブのファイル選択ダイアログを開く(サイドカーの実行ファイル用)。
+/// キャンセル時は None。
+#[tauri::command]
+async fn pick_executable(app: tauri::AppHandle) -> Option<String> {
+    use tauri_plugin_dialog::DialogExt;
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    app.dialog().file().pick_file(move |picked| {
+        let _ = tx.send(picked);
+    });
+    rx.await.ok().flatten().map(|path| path.to_string())
+}
+
 fn main() {
     // ウィンドウを出してフロントエンドを表示する薄い皮 + デーモンの道連れ起動。
     // 既に起動済みのデーモンには spawn も kill もしない。
@@ -305,7 +320,8 @@ fn main() {
             get_config,
             set_journal_dir,
             clear_journal_dir,
-            pick_journal_dir
+            pick_journal_dir,
+            pick_executable
         ])
         .build(tauri::generate_context!())
     {

@@ -1,0 +1,83 @@
+id = "inara-uploader"
+name = "INARA Uploader"
+version = "0.1.0"
+description = "Journal イベントを INARA (inara.cz) へアップロードする"
+entry = "plugin.wasm"
+
+# 変換対象の Journal イベント。ここに無いイベントはプラグインへ届かない。
+events = [
+  "Commander",
+  "LoadGame",
+  "FSDJump",
+  "CarrierJump",
+  "Docked",
+  "Location",
+  "Rank",
+  "Progress",
+  "Reputation",
+  "EngineerProgress",
+  "Materials",
+  "Statistics",
+  "Died",
+  "Shutdown",
+]
+
+[[capabilities]]
+kind = "http"
+hosts = ["https://inara.cz"]
+reason = "Journal イベントを INARA の API へアップロードするため"
+
+[[settings]]
+key = "enabled"
+label = "有効"
+type = "boolean"
+default = true
+
+# 注意: 設定値は <settings-dir>/inara-uploader.json に平文で保存され、
+# Plugins 画面でもそのまま表示される(マスクされない)。
+[[settings]]
+key = "apiKey"
+label = "INARA API キー"
+type = "string"
+default = ""
+
+# 空ならプラグインが Journal の LoadGame / Commander から学習する。
+[[settings]]
+key = "commanderName"
+label = "コマンダー名(空なら Journal から自動取得)"
+type = "string"
+default = ""
+
+# INARA 側で「開発中のクライアント」として扱わせるフラグ。動作確認が
+# 済むまでは true のままにしておくこと。
+[[settings]]
+key = "isBeingDeveloped"
+label = "開発モードで送信する"
+type = "boolean"
+default = true
+
+[[settings]]
+key = "batchSize"
+label = "まとめて送るイベント数"
+type = "number"
+default = 10
+
+[[settings]]
+key = "minIntervalSeconds"
+label = "送信の最短間隔(秒)"
+type = "number"
+default = 60
+
+# デーモン再起動時、edlr は現行 Journal を先頭から読み直す。既定 (false) では
+# プラグイン起動より前のイベントを送らないことで二重送信を避ける。
+[[settings]]
+key = "uploadHistorical"
+label = "起動前のイベントも送る(二重送信の恐れあり)"
+type = "boolean"
+default = false
+
+[[settings]]
+key = "dryRun"
+label = "送信せずログに出すだけ"
+type = "boolean"
+default = false

@@ -19,6 +19,7 @@ function makePlugin(overrides: Partial<PluginInfo> = {}): PluginInfo {
     ],
     values: { enabled: true, endpoint: "http://localhost", volume: 80, voice: "Amber" },
     capabilities: { requests: [], granted: false, staleGrant: false },
+    sidecars: [],
     ...overrides,
   };
 }

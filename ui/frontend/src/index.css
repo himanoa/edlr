@@ -169,3 +169,50 @@ body {
   font-size: 0.8rem;
   margin-left: 0.4rem;
 }
+.sidecar-section {
+  margin-top: 0.75rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid #2b313b;
+}
+.sidecar-card {
+  border: 1px solid #2b313b;
+  border-radius: 6px;
+  padding: 0.75rem 1rem;
+  margin-bottom: 0.75rem;
+}
+.sidecar-card legend {
+  padding: 0 0.4rem;
+  color: #7fb3d8;
+  font-weight: 600;
+}
+.sidecar-reason {
+  color: #8a93a2;
+  font-size: 0.85rem;
+  margin: 0 0 0.5rem;
+}
+.sidecar-card textarea {
+  background: #14171c;
+  border: 1px solid #2b313b;
+  color: inherit;
+  padding: 0.3rem 0.5rem;
+  border-radius: 4px;
+  width: 14rem;
+  min-height: 3.5rem;
+  font-family: ui-monospace, monospace;
+}
+.sidecar-grant-toggle {
+  margin-top: 0.5rem;
+}
+.sidecar-instances {
+  list-style: none;
+  margin: 0.5rem 0;
+  padding: 0;
+  font-size: 0.85rem;
+  font-family: ui-monospace, monospace;
+  color: #8a93a2;
+}
+.sidecar-controls {
+  display: flex;
+  gap: 0.5rem;
+  margin-top: 0.5rem;
+}

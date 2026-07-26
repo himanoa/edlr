@@ -1,0 +1,4 @@
+# ビルド成果物
+plugin.wasm
+# build.sh が組み立てる WIT オーバーレイ
+build/
