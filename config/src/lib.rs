@@ -20,20 +20,7 @@ pub fn default_config_subdir(home: &Path, sub: &str) -> PathBuf {
     home.join(".config").join("edlr").join(sub)
 }
 
-/// `edlr` の設定サブディレクトリの実際の解決ロジック(`$XDG_CONFIG_HOME` 込み)。
-///
-/// `std::env::var_os` はプロセス全体の環境を読むため、環境変数の読み出しは
-/// 呼び出し元(`edlr` バイナリの `main`)で行い、結果をここへ `Option<&Path>` として
-/// 渡すことで本関数自体はユニットテスト可能な純粋関数のままにしている。
-///
-/// 解決順序:
-/// 1. `xdg_config_home` が `Some` かつ空文字列でなければそれを設定ベースとして使う
-///    (相対パスであっても特に検証はせずそのまま使う。絶対パスへの正規化はしない)
-/// 2. そうでなければ `home` があれば `<home>/.config` を設定ベースとする
-/// 3. `home` も `None` なら `.`(カレントディレクトリ)を設定ベースとする
-///
-/// いずれの場合も最終的に `<base>/edlr/<sub>` を返す。
-/// 設定ベースディレクトリ(`<base>/edlr`)を解決する。
+/// 設定ベースディレクトリ(`<base>/edlr`)を解決する内部ヘルパー。
 /// `config_subdir` と `config_file_path` が共有する。
 fn config_base(xdg_config_home: Option<&Path>, home: Option<&Path>) -> PathBuf {
     match xdg_config_home {
@@ -47,6 +34,19 @@ fn config_base(xdg_config_home: Option<&Path>, home: Option<&Path>) -> PathBuf {
     }
 }
 
+/// `edlr` の設定サブディレクトリの実際の解決ロジック(`$XDG_CONFIG_HOME` 込み)。
+///
+/// `std::env::var_os` はプロセス全体の環境を読むため、環境変数の読み出しは
+/// 呼び出し元(`edlr` バイナリの `main`)で行い、結果をここへ `Option<&Path>` として
+/// 渡すことで本関数自体はユニットテスト可能な純粋関数のままにしている。
+///
+/// 解決順序:
+/// 1. `xdg_config_home` が `Some` かつ空文字列でなければそれを設定ベースとして使う
+///    (相対パスであっても特に検証はせずそのまま使う。絶対パスへの正規化はしない)
+/// 2. そうでなければ `home` があれば `<home>/.config` を設定ベースとする
+/// 3. `home` も `None` なら `.`(カレントディレクトリ)を設定ベースとする
+///
+/// いずれの場合も最終的に `<base>/edlr/<sub>` を返す。
 pub fn config_subdir(xdg_config_home: Option<&Path>, home: Option<&Path>, sub: &str) -> PathBuf {
     config_base(xdg_config_home, home).join(sub)
 }
