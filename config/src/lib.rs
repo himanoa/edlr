@@ -64,6 +64,19 @@ fn config_base(xdg_config_home: Option<&Path>, home: Option<&Path>) -> PathBuf {
     }
 }
 
+/// 状態ファイルの置き場所 `<base>/edlr` を解決する。
+///
+/// XDG 的に「状態」(再作成できるが消えると不便なもの)は config ではなく
+/// state に置く。`$XDG_STATE_HOME` が無ければ `~/.local/state`。
+pub fn state_base(xdg_state_home: Option<&Path>, home: Option<&Path>) -> PathBuf {
+    let base = match (xdg_state_home, home) {
+        (Some(state_home), _) => state_home.to_path_buf(),
+        (None, Some(home)) => home.join(".local").join("state"),
+        (None, None) => PathBuf::from(".local").join("state"),
+    };
+    base.join("edlr")
+}
+
 /// `edlr` の設定サブディレクトリの実際の解決ロジック(`$XDG_CONFIG_HOME` 込み)。
 ///
 /// `std::env::var_os` はプロセス全体の環境を読むため、環境変数の読み出しは
@@ -298,6 +311,25 @@ mod tests {
 
         assert!(path.is_file());
         assert_eq!(AppConfig::load(&path).unwrap(), config);
+    }
+
+    #[test]
+    fn state_base_prefers_xdg_state_home() {
+        let base = state_base(Some(Path::new("/x/state")), Some(Path::new("/home/u")));
+        assert_eq!(base, Path::new("/x/state/edlr"));
+    }
+
+    #[test]
+    fn state_base_falls_back_to_local_state_under_home() {
+        let base = state_base(None, Some(Path::new("/home/u")));
+        assert_eq!(base, Path::new("/home/u/.local/state/edlr"));
+    }
+
+    #[test]
+    fn state_base_without_home_is_relative_to_the_current_directory() {
+        // HOME も XDG_STATE_HOME も無い環境でも panic しない。
+        let base = state_base(None, None);
+        assert!(base.ends_with("edlr"));
     }
 
     #[test]
