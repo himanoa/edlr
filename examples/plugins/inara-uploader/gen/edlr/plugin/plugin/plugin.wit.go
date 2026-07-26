@@ -17,16 +17,17 @@ import (
 //		replay: bool,
 //	}
 type Event struct {
-	_    cm.HostLayout `json:"-"`
-	Kind string        `json:"kind"`
-
+	_ cm.HostLayout `json:"-"`
 	// "journal" | "status"
+	Kind      string            `json:"kind"`
 	Timestamp cm.Option[string] `json:"timestamp"`
-	Name      cm.Option[string] `json:"name"`
 
 	// journal イベント名
-	PayloadJSON string `json:"payload-json"`
+	Name cm.Option[string] `json:"name"`
 
 	// raw JSON
+	PayloadJSON string `json:"payload-json"`
+
+	// デーモンが動き出す前に既に書かれていたイベント
 	Replay bool `json:"replay"`
 }

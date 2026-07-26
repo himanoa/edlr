@@ -9,17 +9,21 @@ import (
 
 // Entry represents the record "edlr:plugin/driver-fs@0.2.0#entry".
 //
+// 行末コメントは使わない。wit-bindgen-go が各コメントを「次のフィールド」に
+// 付けてしまい、生成物のコメントが 1 つずつずれるため(下も同じ)。
+//
 //	record entry {
 //		path: string,
 //		size: u64,
 //		modified: option<u64>,
 //	}
 type Entry struct {
-	_    cm.HostLayout `json:"-"`
-	Path string        `json:"path"`
-
+	_ cm.HostLayout `json:"-"`
 	// ルートからの相対パス
-	Size     uint64            `json:"size"`
+	Path string `json:"path"`
+	Size uint64 `json:"size"`
+
+	// Unix epoch 秒。取得できなければ none
 	Modified cm.Option[uint64] `json:"modified"`
 }
 
@@ -37,6 +41,8 @@ type Entry struct {
 type DriverError cm.Variant[uint8, string, string]
 
 // DriverErrorPermissionDenied returns a [DriverError] of case "permission-denied".
+//
+// 未承認 / mode 違反
 func DriverErrorPermissionDenied(data string) DriverError {
 	return cm.New[DriverError](0, data)
 }
@@ -48,7 +54,7 @@ func (self *DriverError) PermissionDenied() *string {
 
 // DriverErrorNotConfigured returns a [DriverError] of case "not-configured".
 //
-// 未承認 / mode 違反
+// ディレクトリ未設定
 func DriverErrorNotConfigured(data string) DriverError {
 	return cm.New[DriverError](1, data)
 }
@@ -60,7 +66,7 @@ func (self *DriverError) NotConfigured() *string {
 
 // DriverErrorUnknownRoot returns a [DriverError] of case "unknown-root".
 //
-// ディレクトリ未設定
+// manifest にない root 名
 func DriverErrorUnknownRoot(data string) DriverError {
 	return cm.New[DriverError](2, data)
 }
@@ -72,7 +78,7 @@ func (self *DriverError) UnknownRoot() *string {
 
 // DriverErrorInvalidPath returns a [DriverError] of case "invalid-path".
 //
-// manifest にない root 名
+// 脱出を含む不正なパス
 func DriverErrorInvalidPath(data string) DriverError {
 	return cm.New[DriverError](3, data)
 }
@@ -83,8 +89,6 @@ func (self *DriverError) InvalidPath() *string {
 }
 
 // DriverErrorNotFound returns a [DriverError] of case "not-found".
-//
-// 脱出を含む不正なパス
 func DriverErrorNotFound(data string) DriverError {
 	return cm.New[DriverError](4, data)
 }

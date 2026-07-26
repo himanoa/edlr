@@ -53,17 +53,25 @@ interface driver-process {
 }
 
 interface driver-fs {
+  // 行末コメントは使わない。wit-bindgen-go が各コメントを「次のフィールド」に
+  // 付けてしまい、生成物のコメントが 1 つずつずれるため(下も同じ)。
   record entry {
-    path: string,            // ルートからの相対パス
+    // ルートからの相対パス
+    path: string,
     size: u64,
-    modified: option<u64>,   // Unix epoch 秒。取得できなければ none
+    // Unix epoch 秒。取得できなければ none
+    modified: option<u64>,
   }
 
   variant driver-error {
-    permission-denied(string),  // 未承認 / mode 違反
-    not-configured(string),     // ディレクトリ未設定
-    unknown-root(string),       // manifest にない root 名
-    invalid-path(string),       // 脱出を含む不正なパス
+    // 未承認 / mode 違反
+    permission-denied(string),
+    // ディレクトリ未設定
+    not-configured(string),
+    // manifest にない root 名
+    unknown-root(string),
+    // 脱出を含む不正なパス
+    invalid-path(string),
     not-found(string),
     too-large(string),
     io(string),
@@ -86,11 +94,15 @@ world plugin {
   import driver-fs;
 
   record event {
-    kind: string,               // "journal" | "status"
+    // "journal" | "status"
+    kind: string,
     timestamp: option<string>,
-    name: option<string>,       // journal イベント名
-    payload-json: string,       // raw JSON
-    replay: bool,                // デーモンが動き出す前に既に書かれていたイベント
+    // journal イベント名
+    name: option<string>,
+    // raw JSON
+    payload-json: string,
+    // デーモンが動き出す前に既に書かれていたイベント
+    replay: bool,
   }
 
   export init: func();
