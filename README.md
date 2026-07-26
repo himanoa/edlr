@@ -136,6 +136,89 @@ UI の Plugins 画面はこの 3 メソッドのみでプラグイン一覧・�
 描画しており、localStorage やモックデータには依存していない。設定変更は
 即座にデーモンへ送られ、`<settings-dir>/<id>.json` に反映される。
 
+### capability(driver-http)
+
+プラグインは wasm サンドボックス内で動くため、既定では外部ネットワークに
+一切アクセスできない。`driver-http` capability を使って HTTP 通信したい
+プラグインは、`manifest.toml` に `[[capabilities]]` で要求する host を
+宣言し、ユーザーが Plugins UI で承認したものだけが実際に通信できる。
+
+#### マニフェストの `[[capabilities]]` 書式
+
+    [[capabilities]]
+    kind = "http"
+    hosts = ["https://api.example.com", "https://api2.example.com:8443"]
+    reason = "why this plugin needs to call these hosts"
+
+- `kind` は現状 `"http"` のみ
+- `hosts` は 1 件以上の bare origin(`http://` または `https://` + host
+  (+ port))。path・query・fragment・userinfo は不可(末尾 `/` 一つだけは
+  許容される)
+- `reason` は空文字不可。承認画面でユーザーに表示される、人間可読の理由文
+
+#### 承認フロー(Plugins UI)
+
+- capability を要求するプラグインは、**既定では未承認**の状態でロードされる。
+  未承認の間、その プラグインの `driver-http.send` 呼び出しは全て
+  `permission-denied` エラーになる(プラグイン自体は動き続ける — ロードが
+  失敗したり停止したりはしない)
+- ユーザーは Plugins UI から `[[capabilities]]` の内容(`hosts` / `reason`)
+  を確認して個別に承認・取消できる。承認/取消は `<grants-dir>/<id>.json`
+  に永続化され、次回起動時にも引き継がれる
+- マニフェストの capability 要求内容(`hosts` / `reason` の集合)が変わると、
+  以前の承認は自動的に失効(stale)する。stale な承認は「未承認」として扱われ、
+  ユーザーが変更後の内容を確認して再承認するまで通信できない
+- 承認/取消は稼働中のプラグインにも即座に反映される(再起動不要)
+- 承認は `manifest.toml` の capability 要求内容(`hosts` / `reason` の集合)
+  に対して結び付けられており、プラグイン本体(`entry` が指す wasm
+  バイナリ)には結び付けられていない。**`manifest.toml` を変更せず
+  `plugin.wasm` だけを別物に差し替えた場合、既存の承認はそのまま引き継がれる**
+  — フィンガープリントは capability 要求の内容だけから計算され、バイナリの
+  ハッシュは含まれない
+
+#### HTTP ドライバの制約
+
+`driver-http.send` は承認済み URL に対してのみ、以下の制約付きで単発の
+HTTP リクエストを実行する:
+
+- **リダイレクトを追従しない** — サーバが返した 3xx はそのままプラグインに
+  返る。承認された URL 以外への遷移が起きないようにするため
+- **タイムアウト 1.5 秒** — 接続からレスポンス受信完了までの全体。epoch
+  interruption による 2 秒の呼び出し期限(`PluginInstance::CALL_DEADLINE`)は
+  wasm 命令境界でしか作動せず、ブロッキングな `driver-http.send` 呼び出し
+  自体を打ち切ることはできないため、この呼び出し期限より厳密に短い値を
+  ドライバ自身のタイムアウトとして設定している(`core/src/plugin/host.rs`
+  の `HTTP_TIMEOUT` のコンパイル時アサーション参照)
+- **リクエストヘッダの制限** — `Host` / `Content-Length` /
+  `Transfer-Encoding` / `Connection` / `Upgrade` / `Proxy-*`
+  ヘッダはプラグインから設定できない(大小文字を区別せず拒否、
+  `invalid-request` エラー)。許可リストが制御するのは接続先だけであり、
+  接続後にプラグインが何を名乗るかは制御しないため、これらの
+  フレーミング/ルーティングに関わるヘッダを許すとドメインフロンティングや
+  リクエストスマグリングの余地が生まれる
+- **リクエストボディの上限 8 MiB** — レスポンスボディと同じ上限を
+  リクエストボディにも適用する(超過時は `invalid-request`)
+- **レスポンスボディの上限 8 MiB** — `Content-Length` を信用せず、実際の
+  読み取りをストリーミングでこの上限にキャップする(不正・誤設定な
+  サーバによる無制限メモリ確保を防ぐ)
+- **許可判定はスキーム + ホスト + ポートの完全一致** — ホストの大文字小文字は
+  無視するが、サブドメインのワイルドカードは無い(`api.example.com` の
+  許可は `x.api.example.com` を許可しない)。path・query・fragment は
+  判定に使わない
+
+#### `--grants-dir`
+
+capability 承認の保存先ディレクトリ。未指定時の既定は
+`$XDG_CONFIG_HOME/edlr/grants`(`XDG_CONFIG_HOME` 未設定なら
+`~/.config/edlr/grants`)。`--plugins-dir` / `--settings-dir` と同様、
+存在しなくてもエラーにはならない(全プラグイン未承認として起動する)。
+
+    cargo run -p edlr-core --bin edlr -- \
+      --journal-dir <PATH> \
+      --plugins-dir <PATH> \
+      --settings-dir <PATH> \
+      --grants-dir <PATH>
+
 ## UI
 
     # デーモン(WS サーバ込み)を起動

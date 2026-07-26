@@ -1,4 +1,5 @@
 use edlr_core::event::Event;
+use edlr_core::plugin::grants::GrantsStore;
 use edlr_core::plugin::host::PluginHost;
 use edlr_core::plugin::runner::start_plugins;
 use edlr_core::plugin::settings::SettingsStore;
@@ -67,10 +68,68 @@ fn hello_logger_registry() -> (tempfile::TempDir, Registry) {
     write_hello_logger(&plugins_dir);
 
     let settings_store = SettingsStore::new(tmp.path().join("settings"));
+    let grants_store = GrantsStore::new(tmp.path().join("grants"));
     let router = Router::new(16);
     let host = PluginHost::new().expect("host should start");
 
-    let registry = start_plugins(&plugins_dir, settings_store, &router, host);
+    let registry = start_plugins(&plugins_dir, settings_store, grants_store, &router, host);
+    (tmp, registry)
+}
+
+fn http_caller_wasm() -> PathBuf {
+    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let crate_path = manifest_dir.join("..").join("examples/plugins/http-caller");
+
+    let status = Command::new("cargo")
+        .args(["build", "--target", "wasm32-wasip2", "--release"])
+        .current_dir(&crate_path)
+        .status()
+        .expect("failed to spawn cargo build for fixture plugin");
+    assert!(status.success(), "http-caller fixture build failed");
+
+    crate_path
+        .join("target/wasm32-wasip2/release")
+        .join("http_caller.wasm")
+}
+
+fn write_http_caller(plugins_dir: &Path) {
+    let dir = plugins_dir.join("http-caller");
+    fs::create_dir_all(&dir).unwrap();
+    let wasm_src = http_caller_wasm();
+    fs::copy(&wasm_src, dir.join("http_caller.wasm")).unwrap();
+    fs::write(
+        dir.join("manifest.toml"),
+        r#"
+id = "http-caller"
+name = "http-caller"
+version = "0.1.0"
+entry = "http_caller.wasm"
+events = ["FSDJump"]
+
+[[capabilities]]
+kind = "http"
+hosts = ["https://api.example.com"]
+reason = "test"
+"#,
+    )
+    .unwrap();
+}
+
+/// Builds a `Registry` with a single running http-caller plugin (which
+/// declares an http capability request), under a fresh tempdir for plugins,
+/// settings, and grants storage.
+fn http_caller_registry() -> (tempfile::TempDir, Registry) {
+    let tmp = tempfile::tempdir().unwrap();
+    let plugins_dir = tmp.path().join("plugins");
+    fs::create_dir_all(&plugins_dir).unwrap();
+    write_http_caller(&plugins_dir);
+
+    let settings_store = SettingsStore::new(tmp.path().join("settings"));
+    let grants_store = GrantsStore::new(tmp.path().join("grants"));
+    let router = Router::new(16);
+    let host = PluginHost::new().expect("host should start");
+
+    let registry = start_plugins(&plugins_dir, settings_store, grants_store, &router, host);
     (tmp, registry)
 }
 
@@ -340,6 +399,202 @@ async fn rpc_responses_and_events_are_multiplexed_on_the_same_socket() {
     assert!(saw_event_fsdjump, "expected FSDJump event to be delivered");
     assert!(saw_event_docked, "expected Docked event to be delivered");
     assert!(saw_rpc_result, "expected rpc-result to be delivered");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn plugins_list_includes_capabilities_with_declared_requests_and_initial_grant_state() {
+    let (_tmp, registry) = http_caller_registry();
+    let (_router, addr) = setup(Some(registry)).await;
+    let mut ws = connect(addr).await;
+    recv_hello(&mut ws).await;
+
+    send_rpc(&mut ws, 1, "plugins/list", serde_json::json!({})).await;
+    let resp = recv_json(&mut ws).await;
+    let plugins = resp["result"]["plugins"].as_array().expect("plugins array");
+    let plugin = plugins
+        .iter()
+        .find(|p| p["id"] == "http-caller")
+        .expect("http-caller plugin present");
+
+    let capabilities = &plugin["capabilities"];
+    assert_eq!(capabilities["granted"], false);
+    assert_eq!(capabilities["staleGrant"], false);
+    let requests = capabilities["requests"].as_array().expect("requests array");
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0]["kind"], "http");
+    assert_eq!(
+        requests[0]["hosts"],
+        serde_json::json!(["https://api.example.com"])
+    );
+    assert_eq!(requests[0]["reason"], "test");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn plugins_list_reports_empty_requests_for_plugin_without_capabilities() {
+    let (_tmp, registry) = hello_logger_registry();
+    let (_router, addr) = setup(Some(registry)).await;
+    let mut ws = connect(addr).await;
+    recv_hello(&mut ws).await;
+
+    send_rpc(&mut ws, 1, "plugins/list", serde_json::json!({})).await;
+    let resp = recv_json(&mut ws).await;
+    let plugins = resp["result"]["plugins"].as_array().expect("plugins array");
+    let plugin = plugins
+        .iter()
+        .find(|p| p["id"] == "hello-logger")
+        .expect("hello-logger plugin present");
+
+    let capabilities = &plugin["capabilities"];
+    assert_eq!(capabilities["granted"], false);
+    assert_eq!(capabilities["staleGrant"], false);
+    assert_eq!(
+        capabilities["requests"]
+            .as_array()
+            .expect("requests array")
+            .len(),
+        0
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn plugins_get_capabilities_returns_requests_and_grant_state_and_errors_for_unknown_plugin() {
+    let (_tmp, registry) = http_caller_registry();
+    let (_router, addr) = setup(Some(registry)).await;
+    let mut ws = connect(addr).await;
+    recv_hello(&mut ws).await;
+
+    send_rpc(
+        &mut ws,
+        1,
+        "plugins/get-capabilities",
+        serde_json::json!({"plugin": "http-caller"}),
+    )
+    .await;
+    let resp = recv_json(&mut ws).await;
+    assert_eq!(resp["type"], "rpc-result");
+    assert_eq!(resp["result"]["granted"], false);
+    assert_eq!(resp["result"]["staleGrant"], false);
+    let requests = resp["result"]["requests"]
+        .as_array()
+        .expect("requests array");
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0]["kind"], "http");
+
+    send_rpc(
+        &mut ws,
+        2,
+        "plugins/get-capabilities",
+        serde_json::json!({"plugin": "does-not-exist"}),
+    )
+    .await;
+    let resp = recv_json(&mut ws).await;
+    assert_eq!(resp["type"], "rpc-error");
+    assert_eq!(resp["id"], 2);
+    assert!(resp["error"].as_str().unwrap().contains("does-not-exist"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn plugins_set_capabilities_grants_and_revokes_and_is_reflected_in_get_and_list() {
+    let (_tmp, registry) = http_caller_registry();
+    let (_router, addr) = setup(Some(registry)).await;
+    let mut ws = connect(addr).await;
+    recv_hello(&mut ws).await;
+
+    send_rpc(
+        &mut ws,
+        1,
+        "plugins/set-capabilities",
+        serde_json::json!({"plugin": "http-caller", "granted": true}),
+    )
+    .await;
+    let resp = recv_json(&mut ws).await;
+    assert_eq!(resp["type"], "rpc-result");
+    assert_eq!(resp["result"]["granted"], true);
+    assert_eq!(resp["result"]["staleGrant"], false);
+
+    send_rpc(
+        &mut ws,
+        2,
+        "plugins/get-capabilities",
+        serde_json::json!({"plugin": "http-caller"}),
+    )
+    .await;
+    let resp = recv_json(&mut ws).await;
+    assert_eq!(resp["result"]["granted"], true);
+
+    send_rpc(&mut ws, 3, "plugins/list", serde_json::json!({})).await;
+    let resp = recv_json(&mut ws).await;
+    let plugins = resp["result"]["plugins"].as_array().expect("plugins array");
+    let plugin = plugins
+        .iter()
+        .find(|p| p["id"] == "http-caller")
+        .expect("http-caller plugin present");
+    assert_eq!(plugin["capabilities"]["granted"], true);
+
+    // Revoke.
+    send_rpc(
+        &mut ws,
+        4,
+        "plugins/set-capabilities",
+        serde_json::json!({"plugin": "http-caller", "granted": false}),
+    )
+    .await;
+    let resp = recv_json(&mut ws).await;
+    assert_eq!(resp["result"]["granted"], false);
+
+    send_rpc(
+        &mut ws,
+        5,
+        "plugins/get-capabilities",
+        serde_json::json!({"plugin": "http-caller"}),
+    )
+    .await;
+    let resp = recv_json(&mut ws).await;
+    assert_eq!(resp["result"]["granted"], false);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn plugins_set_capabilities_with_invalid_params_returns_rpc_error() {
+    let (_tmp, registry) = http_caller_registry();
+    let (_router, addr) = setup(Some(registry)).await;
+    let mut ws = connect(addr).await;
+    recv_hello(&mut ws).await;
+
+    // Missing plugin.
+    send_rpc(
+        &mut ws,
+        1,
+        "plugins/set-capabilities",
+        serde_json::json!({"granted": true}),
+    )
+    .await;
+    let resp = recv_json(&mut ws).await;
+    assert_eq!(resp["type"], "rpc-error");
+    assert_eq!(resp["id"], 1);
+
+    // granted not a bool.
+    send_rpc(
+        &mut ws,
+        2,
+        "plugins/set-capabilities",
+        serde_json::json!({"plugin": "http-caller", "granted": "yes"}),
+    )
+    .await;
+    let resp = recv_json(&mut ws).await;
+    assert_eq!(resp["type"], "rpc-error");
+    assert_eq!(resp["id"], 2);
+
+    // Missing granted.
+    send_rpc(
+        &mut ws,
+        3,
+        "plugins/set-capabilities",
+        serde_json::json!({"plugin": "http-caller"}),
+    )
+    .await;
+    let resp = recv_json(&mut ws).await;
+    assert_eq!(resp["type"], "rpc-error");
+    assert_eq!(resp["id"], 3);
 }
 
 #[tokio::test]

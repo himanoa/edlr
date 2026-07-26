@@ -1,4 +1,5 @@
 use edlr_core::event::Event;
+use edlr_core::plugin::grants::GrantsStore;
 use edlr_core::plugin::host::PluginHost;
 use edlr_core::plugin::registry::PluginState;
 use edlr_core::plugin::runner::start_plugins;
@@ -110,10 +111,11 @@ async fn hello_logger_stays_running_and_busy_loop_gets_disabled_after_publish() 
     write_plugin(&plugins_dir, "busy-loop", &busy_loop_wasm(), &["*"]);
 
     let settings_store = SettingsStore::new(tmp.path().join("settings"));
+    let grants_store = GrantsStore::new(tmp.path().join("grants"));
     let router = Router::new(16);
     let host = PluginHost::new().expect("host should start");
 
-    let registry = start_plugins(&plugins_dir, settings_store, &router, host);
+    let registry = start_plugins(&plugins_dir, settings_store, grants_store, &router, host);
 
     let snapshot = registry.snapshot();
     assert_eq!(snapshot.len(), 2, "both plugins should load");
@@ -177,10 +179,11 @@ async fn broken_manifest_directory_is_skipped_but_others_still_load() {
     .unwrap();
 
     let settings_store = SettingsStore::new(tmp.path().join("settings"));
+    let grants_store = GrantsStore::new(tmp.path().join("grants"));
     let router = Router::new(16);
     let host = PluginHost::new().expect("host should start");
 
-    let registry = start_plugins(&plugins_dir, settings_store, &router, host);
+    let registry = start_plugins(&plugins_dir, settings_store, grants_store, &router, host);
 
     let snapshot = registry.snapshot();
     assert_eq!(
@@ -198,10 +201,11 @@ async fn nonexistent_plugins_dir_yields_empty_registry() {
     let plugins_dir = tmp.path().join("does-not-exist");
 
     let settings_store = SettingsStore::new(tmp.path().join("settings"));
+    let grants_store = GrantsStore::new(tmp.path().join("grants"));
     let router = Router::new(16);
     let host = PluginHost::new().expect("host should start");
 
-    let registry = start_plugins(&plugins_dir, settings_store, &router, host);
+    let registry = start_plugins(&plugins_dir, settings_store, grants_store, &router, host);
 
     assert!(registry.snapshot().is_empty());
 }
@@ -220,10 +224,11 @@ async fn init_failure_registers_disabled_and_starts_no_event_task() {
     write_plugin(&plugins_dir, "init-trap", &init_trap_wasm(), &["*"]);
 
     let settings_store = SettingsStore::new(tmp.path().join("settings"));
+    let grants_store = GrantsStore::new(tmp.path().join("grants"));
     let router = Router::new(16);
     let host = PluginHost::new().expect("host should start");
 
-    let registry = start_plugins(&plugins_dir, settings_store, &router, host);
+    let registry = start_plugins(&plugins_dir, settings_store, grants_store, &router, host);
 
     // start_plugins only returns once every plugin's load/init outcome is
     // resolved, so init-trap must already be Disabled here (its init() loops
@@ -285,10 +290,11 @@ async fn list_returns_plugin_info_with_effective_values_matching_manifest_defaul
     );
 
     let settings_store = SettingsStore::new(tmp.path().join("settings"));
+    let grants_store = GrantsStore::new(tmp.path().join("grants"));
     let router = Router::new(16);
     let host = PluginHost::new().expect("host should start");
 
-    let registry = start_plugins(&plugins_dir, settings_store, &router, host);
+    let registry = start_plugins(&plugins_dir, settings_store, grants_store, &router, host);
 
     let list = registry.list();
     assert_eq!(list.len(), 1, "hello-logger should be registered");
@@ -320,10 +326,11 @@ async fn set_values_persists_validates_and_updates_shared_settings_json() {
     );
 
     let settings_store = SettingsStore::new(tmp.path().join("settings"));
+    let grants_store = GrantsStore::new(tmp.path().join("grants"));
     let router = Router::new(16);
     let host = PluginHost::new().expect("host should start");
 
-    let registry = start_plugins(&plugins_dir, settings_store, &router, host);
+    let registry = start_plugins(&plugins_dir, settings_store, grants_store, &router, host);
 
     let mut new_values = serde_json::Map::new();
     new_values.insert("enabled".to_string(), serde_json::json!(false));
@@ -368,10 +375,11 @@ async fn set_values_with_unknown_key_returns_err_and_leaves_values_unchanged() {
     );
 
     let settings_store = SettingsStore::new(tmp.path().join("settings"));
+    let grants_store = GrantsStore::new(tmp.path().join("grants"));
     let router = Router::new(16);
     let host = PluginHost::new().expect("host should start");
 
-    let registry = start_plugins(&plugins_dir, settings_store, &router, host);
+    let registry = start_plugins(&plugins_dir, settings_store, grants_store, &router, host);
 
     let before = registry
         .values("hello-logger")

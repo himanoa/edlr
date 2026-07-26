@@ -243,6 +243,7 @@ mod tests {
                     options: vec!["a".into(), "b".into()],
                 },
             ],
+            capabilities: vec![],
         }
     }
 
@@ -488,6 +489,7 @@ mod tests {
                     default: "unset".into(),
                 })
                 .collect(),
+            capabilities: vec![],
         }
     }
 

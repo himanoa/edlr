@@ -1,6 +1,6 @@
 use clap::Parser;
 use edlr_core::plugin::host::PluginHost;
-use edlr_core::plugin::{start_plugins, SettingsStore};
+use edlr_core::plugin::{start_plugins, GrantsStore, SettingsStore};
 use edlr_core::{config, monitor, router::Router, server};
 use std::path::PathBuf;
 use std::time::Duration;
@@ -35,6 +35,11 @@ struct Args {
     /// 未設定なら ~/.config/edlr/settings)
     #[arg(long)]
     settings_dir: Option<PathBuf>,
+
+    /// プラグイン capability 承認の保存先ディレクトリ(未指定時は
+    /// $XDG_CONFIG_HOME/edlr/grants、未設定なら ~/.config/edlr/grants)
+    #[arg(long)]
+    grants_dir: Option<PathBuf>,
 }
 
 #[tokio::main]
@@ -69,6 +74,9 @@ async fn main() {
     let settings_dir = args.settings_dir.clone().unwrap_or_else(|| {
         config::config_subdir(xdg_config_home.as_deref(), home.as_deref(), "settings")
     });
+    let grants_dir = args.grants_dir.clone().unwrap_or_else(|| {
+        config::config_subdir(xdg_config_home.as_deref(), home.as_deref(), "grants")
+    });
 
     if let Some(ui_dir) = &args.ui_dir {
         if !ui_dir.is_dir() {
@@ -102,11 +110,13 @@ async fn main() {
         Ok(host) => {
             tracing::info!(plugins_dir = %plugins_dir.display(), "starting plugins");
             let settings_store = SettingsStore::new(settings_dir);
+            let grants_store = GrantsStore::new(grants_dir);
             let plugins_dir_for_blocking = plugins_dir.clone();
             match tokio::task::spawn_blocking(move || {
                 start_plugins(
                     &plugins_dir_for_blocking,
                     settings_store,
+                    grants_store,
                     &router_for_plugins,
                     host,
                 )

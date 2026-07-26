@@ -5,6 +5,18 @@ export type SettingField =
   | { type: "number"; key: string; label: string; default: number }
   | { type: "select"; key: string; label: string; default: string; options: string[] };
 
+export interface CapabilityRequest {
+  kind: "http";
+  hosts: string[];
+  reason: string;
+}
+
+export interface Capabilities {
+  requests: CapabilityRequest[];
+  granted: boolean;
+  staleGrant: boolean;
+}
+
 export interface PluginInfo {
   id: string;
   name: string;
@@ -14,6 +26,7 @@ export interface PluginInfo {
   reason?: string;
   settings: SettingField[];
   values: Record<string, unknown>;
+  capabilities: Capabilities;
 }
 
 export interface PluginsList {

@@ -9,6 +9,8 @@ let listImpl: () => Promise<PluginsList> = () =>
   Promise.resolve({ pluginsDir: "/plugins", plugins: [] });
 let setSettingsImpl: (params: unknown) => Promise<Record<string, unknown>> = () =>
   Promise.resolve({});
+let setCapabilitiesImpl: (params: unknown) => Promise<PluginInfo["capabilities"]> = () =>
+  Promise.resolve({ requests: [], granted: false, staleGrant: false });
 let instances: Array<{ close: ReturnType<typeof vi.fn> }> = [];
 
 vi.mock("../rpc", () => {
@@ -22,6 +24,7 @@ vi.mock("../rpc", () => {
         calls.push({ method, params });
         if (method === "plugins/list") return listImpl();
         if (method === "plugins/set-settings") return setSettingsImpl(params);
+        if (method === "plugins/set-capabilities") return setCapabilitiesImpl(params);
         return Promise.reject(new Error(`unexpected method: ${method}`));
       }
     },
@@ -41,6 +44,7 @@ function makePlugin(overrides: Partial<PluginInfo> = {}): PluginInfo {
     state: "running",
     settings: [{ type: "boolean", key: "enabled", label: "有効", default: true }],
     values: { enabled: true },
+    capabilities: { requests: [], granted: false, staleGrant: false },
     ...overrides,
   };
 }
@@ -50,6 +54,7 @@ beforeEach(() => {
   instances = [];
   listImpl = () => Promise.resolve({ pluginsDir: "/plugins", plugins: [] });
   setSettingsImpl = () => Promise.resolve({});
+  setCapabilitiesImpl = () => Promise.resolve({ requests: [], granted: false, staleGrant: false });
 });
 
 afterEach(() => {
@@ -122,4 +127,48 @@ test("changing a setting calls plugins/set-settings with the right args and upda
   });
 
   await waitFor(() => expect(checkbox.checked).toBe(false));
+});
+
+test("shows the capability section for a plugin that has capability requests", async () => {
+  const plugin = makePlugin({
+    capabilities: {
+      requests: [{ kind: "http", hosts: ["api.example.com"], reason: "天気を取得するため" }],
+      granted: false,
+      staleGrant: false,
+    },
+  });
+  listImpl = () => Promise.resolve({ pluginsDir: "/plugins", plugins: [plugin] });
+
+  render(<Plugins />);
+
+  expect(await screen.findByText(/api\.example\.com/)).toBeInTheDocument();
+});
+
+test("toggling capability approval calls plugins/set-capabilities and updates the display", async () => {
+  const plugin = makePlugin({
+    capabilities: {
+      requests: [{ kind: "http", hosts: ["api.example.com"], reason: "天気を取得するため" }],
+      granted: false,
+      staleGrant: false,
+    },
+  });
+  listImpl = () => Promise.resolve({ pluginsDir: "/plugins", plugins: [plugin] });
+  setCapabilitiesImpl = () =>
+    Promise.resolve({
+      requests: [{ kind: "http", hosts: ["api.example.com"], reason: "天気を取得するため" }],
+      granted: true,
+      staleGrant: false,
+    });
+
+  render(<Plugins />);
+  const toggle = (await screen.findByRole("checkbox", { name: /承認/ })) as HTMLInputElement;
+  await userEvent.click(toggle);
+
+  await waitFor(() => {
+    const call = calls.find((c) => c.method === "plugins/set-capabilities");
+    expect(call?.params).toEqual({ plugin: "voice-notify", granted: true });
+  });
+
+  await waitFor(() => expect(toggle.checked).toBe(true));
+  expect(screen.queryByText(/未承認/)).not.toBeInTheDocument();
 });

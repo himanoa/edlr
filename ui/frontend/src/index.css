@@ -126,3 +126,46 @@ body {
   font-size: 0.85rem;
   margin: 0.4rem 0 0;
 }
+.capability-section {
+  margin-top: 0.75rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid #2b313b;
+}
+.capability-list {
+  list-style: none;
+  margin: 0 0 0.5rem;
+  padding: 0;
+  font-size: 0.85rem;
+}
+.capability-request {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  padding: 0.2rem 0;
+  color: #8a93a2;
+}
+.capability-kind {
+  background: #1c2129;
+  border-radius: 4px;
+  padding: 0.05rem 0.4rem;
+  color: #7fb3d8;
+}
+.capability-hosts {
+  font-family: ui-monospace, monospace;
+}
+.capability-notice {
+  color: #d8c37f;
+  font-size: 0.85rem;
+  margin: 0.4rem 0 0;
+}
+.capability-warning {
+  color: #d8c37f;
+  font-size: 0.85rem;
+  margin: 0.4rem 0 0;
+  font-weight: 600;
+}
+.capability-pending {
+  color: #8a93a2;
+  font-size: 0.8rem;
+  margin-left: 0.4rem;
+}
