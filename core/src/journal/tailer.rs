@@ -67,14 +67,25 @@ impl JournalTailer {
     pub fn poll(&mut self) -> io::Result<Vec<JournalLine>> {
         let mut lines = Vec::new();
 
-        // resume_from で指定されたファイルが既に無くなっている場合、次の
-        // ファイルへ進む(無ければ latest_journal へフォールバック)。
+        // 現在のファイルが既に無くなっている場合、次のファイルへ進む。
+        //
+        // 次が無いときのフォールバック(最新ファイル)は、それが**消えたファイル
+        // より厳密に新しいときだけ**採る。より古いファイルへ巻き戻すと、そこから
+        // ローテーションのループが前へ歩いてディレクトリ全体を先頭から読み直し、
+        // しかも `caught_up` が既に true なので全てが `replay = false`(= 今
+        // 起きたイベント)として再配信されてしまう。新しいファイルが現れるまでは
+        // 現在位置を据え置き、次の poll で再試行する。
         if let Some(cur) = &self.current {
             if !cur.is_file() {
-                let next = next_journal_after(&self.dir, cur)?.or(latest_journal(&self.dir)?);
-                self.current = next;
-                self.pos = 0;
-                self.partial.clear();
+                let next = match next_journal_after(&self.dir, cur)? {
+                    Some(next) => Some(next),
+                    None => latest_journal(&self.dir)?.filter(|latest| latest > cur),
+                };
+                if let Some(next) = next {
+                    self.current = Some(next);
+                    self.pos = 0;
+                    self.partial.clear();
+                }
             }
         }
 
@@ -91,9 +102,19 @@ impl JournalTailer {
 
         // 次のファイルを探して順番に読む
         loop {
-            let latest = latest_journal(&self.dir)?;
+            let latest = match latest_journal(&self.dir) {
+                Ok(latest) => latest,
+                Err(e) => {
+                    return Self::interrupted(lines, e, "failed to scan the journal directory")
+                }
+            };
             let next = if let Some(cur) = &self.current {
-                next_journal_after(&self.dir, cur)?
+                match next_journal_after(&self.dir, cur) {
+                    Ok(next) => next,
+                    Err(e) => {
+                        return Self::interrupted(lines, e, "failed to scan the journal directory")
+                    }
+                }
             } else {
                 latest.clone()
             };
@@ -105,15 +126,10 @@ impl JournalTailer {
                 self.partial.clear();
 
                 if let Err(e) = self.read_new(&next_path, &mut lines) {
-                    // 新ファイルの読み取り失敗
-                    if lines.is_empty() {
-                        // 行がまだ収集されていなければエラー返す
-                        return Err(e);
-                    }
-                    // 行が収集済みならば警告して返す
-                    tracing::warn!("failed to read rotated journal: {}", e);
-                    self.caught_up = true;
-                    return Ok(lines);
+                    // 新ファイルの読み取り失敗。ここで先へ進むと、このファイルは
+                    // 二度と読まれない(current は既に進んでいる)ので、必ず
+                    // ここで打ち切って次の poll で同じファイルを読み直す。
+                    return Self::interrupted(lines, e, "failed to read rotated journal");
                 }
             } else {
                 // これ以上新しいファイルなし → 完了
@@ -125,10 +141,34 @@ impl JournalTailer {
         Ok(lines)
     }
 
+    /// poll の途中で走査・読み取りが失敗したときの打ち切り。
+    ///
+    /// 既に読んだ行がある場合は、それを捨てずに返す。捨ててしまうと `self.pos`
+    /// だけが進んでいるため、その行は(動き続けるデーモンでは)二度と配信されない。
+    /// `caught_up` はここでは立てない — まだ追いつけていないので、残りは次の
+    /// poll で `replay` として読む。
+    fn interrupted(
+        lines: Vec<JournalLine>,
+        e: io::Error,
+        what: &str,
+    ) -> io::Result<Vec<JournalLine>> {
+        if lines.is_empty() {
+            return Err(e);
+        }
+        tracing::warn!("{what}: {e}; returning the lines read so far");
+        Ok(lines)
+    }
+
     fn read_new(&mut self, path: &std::path::Path, lines: &mut Vec<JournalLine>) -> io::Result<()> {
         let mut file = match std::fs::File::open(path) {
             Ok(f) => f,
-            Err(_) => return Ok(()), // 消えた/一時的に開けない → 次回リトライ
+            // 消えたファイルは飛ばしてよい(ローテーション処理が次へ進める)。
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+            // 一時的に開けないだけ(EACCES / EMFILE など)の場合は握り潰さない。
+            // ローテーションのループは既に current をこのファイルへ進めているため、
+            // Ok を返すとそのままさらに次のファイルへ進み、このファイルの内容が
+            // 恒久的にスキップされてしまう。
+            Err(e) => return Err(e),
         };
         let len = file.metadata()?.len();
         if len < self.pos {
@@ -440,5 +480,126 @@ mod tests {
 
         assert_eq!(lines.len(), 1);
         assert!(lines[0].text.contains("\"b\""));
+        assert!(
+            lines[0].replay,
+            "catching up on a file that was already there at startup is replay"
+        );
+    }
+
+    /// 現在のファイルが消えたとき、残っているのが**より古いファイルだけ**なら
+    /// フォールバックしてはならない。フォールバックすると古いファイルを先頭から
+    /// 読み直し、それ以降の全ファイルを `replay = false` で再配信してしまう。
+    #[test]
+    fn a_vanished_current_file_never_falls_back_to_an_older_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let older = dir.path().join("Journal.2026-07-27T100000.01.log");
+        let current = dir.path().join("Journal.2026-07-27T120000.01.log");
+        append(&older, "{\"old\":1}\n");
+        append(&current, "{\"cur\":1}\n");
+
+        let mut t = JournalTailer::new(dir.path().to_path_buf());
+        assert_eq!(texts(t.poll().unwrap()), vec!["{\"cur\":1}"]);
+
+        std::fs::remove_file(&current).unwrap();
+
+        assert_eq!(
+            texts(t.poll().unwrap()),
+            Vec::<String>::new(),
+            "an older file must not be re-delivered"
+        );
+        assert_eq!(
+            t.position().map(|p| p.file),
+            Some("Journal.2026-07-27T120000.01.log".to_string()),
+            "the position stays put until a strictly newer file appears"
+        );
+
+        // より新しいファイルが現れたら、そちらへ進む。
+        let newer = dir.path().join("Journal.2026-07-27T130000.01.log");
+        append(&newer, "{\"new\":1}\n");
+        assert_eq!(texts(t.poll().unwrap()), vec!["{\"new\":1}"]);
+    }
+
+    /// ディレクトリを「実行のみ可(r なし)」にすると、中のファイルは開ける
+    /// まま `read_dir` だけが失敗する。root では権限を無視できるため注入
+    /// できない(その場合はテストを飛ばす)。
+    fn make_unlistable(dir: &std::path::Path) -> bool {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o111)).unwrap();
+        std::fs::read_dir(dir).is_err()
+    }
+
+    fn make_listable(dir: &std::path::Path) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    /// ローテーション走査(`read_dir`)が一時的に失敗しても、それまでに読んだ
+    /// 行を捨ててはならない。捨てると `self.pos` だけが進んでいるため、その行は
+    /// 二度と配信されない。
+    #[test]
+    fn lines_already_read_survive_a_failing_rotation_scan() {
+        let dir = tempfile::tempdir().unwrap();
+        let j = dir.path().join("Journal.2026-07-27T120000.01.log");
+        append(&j, "line1\n");
+        let mut t = JournalTailer::new(dir.path().to_path_buf());
+        assert_eq!(texts(t.poll().unwrap()), vec!["line1"]);
+
+        append(&j, "line2\n");
+        if !make_unlistable(dir.path()) {
+            make_listable(dir.path());
+            return; // root: 権限で失敗を注入できない
+        }
+        let out = t.poll();
+        make_listable(dir.path());
+
+        assert_eq!(
+            texts(out.expect("the lines read before the scan failed must not be dropped")),
+            vec!["line2"]
+        );
+    }
+
+    /// ローテーション先のファイルが一時的に開けない場合、それを黙って飛ばして
+    /// さらに次のファイルへ進んではならない(そのファイルは恒久的に失われる)。
+    /// あわせて、この早期 return では `caught_up` を立てない — まだ追いつけて
+    /// いないので、残りは次の poll で `replay` として読む。
+    #[test]
+    fn a_temporarily_unreadable_rotated_file_is_not_skipped_and_stays_replay() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("Journal.2026-07-27T100000.01.log");
+        let b = dir.path().join("Journal.2026-07-27T110000.01.log");
+        let c = dir.path().join("Journal.2026-07-27T120000.01.log");
+        append(&a, "a1\n");
+        append(&b, "b1\n");
+        append(&c, "c1\n");
+
+        std::fs::set_permissions(&b, std::fs::Permissions::from_mode(0o000)).unwrap();
+        if std::fs::File::open(&b).is_ok() {
+            std::fs::set_permissions(&b, std::fs::Permissions::from_mode(0o644)).unwrap();
+            return; // root: 権限で失敗を注入できない
+        }
+
+        let mut t = JournalTailer::resume_from(
+            dir.path().to_path_buf(),
+            Some(Position {
+                file: "Journal.2026-07-27T100000.01.log".into(),
+                offset: 0,
+            }),
+        );
+        let first = t.poll().unwrap();
+        assert_eq!(texts(first), vec!["a1"], "must stop at the unreadable file");
+
+        std::fs::set_permissions(&b, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let second = t.poll().unwrap();
+        assert_eq!(
+            texts(second.clone()),
+            vec!["b1", "c1"],
+            "the file that could not be opened must be picked up on the next poll"
+        );
+        assert!(
+            second.iter().all(|l| l.replay),
+            "these lines were written before the daemon started"
+        );
     }
 }
