@@ -67,28 +67,42 @@ fn autostart_daemon(config_journal_dir: Option<PathBuf>) -> Option<std::process:
 struct AppState {
     /// Tauri が spawn したデーモン。外部起動のデーモンを掴んでいる場合は None。
     daemon: Arc<Mutex<Option<std::process::Child>>>,
+    /// このアプリがデーモンのライフサイクルに責任を持つか。
+    ///
+    /// `main` 起動時に一度だけ決まり、以降は不変。`daemon` スロットが一時的に
+    /// `None`(再起動中の spawn 失敗など)になっても倒れない、
+    /// `daemonManaged` の「外部起動のデーモンには触らない」という意味を保つための値。
+    owns_daemon: bool,
     config_path: PathBuf,
     config: Mutex<edlr_config::AppConfig>,
     config_error: Mutex<Option<String>>,
 }
 
+/// デーモンを停止して回収する。`Child::kill()`(SIGKILL)を呼ぶ唯一の場所。
+///
+/// 将来サイドカーを導入する際は、ここだけを SIGTERM + プロセスグループ化へ
+/// 差し替えれば済むようにしてある(設計書「スコープ外」の前提条件を参照)。
+fn stop_child(child: &mut std::process::Child) {
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
 /// 保持しているデーモンを停止し、`journal_dir` で再 spawn する。
 ///
-/// kill と re-spawn はこの関数だけが行う。将来サイドカーを導入する際に
-/// SIGTERM + プロセスグループ化へ移行する変更箇所をここ 1 つに絞るため
-/// (設計書「スコープ外」の前提条件を参照)。
+/// スロットが既に `None`(前回の spawn 失敗など)でもエラーにはせず、
+/// そのまま新しく spawn する。バイナリ解決はスロットを触る前に行うため、
+/// バイナリが見つからない場合に生きているデーモンを巻き込んで殺すことはない。
 fn restart_daemon(
     slot: &Mutex<Option<std::process::Child>>,
     journal_dir: Option<&Path>,
 ) -> Result<(), String> {
-    let mut guard = slot.lock().unwrap_or_else(|p| p.into_inner());
-    let Some(mut old) = guard.take() else {
-        return Err("daemon is not managed by this app".to_string());
-    };
-    let _ = old.kill();
-    let _ = old.wait();
-
     let bin = resolve_bin().ok_or_else(|| "edlr binary not found".to_string())?;
+
+    let mut guard = slot.lock().unwrap_or_else(|p| p.into_inner());
+    if let Some(mut old) = guard.take() {
+        stop_child(&mut old);
+    }
+
     let child = daemon::spawn_daemon(&bin, journal_dir)
         .map_err(|e| format!("failed to spawn edlr daemon: {e}"))?;
     *guard = Some(child);
@@ -98,17 +112,12 @@ fn restart_daemon(
 fn snapshot(state: &AppState) -> config::ConfigDto {
     let config = state.config.lock().unwrap_or_else(|p| p.into_inner());
     let error = state.config_error.lock().unwrap_or_else(|p| p.into_inner());
-    let managed = state
-        .daemon
-        .lock()
-        .unwrap_or_else(|p| p.into_inner())
-        .is_some();
     config::ConfigDto {
         journal_dir: config
             .journal_dir
             .as_ref()
             .map(|p| p.to_string_lossy().to_string()),
-        daemon_managed: managed,
+        daemon_managed: state.owns_daemon,
         config_error: error.clone(),
     }
 }
@@ -150,12 +159,7 @@ fn set_journal_dir(
         *guard = None;
     }
 
-    let managed = state
-        .daemon
-        .lock()
-        .unwrap_or_else(|p| p.into_inner())
-        .is_some();
-    if managed {
+    if state.owns_daemon {
         restart_daemon(&state.daemon, Some(&dir))?;
     }
 
@@ -170,12 +174,14 @@ fn main() {
         eprintln!("failed to load {}: {error}", loaded.path.display());
     }
     let child = autostart_daemon(loaded.config.journal_dir.clone());
+    let owns_daemon = child.is_some();
 
     // state は manage へムーブされるため、停止用にこのハンドルを手元へ残す。
     let daemon = Arc::new(Mutex::new(child));
 
     let state = AppState {
         daemon: Arc::clone(&daemon),
+        owns_daemon,
         config_path: loaded.path,
         config: Mutex::new(loaded.config),
         config_error: Mutex::new(loaded.error),
@@ -205,7 +211,6 @@ fn main() {
 fn kill_daemon(slot: &Mutex<Option<std::process::Child>>) {
     let mut guard = slot.lock().unwrap_or_else(|p| p.into_inner());
     if let Some(mut child) = guard.take() {
-        let _ = child.kill();
-        let _ = child.wait();
+        stop_child(&mut child);
     }
 }
