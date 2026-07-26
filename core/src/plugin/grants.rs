@@ -279,6 +279,60 @@ mod tests {
     }
 
     #[test]
+    fn old_format_fingerprint_on_disk_is_treated_as_stale_not_valid() {
+        // A grant file written by the retired FNV-1a-64 fingerprint format
+        // (16 hex chars) must not be mistaken for a valid grant under the
+        // current SHA-256 format (64 hex chars): it must simply mismatch and
+        // report stale, i.e. fail closed rather than silently re-validating.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("grants");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("cap-plugin.json"),
+            r#"{"granted":true,"fingerprint":"0123456789abcdef"}"#,
+        )
+        .unwrap();
+
+        let store = GrantsStore::new(dir);
+        let manifest = manifest_with_hosts(vec!["https://api.example.com"]);
+
+        let state = store.state(&manifest);
+        assert_eq!(
+            state,
+            GrantState {
+                granted: false,
+                stale: true
+            },
+            "an old-format fingerprint must never coincide with the current one"
+        );
+    }
+
+    #[test]
+    fn revoke_then_manifest_change_does_not_resurrect_as_granted() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = GrantsStore::new(tmp.path().join("grants"));
+        let original = manifest_with_hosts(vec!["https://api.example.com"]);
+
+        store.set(&original, true).expect("grant should succeed");
+        store.set(&original, false).expect("revoke should succeed");
+
+        let mut changed = original.clone();
+        changed.capabilities = vec![CapabilityRequest::Http {
+            hosts: vec![
+                "https://api.example.com".to_string(),
+                "https://api2.example.com".to_string(),
+            ],
+            reason: "fetch data".into(),
+        }];
+
+        let state = store.state(&changed);
+        assert!(
+            !state.granted,
+            "a revoked grant followed by a manifest change must never resurrect as granted"
+        );
+    }
+
+    #[test]
     fn broken_json_is_treated_as_unsaved() {
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path().join("grants");

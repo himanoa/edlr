@@ -22,6 +22,7 @@ wasmtime = { version = "47.0.2", features = ["component-model"] }
 anyhow = "1.0.104"
 wasmtime-wasi = "47.0.2"
 url = "2.5.8"
+sha2 = "0.10"
 edlr-driver-http = { path = "../drivers/http" }
 
 [dev-dependencies]

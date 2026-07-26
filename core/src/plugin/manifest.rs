@@ -77,7 +77,7 @@ pub struct Manifest {
 }
 
 impl Manifest {
-    /// capability 要求一式の安定ハッシュ(grants の失効判定に使う)。
+    /// capability 要求一式の安定フィンガープリント(grants の失効判定に使う)。
     ///
     /// - 同じ要求内容なら常に同じ値を返す(プロセスをまたいでも安定)。
     /// - `hosts` の順序は正規化(小文字化してソート)されるため、順序違いは無視される。
@@ -85,6 +85,14 @@ impl Manifest {
     ///   自由記述のフィールドを含むため、区切り文字での結合ではなく長さ接頭辞で
     ///   エンコードして曖昧さ(衝突)を排除する(詳細は `encode_field` を参照)。
     /// - `capabilities` が空なら `None`。
+    ///
+    /// 戻り値は正規化文字列(`canonical`)の SHA-256 の16進表現。プラグイン作者は
+    /// 自分自身のマニフェストの新旧両方を完全に制御できるため、ここに
+    /// 非暗号学的ハッシュ(64bit FNV など)を使うと誕生日衝突が現実的な計算量
+    /// (~2^32)で作れてしまい、host を追加した新バージョンを「差分なし」に
+    /// 見せかけて再承認プロンプトを回避できてしまう。SHA-256 は原像・第二原像・
+    /// 衝突のいずれも計算量的に不可能なので、`canonical` が異なれば
+    /// フィンガープリントも(実務上)必ず異なる。
     pub fn capabilities_fingerprint(&self) -> Option<String> {
         if self.capabilities.is_empty() {
             return None;
@@ -116,15 +124,25 @@ impl Manifest {
             canonical.push_str(&encode_field(request));
         }
 
-        Some(fnv1a_hex(&canonical))
+        Some(sha256_hex(&canonical))
     }
 
-    /// 全 capability 要求の host 一覧を平坦化して返す(要求元 kind の区別なし、
-    /// 重複を含みうる)。`driver-http` の許可判定に使う許可リストの元になる。
+    /// `Http` capability 要求の host 一覧を平坦化して返す(重複を含みうる)。
+    /// `driver-http` の許可判定に使う許可リストの元になる。
+    ///
+    /// 明示的に `Http` variant だけを `filter_map` で拾う書き方にしているのは、
+    /// 将来 `CapabilityRequest` に別の kind(例えば filesystem)が追加された
+    /// ときに、その kind の host らしきフィールドが黙って http 許可リストへ
+    /// 混入するのを防ぐため。新しい kind を http 許可リストにも含めたい場合は
+    /// このマッチ節を明示的に増やす必要がある。
     pub fn capability_hosts(&self) -> Vec<String> {
         self.capabilities
             .iter()
             .flat_map(|req| match req {
+                // Exhaustive match, not a wildcard/`if let` -- adding a new
+                // `CapabilityRequest` variant forces a compile error here
+                // rather than silently falling through and (for a wildcard
+                // arm) either joining or dropping its hosts by accident.
                 CapabilityRequest::Http { hosts, .. } => hosts.clone(),
             })
             .collect()
@@ -145,18 +163,17 @@ fn encode_field(s: &str) -> String {
     format!("{}:{}", s.len(), s)
 }
 
-/// FNV-1a 64bit ハッシュ。`DefaultHasher` と異なり実行ごとに値が変わらないため、
-/// マニフェスト間で安定比較が必要な fingerprint に使う(暗号強度は不要)。
-fn fnv1a_hex(input: &str) -> String {
-    const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
-    const FNV_PRIME: u64 = 0x100000001b3;
+/// SHA-256 の16進表現。`capabilities_fingerprint` はプラグイン作者自身が
+/// 完全に制御できる入力を衝突困難性つきで比較する必要があるため、暗号学的
+/// ハッシュ関数が必須(非暗号学的ハッシュだと誕生日衝突が現実的な計算量で
+/// 作れてしまう)。
+fn sha256_hex(input: &str) -> String {
+    use sha2::{Digest, Sha256};
 
-    let mut hash = FNV_OFFSET_BASIS;
-    for byte in input.as_bytes() {
-        hash ^= u64::from(*byte);
-        hash = hash.wrapping_mul(FNV_PRIME);
-    }
-    format!("{hash:016x}")
+    let mut hasher = Sha256::new();
+    hasher.update(input.as_bytes());
+    let digest = hasher.finalize();
+    digest.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// `load_manifest` が返しうるエラー。
@@ -240,8 +257,37 @@ fn validate_host(host: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn validate_capabilities(capabilities: &[CapabilityRequest]) -> Result<(), ManifestError> {
-    for capability in capabilities {
+/// `reason`(および必要なら `host`)に、ユーザーには見えない/見分けが
+/// つかない文字が紛れ込んでいないか検証する。
+///
+/// `capabilities_fingerprint` が承認対象のテキストをそのままハッシュに
+/// 含める以上、承認画面に描画されるテキストとフィンガープリントの元に
+/// なるテキストが byte-for-byte 一致していなければならない。制御文字
+/// (改行・タブなど)や幅を持たない文字(zero-width space/joiner, BOM)は
+/// UI 上ただの空白や何もない箇所に見えるため、これらを承認前に拒否して
+/// 「見た目には同じだが実際には異なる文字列」を承認させられる余地を潰す。
+fn reject_invisible_chars(field: &str, s: &str) -> Result<(), String> {
+    for c in s.chars() {
+        if c.is_control() {
+            return Err(format!(
+                "{field} must not contain control characters: {s:?}"
+            ));
+        }
+        // U+200B..U+200D (zero width space/non-joiner/joiner), U+FEFF (BOM /
+        // zero width no-break space), U+2060 (word joiner). Not an
+        // exhaustive Cf-category sweep, but covers the characters that are
+        // actually invisible in a rendered UI and cheap to type.
+        if matches!(c, '\u{200B}'..='\u{200D}' | '\u{FEFF}' | '\u{2060}') {
+            return Err(format!(
+                "{field} must not contain zero-width characters: {s:?}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_capabilities(capabilities: &mut [CapabilityRequest]) -> Result<(), ManifestError> {
+    for capability in capabilities.iter_mut() {
         match capability {
             CapabilityRequest::Http { hosts, reason } => {
                 if hosts.is_empty() {
@@ -249,12 +295,21 @@ fn validate_capabilities(capabilities: &[CapabilityRequest]) -> Result<(), Manif
                         "http capability requires at least one host".to_string(),
                     ));
                 }
-                if reason.trim().is_empty() {
+
+                // Normalize before validating/hashing so the text a user
+                // approves in the UI is byte-identical to the text that
+                // gates the grant fingerprint (see `reject_invisible_chars`).
+                let trimmed = reason.trim().to_string();
+                if trimmed.is_empty() {
                     return Err(ManifestError::BadCapability(
                         "http capability requires a non-empty reason".to_string(),
                     ));
                 }
-                for host in hosts {
+                reject_invisible_chars("reason", &trimmed).map_err(ManifestError::BadCapability)?;
+                *reason = trimmed;
+
+                for host in hosts.iter() {
+                    reject_invisible_chars("host", host).map_err(ManifestError::BadCapability)?;
                     validate_host(host).map_err(ManifestError::BadCapability)?;
                 }
             }
@@ -270,7 +325,7 @@ fn validate_capabilities(capabilities: &[CapabilityRequest]) -> Result<(), Manif
 pub fn load_manifest(dir: &Path) -> Result<Manifest, ManifestError> {
     let manifest_path = dir.join("manifest.toml");
     let content = fs::read_to_string(&manifest_path).map_err(ManifestError::Io)?;
-    let manifest: Manifest = toml::from_str(&content).map_err(ManifestError::Parse)?;
+    let mut manifest: Manifest = toml::from_str(&content).map_err(ManifestError::Parse)?;
 
     if !is_valid_id(&manifest.id) {
         return Err(ManifestError::BadId);
@@ -293,7 +348,7 @@ pub fn load_manifest(dir: &Path) -> Result<Manifest, ManifestError> {
         }
     }
 
-    validate_capabilities(&manifest.capabilities)?;
+    validate_capabilities(&mut manifest.capabilities)?;
 
     Ok(manifest)
 }
@@ -921,6 +976,176 @@ reason = "fetch data"
 
         let err = load_manifest(&plugin_dir).expect_err("host with userinfo should be rejected");
         assert!(matches!(err, ManifestError::BadCapability(_)));
+    }
+
+    #[test]
+    fn fingerprint_differs_when_host_added_even_with_previously_colliding_reason() {
+        // Adversarial pair for the retired FNV-1a-64 fingerprint: the plugin
+        // author controls both manifest versions, so under a 64-bit
+        // non-cryptographic hash they could pick a `reason` for v2 that
+        // collides with v1's fingerprint despite v2 adding a host (e.g.
+        // `evil.com`) that was never approved. `reason` is unconstrained
+        // free text (beyond trim + invisible-char rejection), so nothing
+        // stops an attacker from searching for such a pair against the old
+        // hash; SHA-256 makes that search computationally infeasible. This
+        // test doesn't reproduce a real FNV collision (that would require
+        // an actual birthday search) -- it documents the shape of the
+        // attack and asserts the current implementation does not share a
+        // fingerprint across a request-set change, which is the property
+        // that must hold regardless of what `reason` text is chosen.
+        fn manifest_with(hosts: Vec<&str>, reason: &str) -> Manifest {
+            Manifest {
+                id: "fp-plugin".into(),
+                name: "FP Plugin".into(),
+                version: "0.1.0".into(),
+                description: String::new(),
+                entry: "plugin.wasm".into(),
+                events: vec![],
+                settings: vec![],
+                capabilities: vec![CapabilityRequest::Http {
+                    hosts: hosts.into_iter().map(String::from).collect(),
+                    reason: reason.to_string(),
+                }],
+            }
+        }
+
+        let v1 = manifest_with(
+            vec!["https://approved.example.com"],
+            "please let me sync data",
+        );
+        let v2 = manifest_with(
+            vec!["https://approved.example.com", "https://evil.example.com"],
+            "please let me sync data",
+        );
+
+        assert_ne!(
+            v1.capabilities_fingerprint(),
+            v2.capabilities_fingerprint(),
+            "adding a host must always change the fingerprint, regardless of reason text"
+        );
+    }
+
+    #[test]
+    fn reason_with_zero_width_character_is_rejected() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin_dir = tmp.path().join("zero-width-reason-plugin");
+        fs::create_dir_all(&plugin_dir).unwrap();
+        write_entry(&plugin_dir, "plugin.wasm");
+        write_manifest(
+            &plugin_dir,
+            "id = \"zero-width-reason-plugin\"\nname = \"ZW\"\nversion = \"0.1.0\"\nentry = \"plugin.wasm\"\n\n[[capabilities]]\nkind = \"http\"\nhosts = [\"https://api.example.com\"]\nreason = \"fetch\u{200B}data\"\n",
+        );
+
+        let err = load_manifest(&plugin_dir)
+            .expect_err("zero-width character in reason must be rejected");
+        assert!(matches!(err, ManifestError::BadCapability(_)));
+    }
+
+    #[test]
+    fn reason_with_control_character_is_rejected() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin_dir = tmp.path().join("control-char-reason-plugin");
+        fs::create_dir_all(&plugin_dir).unwrap();
+        write_entry(&plugin_dir, "plugin.wasm");
+        write_manifest(
+            &plugin_dir,
+            "id = \"control-char-reason-plugin\"\nname = \"CC\"\nversion = \"0.1.0\"\nentry = \"plugin.wasm\"\n\n[[capabilities]]\nkind = \"http\"\nhosts = [\"https://api.example.com\"]\nreason = \"fetch\\ndata\"\n",
+        );
+
+        let err =
+            load_manifest(&plugin_dir).expect_err("control character in reason must be rejected");
+        assert!(matches!(err, ManifestError::BadCapability(_)));
+    }
+
+    #[test]
+    fn reason_is_trimmed_before_fingerprinting() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        let padded_dir = tmp.path().join("padded-reason-plugin");
+        fs::create_dir_all(&padded_dir).unwrap();
+        write_entry(&padded_dir, "plugin.wasm");
+        write_manifest(
+            &padded_dir,
+            r#"
+id = "padded-reason-plugin"
+name = "Padded"
+version = "0.1.0"
+entry = "plugin.wasm"
+
+[[capabilities]]
+kind = "http"
+hosts = ["https://api.example.com"]
+reason = "  foo  "
+"#,
+        );
+
+        let bare_dir = tmp.path().join("bare-reason-plugin");
+        fs::create_dir_all(&bare_dir).unwrap();
+        write_entry(&bare_dir, "plugin.wasm");
+        write_manifest(
+            &bare_dir,
+            r#"
+id = "bare-reason-plugin"
+name = "Bare"
+version = "0.1.0"
+entry = "plugin.wasm"
+
+[[capabilities]]
+kind = "http"
+hosts = ["https://api.example.com"]
+reason = "foo"
+"#,
+        );
+
+        let padded = load_manifest(&padded_dir).expect("padded reason should parse");
+        let bare = load_manifest(&bare_dir).expect("bare reason should parse");
+
+        assert_eq!(
+            padded.capabilities[0],
+            CapabilityRequest::Http {
+                hosts: vec!["https://api.example.com".to_string()],
+                reason: "foo".to_string(),
+            },
+            "reason must be trimmed before being stored"
+        );
+        assert_eq!(
+            padded.capabilities_fingerprint(),
+            bare.capabilities_fingerprint(),
+            "trimmed and already-bare reasons must fingerprint identically"
+        );
+    }
+
+    #[test]
+    fn old_fnv_format_fingerprint_does_not_validate_against_new_sha256_fingerprint() {
+        // Simulates an on-disk grant saved by the retired FNV-1a-64
+        // implementation (a 16 hex-char fingerprint) being checked against
+        // the current SHA-256 (64 hex-char) implementation. This must not
+        // silently validate -- it must simply mismatch and be treated as
+        // stale (fail closed), never panic.
+        let manifest = Manifest {
+            id: "legacy-fp-plugin".into(),
+            name: "Legacy".into(),
+            version: "0.1.0".into(),
+            description: String::new(),
+            entry: "plugin.wasm".into(),
+            events: vec![],
+            settings: vec![],
+            capabilities: vec![CapabilityRequest::Http {
+                hosts: vec!["https://api.example.com".to_string()],
+                reason: "fetch data".to_string(),
+            }],
+        };
+
+        let old_style_fingerprint = "0123456789abcdef"; // 16 hex chars, FNV-1a-64 shape
+        let current = manifest
+            .capabilities_fingerprint()
+            .expect("should have a value");
+
+        assert_ne!(
+            old_style_fingerprint, current,
+            "an old-format fingerprint must not coincide with the new format"
+        );
+        assert_eq!(current.len(), 64, "SHA-256 hex digest is 64 characters");
     }
 
     #[test]
