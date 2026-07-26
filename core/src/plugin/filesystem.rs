@@ -31,7 +31,8 @@ pub enum FilesystemConfigError {
     NotAbsolute(String),
     /// 実在しない、またはディレクトリでない。
     NotADirectory(String),
-    /// システム上重要なディレクトリ「そのもの」を指定した。
+    /// システム上重要なディレクトリ「そのもの」、または edlr 自身の状態
+    /// ディレクトリ(そのもの・祖先・配下)を指定した。
     ProtectedDirectory(String),
     Io(std::io::Error),
     Serialize(serde_json::Error),
@@ -65,15 +66,73 @@ impl std::error::Error for FilesystemConfigError {}
 /// 直列化する。
 pub struct FilesystemConfigStore {
     dir: PathBuf,
+    /// edlr 自身の状態ディレクトリ(settings / grants / plugins)。
+    /// 「そのもの、またはその祖先・配下」は承認先に選ばせない
+    /// ([`FilesystemConfigStore::is_protected`])。
+    state_dirs: Vec<PathBuf>,
     lock: Mutex<()>,
 }
 
 impl FilesystemConfigStore {
-    pub fn new(dir: PathBuf) -> Self {
+    /// `dir` は設定の保存先(= edlr の settings ディレクトリ)。
+    /// `state_dirs` には edlr 自身の**それ以外の**状態ディレクトリ
+    /// (grants / plugins)を渡す。`dir` 自身は常に保護対象に加わる。
+    ///
+    /// 呼び出し元は**既定値をハードコードせず、CLI で上書きされた実パス**を
+    /// 渡すこと(`core/src/bin/edlr.rs` を参照)。ここを既定値で埋めると、
+    /// `--grants-dir` で別の場所を指しているデーモンでその実際の場所が
+    /// 無防備になる。
+    pub fn new(dir: PathBuf, state_dirs: Vec<PathBuf>) -> Self {
+        let mut protected = vec![dir.clone()];
+        protected.extend(state_dirs);
+        let protected = protected.iter().map(|p| best_effort_absolute(p)).collect();
         FilesystemConfigStore {
             dir,
+            state_dirs: protected,
             lock: Mutex::new(()),
         }
+    }
+
+    /// ユーザーが選んだディレクトリを検証する。
+    ///
+    /// システム上重要なディレクトリ「そのもの」(`/`, `/etc`, `$HOME` など)と、
+    /// edlr 自身の状態ディレクトリ(そのもの・祖先・配下)を拒否する。
+    /// 承認画面での確認だけに頼らず、明らかな事故と昇格経路を 1 段止めるため
+    /// (それ以外の配下は許可する -- `/home/alice/Documents` は通り、`/home`
+    /// は通らない)。
+    fn validate_path(&self, name: &str, path: &str) -> Result<(), FilesystemConfigError> {
+        if path.is_empty() {
+            return Ok(()); // 未設定は許す(承認できないだけ)
+        }
+
+        let candidate = std::path::Path::new(path);
+        if !candidate.is_absolute() {
+            return Err(FilesystemConfigError::NotAbsolute(name.to_string()));
+        }
+
+        let canonical = candidate
+            .canonicalize()
+            .map_err(|_| FilesystemConfigError::NotADirectory(name.to_string()))?;
+        if !canonical.is_dir() {
+            return Err(FilesystemConfigError::NotADirectory(name.to_string()));
+        }
+
+        if is_system_protected(&canonical) || self.is_protected(&canonical) {
+            return Err(FilesystemConfigError::ProtectedDirectory(name.to_string()));
+        }
+        Ok(())
+    }
+
+    /// edlr 自身の状態ディレクトリに触れる選択かどうか。
+    ///
+    /// 「そのもの」だけでなく**祖先**も拒否する。`~/.config` を選べてしまえば
+    /// `~/.config/edlr/grants` 配下は丸ごと読み書きできてしまい、「そのもの」
+    /// しか見ない判定は意味を成さない。配下(`<grants-dir>/sub` など)も同じ
+    /// 理由で拒否する。
+    fn is_protected(&self, canonical: &std::path::Path) -> bool {
+        self.state_dirs.iter().any(|state| {
+            canonical == state || state.starts_with(canonical) || canonical.starts_with(state)
+        })
     }
 
     fn path_for(&self, manifest: &Manifest) -> PathBuf {
@@ -120,7 +179,7 @@ impl FilesystemConfigStore {
             .filesystem_root(name)
             .ok_or_else(|| FilesystemConfigError::UnknownRoot(name.to_string()))?;
 
-        validate_path(name, &config.path)?;
+        self.validate_path(name, &config.path)?;
 
         let mut merged = self.effective_locked(manifest);
         merged.insert(name.to_string(), config.clone());
@@ -141,36 +200,35 @@ impl FilesystemConfigStore {
     }
 }
 
-/// ユーザーが選んだディレクトリを検証する。
+/// 存在しないディレクトリも比較の対象にするための正規化。
 ///
-/// システム上重要なディレクトリ「そのもの」は拒否する。承認画面での確認だけに
-/// 頼らず、明らかな事故を 1 段止めるため(配下の任意のディレクトリは許可する
-/// -- `/home/alice/Documents` は通り、`/home` は通らない)。
-fn validate_path(name: &str, path: &str) -> Result<(), FilesystemConfigError> {
-    if path.is_empty() {
-        return Ok(()); // 未設定は許す(承認できないだけ)
+/// 状態ディレクトリは起動時にまだ存在しないことがある(初回起動の `grants`
+/// など)。`canonicalize` は存在しないパスで失敗するので、存在する最長の
+/// 祖先まで正規化し、残りをそのまま繋ぐ。正規化できなければ元のパスを返す
+/// (比較が緩くなるだけで、保護対象から外れることはない)。
+fn best_effort_absolute(path: &std::path::Path) -> PathBuf {
+    if let Ok(canonical) = path.canonicalize() {
+        return canonical;
     }
-
-    let candidate = std::path::Path::new(path);
-    if !candidate.is_absolute() {
-        return Err(FilesystemConfigError::NotAbsolute(name.to_string()));
+    let mut remainder = Vec::new();
+    let mut current = path;
+    while let Some(parent) = current.parent() {
+        let Some(name) = current.file_name() else { break };
+        remainder.push(name.to_os_string());
+        if let Ok(canonical) = parent.canonicalize() {
+            let mut resolved = canonical;
+            for name in remainder.iter().rev() {
+                resolved.push(name);
+            }
+            return resolved;
+        }
+        current = parent;
     }
-
-    let canonical = candidate
-        .canonicalize()
-        .map_err(|_| FilesystemConfigError::NotADirectory(name.to_string()))?;
-    if !canonical.is_dir() {
-        return Err(FilesystemConfigError::NotADirectory(name.to_string()));
-    }
-
-    if is_protected(&canonical) {
-        return Err(FilesystemConfigError::ProtectedDirectory(name.to_string()));
-    }
-    Ok(())
+    path.to_path_buf()
 }
 
-/// 「そのものは選ばせない」ディレクトリ。配下は許可する。
-fn is_protected(canonical: &std::path::Path) -> bool {
+/// 「そのものは選ばせない」システム上重要なディレクトリ。配下は許可する。
+fn is_system_protected(canonical: &std::path::Path) -> bool {
     const PROTECTED: &[&str] = &[
         "/", "/home", "/etc", "/usr", "/var", "/boot", "/dev", "/proc", "/sys", "/root", "/bin",
         "/sbin", "/lib",
@@ -224,7 +282,7 @@ mod tests {
     #[test]
     fn effective_defaults_to_an_empty_path() {
         let tmp = tempfile::tempdir().unwrap();
-        let store = FilesystemConfigStore::new(tmp.path().join("settings"));
+        let store = FilesystemConfigStore::new(tmp.path().join("settings"), Vec::new());
         let manifest = manifest_with(vec![request("exports")]);
 
         assert_eq!(store.effective(&manifest)["exports"].path, "");
@@ -236,7 +294,7 @@ mod tests {
         let dir = tmp.path().join("settings");
         let target = tmp.path().join("exports");
         std::fs::create_dir(&target).unwrap();
-        let store = FilesystemConfigStore::new(dir.clone());
+        let store = FilesystemConfigStore::new(dir.clone(), Vec::new());
         let manifest = manifest_with(vec![request("exports")]);
 
         let updated = store
@@ -251,14 +309,14 @@ mod tests {
         assert_eq!(updated["exports"].path, target.to_string_lossy());
         assert!(dir.join("fs-plugin.filesystem.json").is_file());
 
-        let reread = FilesystemConfigStore::new(dir).effective(&manifest);
+        let reread = FilesystemConfigStore::new(dir, Vec::new()).effective(&manifest);
         assert_eq!(reread["exports"].path, target.to_string_lossy());
     }
 
     #[test]
     fn relative_paths_missing_paths_and_files_are_rejected() {
         let tmp = tempfile::tempdir().unwrap();
-        let store = FilesystemConfigStore::new(tmp.path().join("settings"));
+        let store = FilesystemConfigStore::new(tmp.path().join("settings"), Vec::new());
         let manifest = manifest_with(vec![request("exports")]);
         let file = tmp.path().join("a-file");
         std::fs::write(&file, b"x").unwrap();
@@ -282,7 +340,7 @@ mod tests {
     #[test]
     fn protected_directories_are_rejected() {
         let tmp = tempfile::tempdir().unwrap();
-        let store = FilesystemConfigStore::new(tmp.path().join("settings"));
+        let store = FilesystemConfigStore::new(tmp.path().join("settings"), Vec::new());
         let manifest = manifest_with(vec![request("exports")]);
 
         for path in ["/", "/etc", "/home", "/usr", "/var"] {
@@ -306,7 +364,7 @@ mod tests {
         let dir = tmp.path().join("settings");
         let target = tmp.path().join("exports");
         std::fs::create_dir(&target).unwrap();
-        let store = FilesystemConfigStore::new(dir);
+        let store = FilesystemConfigStore::new(dir, Vec::new());
         let manifest = manifest_with(vec![request("exports")]);
         store
             .update_and_effective(
@@ -331,7 +389,7 @@ mod tests {
         let dir = tmp.path().join("settings");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("fs-plugin.filesystem.json"), "not json {{{").unwrap();
-        let store = FilesystemConfigStore::new(dir);
+        let store = FilesystemConfigStore::new(dir, Vec::new());
         let manifest = manifest_with(vec![request("exports")]);
 
         assert_eq!(store.effective(&manifest)["exports"].path, "");
@@ -343,10 +401,105 @@ mod tests {
         ));
     }
 
+    /// edlr 自身の状態ディレクトリ(settings / grants / plugins)と、その
+    /// **祖先**は選ばせない。
+    ///
+    /// read-write でここを承認できてしまうと、ファイルアクセスの承認が他の
+    /// capability への昇格経路になる: `<grants-dir>/<other-id>.json` を
+    /// 書き換えて他プラグインの承認を捏造する、`<plugins-dir>/<id>/plugin.wasm`
+    /// を差し替えて承認済みプラグインの中身をすり替える(fingerprint は
+    /// manifest だけを覆っており wasm バイト列を含まない)、
+    /// `<settings-dir>/<id>.sidecar.json` の `command` を書き換える、など。
+    /// 承認ダイアログの文言は「選んだフォルダ内のファイルを読み書きできます」
+    /// であって、他プラグインの承認を書き換えられる、ではない。
+    #[test]
+    fn edlrs_own_state_directories_and_their_ancestors_are_rejected() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = tmp.path().join("dot-config");
+        let edlr = config.join("edlr");
+        let settings = edlr.join("settings");
+        let grants = edlr.join("grants");
+        let plugins = edlr.join("plugins");
+        for dir in [&settings, &grants, &plugins] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        let store = FilesystemConfigStore::new(
+            settings.clone(),
+            vec![grants.clone(), plugins.clone()],
+        );
+        let manifest = manifest_with(vec![request("exports")]);
+
+        for path in [
+            settings.as_path(),
+            grants.as_path(),
+            plugins.as_path(),
+            // 祖先。`~/.config` 相当を選ばれると素通り、では意味が無い。
+            edlr.as_path(),
+            config.as_path(),
+            tmp.path(),
+        ] {
+            let err = store
+                .update_and_effective(
+                    &manifest,
+                    "exports",
+                    &FilesystemConfig {
+                        path: path.to_string_lossy().to_string(),
+                    },
+                )
+                .expect_err(&format!("{} must be rejected", path.display()));
+            assert!(
+                matches!(err, FilesystemConfigError::ProtectedDirectory(_)),
+                "{} should be protected, got {err:?}",
+                path.display()
+            );
+        }
+
+        // 無関係なディレクトリは引き続き通ること(過剰に締めていないこと)。
+        let unrelated = tmp.path().join("exports");
+        std::fs::create_dir(&unrelated).unwrap();
+        store
+            .update_and_effective(
+                &manifest,
+                "exports",
+                &FilesystemConfig {
+                    path: unrelated.to_string_lossy().to_string(),
+                },
+            )
+            .expect("an unrelated directory must still be accepted");
+    }
+
+    /// 起動時にはまだ存在しない状態ディレクトリ(初回起動の `grants` など)も
+    /// 保護対象であること。`canonicalize` に失敗したら諦める実装だと、
+    /// 「まだ無いディレクトリを先に承認しておく」で回避できてしまう。
+    #[test]
+    fn a_state_directory_that_does_not_exist_yet_is_still_protected() {
+        let tmp = tempfile::tempdir().unwrap();
+        let grants = tmp.path().join("state").join("grants");
+        let existing_parent = tmp.path().join("state");
+        std::fs::create_dir(&existing_parent).unwrap();
+        let store = FilesystemConfigStore::new(
+            tmp.path().join("settings"),
+            vec![grants.clone()],
+        );
+        let manifest = manifest_with(vec![request("exports")]);
+
+        // `grants` 自体はまだ無いので、その祖先(存在する)を選んで昇格を狙う。
+        let err = store
+            .update_and_effective(
+                &manifest,
+                "exports",
+                &FilesystemConfig {
+                    path: existing_parent.to_string_lossy().to_string(),
+                },
+            )
+            .expect_err("an ancestor of a not-yet-created state directory must be rejected");
+        assert!(matches!(err, FilesystemConfigError::ProtectedDirectory(_)));
+    }
+
     #[test]
     fn trailing_slash_on_a_protected_directory_is_still_rejected() {
         let tmp = tempfile::tempdir().unwrap();
-        let store = FilesystemConfigStore::new(tmp.path().join("settings"));
+        let store = FilesystemConfigStore::new(tmp.path().join("settings"), Vec::new());
         let manifest = manifest_with(vec![request("exports")]);
 
         let err = store
@@ -362,7 +515,7 @@ mod tests {
     #[test]
     fn dot_dot_traversal_into_a_protected_directory_is_rejected() {
         let tmp = tempfile::tempdir().unwrap();
-        let store = FilesystemConfigStore::new(tmp.path().join("settings"));
+        let store = FilesystemConfigStore::new(tmp.path().join("settings"), Vec::new());
         let manifest = manifest_with(vec![request("exports")]);
 
         let err = store
@@ -378,7 +531,7 @@ mod tests {
     #[test]
     fn a_symlink_that_resolves_to_a_protected_directory_is_rejected() {
         let tmp = tempfile::tempdir().unwrap();
-        let store = FilesystemConfigStore::new(tmp.path().join("settings"));
+        let store = FilesystemConfigStore::new(tmp.path().join("settings"), Vec::new());
         let manifest = manifest_with(vec![request("exports")]);
         let link = tmp.path().join("etc-link");
         std::os::unix::fs::symlink("/etc", &link).unwrap();

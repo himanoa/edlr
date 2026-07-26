@@ -74,7 +74,7 @@ fn hello_logger_registry() -> (tempfile::TempDir, Registry) {
     let settings_store = SettingsStore::new(tmp.path().join("settings"));
     let grants_store = GrantsStore::new(tmp.path().join("grants"));
     let sidecar_config_store = SidecarConfigStore::new(tmp.path().join("settings"));
-    let filesystem_config_store = FilesystemConfigStore::new(tmp.path().join("settings"));
+    let filesystem_config_store = FilesystemConfigStore::new(tmp.path().join("settings"), Vec::new());
     let router = Router::new(16);
     let host = PluginHost::new().expect("host should start");
 
@@ -141,7 +141,7 @@ fn http_caller_registry() -> (tempfile::TempDir, Registry) {
     let settings_store = SettingsStore::new(tmp.path().join("settings"));
     let grants_store = GrantsStore::new(tmp.path().join("grants"));
     let sidecar_config_store = SidecarConfigStore::new(tmp.path().join("settings"));
-    let filesystem_config_store = FilesystemConfigStore::new(tmp.path().join("settings"));
+    let filesystem_config_store = FilesystemConfigStore::new(tmp.path().join("settings"), Vec::new());
     let router = Router::new(16);
     let host = PluginHost::new().expect("host should start");
 

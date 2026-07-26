@@ -1181,7 +1181,7 @@ mod tests {
         let grants_store = Arc::new(GrantsStore::new(tmp.path().join("grants")));
         let sidecar_config_store = Arc::new(SidecarConfigStore::new(tmp.path().join("settings")));
         let filesystem_config_store =
-            Arc::new(FilesystemConfigStore::new(tmp.path().join("settings")));
+            Arc::new(FilesystemConfigStore::new(tmp.path().join("settings"), Vec::new()));
         let process_driver = Arc::new(ProcessDriver::new(
             Duration::from_millis(200),
             Duration::from_millis(0),
@@ -1633,7 +1633,7 @@ mod tests {
         let grants_store = Arc::new(GrantsStore::new(tmp.path().join("grants")));
         let sidecar_config_store = Arc::new(SidecarConfigStore::new(tmp.path().join("settings")));
         let filesystem_config_store =
-            Arc::new(FilesystemConfigStore::new(tmp.path().join("settings")));
+            Arc::new(FilesystemConfigStore::new(tmp.path().join("settings"), Vec::new()));
         let process_driver = Arc::new(ProcessDriver::new(
             Duration::from_millis(200),
             Duration::from_millis(0),
