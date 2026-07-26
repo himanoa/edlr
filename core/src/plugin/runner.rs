@@ -173,7 +173,12 @@ fn run_plugin_thread(
     events_rx: std_mpsc::Receiver<Arc<Event>>,
     ready_tx: std_mpsc::Sender<PluginState>,
 ) {
-    let ctx = HostCtx::new(manifest.id.clone(), settings_json, capabilities_json);
+    let ctx = HostCtx::new(
+        manifest.id.clone(),
+        settings_json,
+        capabilities_json,
+        host.http_driver(),
+    );
     let mut instance = match host.load(&entry_path, ctx) {
         Ok(instance) => instance,
         Err(e) => {

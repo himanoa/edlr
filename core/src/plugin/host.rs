@@ -29,8 +29,32 @@ use bindings::{Event as WitEvent, Plugin as PluginBindings};
 
 use crate::plugin::allowlist::check_url;
 
+/// Public re-exports of the generated `driver-http` WIT types, under names
+/// that don't collide with `edlr_driver_http`'s own (structurally identical
+/// but distinct) `Http*` types. These exist so that in-tree consumers --
+/// currently `core/tests/driver_http_integration.rs` -- can call
+/// `HostCtx::send` (the WIT-facing entry point) directly, without a full
+/// wasm round-trip, the same way this module's own unit tests do. The
+/// generated `bindings` module otherwise stays private.
+pub use bindings::edlr::plugin::driver_http::{
+    DriverError as WitHttpError, Host as WitDriverHttpHost, Request as WitHttpRequest,
+    Response as WitHttpResponse,
+};
+
 /// Interval between epoch ticks driven by the background ticker thread.
 const EPOCH_TICK_INTERVAL: Duration = Duration::from_millis(100);
+
+/// Per-call timeout applied to every `driver-http.send` request (covers
+/// connect through to the full response). Fixed for now; could become
+/// configurable per-plugin later if a legitimate use case needs it.
+pub const HTTP_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Maximum response body size, in bytes, a `driver-http.send` call will
+/// return before failing with a `transport` error. See
+/// `edlr_driver_http::HttpDriver::send` for how this is enforced (a
+/// streaming read capped at this limit, not a trusted `Content-Length`
+/// header).
+pub const HTTP_MAX_BODY: usize = 8 * 1024 * 1024;
 
 /// Maximum linear memory (bytes) a single plugin instance may allocate.
 ///
@@ -72,6 +96,13 @@ pub struct HostCtx {
     /// forge or observe another plugin's capability state, nor influence
     /// the decision through its inputs.
     pub capabilities_json: Arc<Mutex<String>>,
+    /// The HTTP client used by `driver-http.send` once a call has passed
+    /// the permission check above. Shared (via `Arc`) across every plugin
+    /// instance the owning `PluginHost` loads -- see `PluginHost::new`,
+    /// which builds exactly one `HttpDriver` for the whole host process, so
+    /// construction cost (TLS setup, etc.) is paid once rather than per
+    /// call or per plugin.
+    http_driver: Arc<edlr_driver_http::HttpDriver>,
     /// WASI state. The `plugin` world itself does not import WASI, but
     /// components built for the `wasm32-wasip2` target still import a
     /// baseline set of WASI interfaces (io, random, clocks, ...) from the
@@ -88,11 +119,13 @@ impl HostCtx {
         plugin_id: String,
         settings_json: Arc<Mutex<String>>,
         capabilities_json: Arc<Mutex<String>>,
+        http_driver: Arc<edlr_driver_http::HttpDriver>,
     ) -> HostCtx {
         HostCtx {
             plugin_id,
             settings_json,
             capabilities_json,
+            http_driver,
             // Deliberately empty sandbox default: no preopened directories,
             // no stdio, no network access, so a plugin can only interact
             // with the host through the `plugin` world's explicit imports.
@@ -194,17 +227,21 @@ fn parse_capabilities(raw: &str) -> Capabilities {
 }
 
 impl DriverHttpHost for HostCtx {
-    /// This task's `send` never performs any networking. It only decides
-    /// *whether* the call would be permitted: not granted -> `permission-
-    /// denied`; granted but the URL is outside the plugin's allowlisted
-    /// hosts -> `permission-denied` with the allowlist rejection reason;
-    /// otherwise -> `transport("not implemented")` as a placeholder for the
-    /// real HTTP call a later task wires in.
+    /// First decides *whether* the call is permitted, then -- only if so --
+    /// performs it: not granted -> `permission-denied`; granted but the URL
+    /// is outside the plugin's allowlisted hosts -> `permission-denied`
+    /// with the allowlist rejection reason; otherwise the request is
+    /// handed to `self.http_driver`, and its result is mapped onto the WIT
+    /// types (`HttpError::InvalidRequest` -> `invalid-request`,
+    /// `HttpError::Transport` -> `transport`).
     ///
-    /// The decision is made *entirely* from `self.capabilities_json`, which
-    /// is per-`HostCtx` (i.e. per plugin instance) and never derived from
-    /// `req`. The guest supplies only the URL it wants to reach; it has no
-    /// way to supply or influence its own grant state.
+    /// The permission decision is made *entirely* from
+    /// `self.capabilities_json`, which is per-`HostCtx` (i.e. per plugin
+    /// instance) and never derived from `req`. The guest supplies only the
+    /// URL it wants to reach; it has no way to supply or influence its own
+    /// grant state. Critically, the driver is never invoked until *after*
+    /// this check succeeds -- a disallowed host is rejected without any
+    /// network connection being attempted.
     fn send(&mut self, req: WitRequest) -> Result<WitResponse, WitDriverError> {
         let raw = self
             .capabilities_json
@@ -221,7 +258,26 @@ impl DriverHttpHost for HostCtx {
 
         check_url(&capabilities.hosts, &req.url).map_err(WitDriverError::PermissionDenied)?;
 
-        Err(WitDriverError::Transport("not implemented".to_string()))
+        let driver_request = edlr_driver_http::HttpRequest {
+            method: req.method,
+            url: req.url,
+            headers: req.headers,
+            body: req.body,
+        };
+
+        self.http_driver
+            .send(driver_request)
+            .map(|response| WitResponse {
+                status: response.status,
+                headers: response.headers,
+                body: response.body,
+            })
+            .map_err(|e| match e {
+                edlr_driver_http::HttpError::InvalidRequest(msg) => {
+                    WitDriverError::InvalidRequest(msg)
+                }
+                edlr_driver_http::HttpError::Transport(msg) => WitDriverError::Transport(msg),
+            })
     }
 }
 
@@ -231,6 +287,11 @@ impl DriverHttpHost for HostCtx {
 pub struct PluginHost {
     engine: Engine,
     ticker_stop: Arc<AtomicBool>,
+    /// The single `HttpDriver` shared by every plugin instance this host
+    /// loads. Built once here (not per plugin, not per call) since
+    /// constructing a `reqwest::blocking::Client` sets up TLS/connection
+    /// pool state that's meant to be reused.
+    http_driver: Arc<edlr_driver_http::HttpDriver>,
 }
 
 impl PluginHost {
@@ -251,10 +312,23 @@ impl PluginHost {
             }
         });
 
+        let http_driver = Arc::new(
+            edlr_driver_http::HttpDriver::new(HTTP_TIMEOUT, HTTP_MAX_BODY)
+                .map_err(|e| anyhow::anyhow!("failed to build http driver: {e}"))?,
+        );
+
         Ok(PluginHost {
             engine,
             ticker_stop,
+            http_driver,
         })
+    }
+
+    /// Returns a clone of the shared `HttpDriver` `Arc` for wiring into a
+    /// new plugin's `HostCtx`. Cloning an `Arc` is cheap; this does not
+    /// build a new HTTP client.
+    pub fn http_driver(&self) -> Arc<edlr_driver_http::HttpDriver> {
+        self.http_driver.clone()
     }
 
     pub fn load(&self, wasm_path: &Path, ctx: HostCtx) -> anyhow::Result<PluginInstance> {
@@ -348,11 +422,19 @@ mod tests {
     //! real guest call would.
     use super::*;
 
+    fn test_http_driver() -> Arc<edlr_driver_http::HttpDriver> {
+        Arc::new(
+            edlr_driver_http::HttpDriver::new(HTTP_TIMEOUT, HTTP_MAX_BODY)
+                .expect("build test http driver"),
+        )
+    }
+
     fn ctx(capabilities_json: &str) -> HostCtx {
         HostCtx::new(
             "test-plugin".to_string(),
             Arc::new(Mutex::new("{}".to_string())),
             Arc::new(Mutex::new(capabilities_json.to_string())),
+            test_http_driver(),
         )
     }
 
@@ -417,17 +499,28 @@ mod tests {
         assert!(matches!(err, WitDriverError::PermissionDenied(_)));
     }
 
+    /// Once permission checks pass, `send` must actually dispatch to the
+    /// driver rather than short-circuiting -- this is what task 3's
+    /// `not-implemented` placeholder used to do, and this task replaces it
+    /// with real networking. This test doesn't hit a live server (see
+    /// `core/tests/driver_http_integration.rs` for the real end-to-end
+    /// cases); it targets a bound-then-dropped local port, which is
+    /// guaranteed to refuse the connection, to prove the call reaches the
+    /// driver and comes back as a typed `transport` error rather than a
+    /// `permission-denied` or a panic.
     #[test]
-    fn send_granted_and_allowed_host_is_not_implemented_transport() {
-        let mut ctx = ctx(&capabilities_json_string(
-            true,
-            &["https://api.example.com".to_string()],
-        ));
+    fn send_granted_and_allowed_host_reaches_the_driver() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("local_addr");
+        drop(listener);
+        let url = format!("http://{addr}/ping");
+
+        let mut ctx = ctx(&capabilities_json_string(true, &[format!("http://{addr}")]));
 
         let err = ctx
-            .send(request("https://api.example.com/ping"))
-            .expect_err("this task does not implement real networking yet");
+            .send(request(&url))
+            .expect_err("connection to a closed local port should fail");
 
-        assert!(matches!(err, WitDriverError::Transport(msg) if msg == "not implemented"));
+        assert!(matches!(err, WitDriverError::Transport(_)));
     }
 }

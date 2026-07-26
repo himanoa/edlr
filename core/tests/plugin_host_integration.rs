@@ -1,4 +1,5 @@
-use edlr_core::plugin::host::{HostCtx, PluginHost, PluginInstance};
+use edlr_core::plugin::host::{HostCtx, PluginHost, PluginInstance, HTTP_MAX_BODY, HTTP_TIMEOUT};
+use edlr_driver_http::HttpDriver;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
@@ -48,6 +49,14 @@ fn ctx(settings_json: &str) -> (HostCtx, Arc<Mutex<String>>) {
     (ctx, settings)
 }
 
+/// These tests never exercise real networking (the http-caller fixture's
+/// calls are always denied or would fail fast), so any driver instance
+/// works; reuse the production constants purely to avoid a second
+/// hardcoded timeout/cap drifting from `core/src/plugin/host.rs`.
+fn test_http_driver() -> Arc<edlr_driver_http::HttpDriver> {
+    Arc::new(HttpDriver::new(HTTP_TIMEOUT, HTTP_MAX_BODY).expect("build test http driver"))
+}
+
 fn ctx_with_capabilities(
     settings_json: &str,
     capabilities_json: &str,
@@ -59,6 +68,7 @@ fn ctx_with_capabilities(
             "test-plugin".to_string(),
             settings.clone(),
             capabilities.clone(),
+            test_http_driver(),
         ),
         settings,
         capabilities,
@@ -204,19 +214,25 @@ fn http_caller_on_event_does_not_trap_when_ungranted() {
         .expect("on-event should not trap when the capability is ungranted");
 }
 
-/// Same as above, but with the capability granted for the default url the
-/// fixture calls (`https://api.example.com/ping`). This task's host
-/// implementation still does no networking -- it returns
-/// `transport("not implemented")` once permission checks pass -- but that is
-/// still a typed error the guest can catch, so the call must not trap
-/// either.
+/// Same as above, but with the capability granted for the url the fixture
+/// calls, so the call reaches the real `HttpDriver` this task wires in.
+/// Points at a bound-then-dropped local port (rather than a real internet
+/// host) so the driver fails fast with a typed `transport` error -- still
+/// not a trap, and without this test depending on outbound network access
+/// being available in whatever environment runs it.
 #[test]
 fn http_caller_on_event_does_not_trap_when_granted_for_allowed_host() {
     let wasm = http_caller_wasm();
     let host = PluginHost::new().expect("host should start");
-    let capabilities_json = r#"{"granted":true,"hosts":["https://api.example.com"]}"#;
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind throwaway listener");
+    let addr = listener.local_addr().expect("local_addr");
+    drop(listener);
+
+    let settings_json = format!(r#"{{"url":"http://{addr}/ping"}}"#);
+    let capabilities_json = format!(r#"{{"granted":true,"hosts":["http://{addr}"]}}"#);
     let (mut instance, _settings, _capabilities) =
-        load_with_capabilities(&host, &wasm, r#"{}"#, capabilities_json);
+        load_with_capabilities(&host, &wasm, &settings_json, &capabilities_json);
 
     instance.call_init().expect("call_init should succeed");
     instance
