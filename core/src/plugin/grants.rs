@@ -57,6 +57,11 @@ struct SavedGrant {
     /// grant ファイルにはこのキーが無いため `default` で空マップになる。
     #[serde(default)]
     sidecars: std::collections::BTreeMap<String, SavedSidecarGrant>,
+    /// ファイルアクセスのルート名 → その 1 件の承認状態。既存(ファイル
+    /// アクセス導入前)の grant ファイルにはこのキーが無いため `default` で
+    /// 空マップになる。
+    #[serde(default)]
+    filesystem: std::collections::BTreeMap<String, SavedSidecarGrant>,
 }
 
 /// サイドカー 1 件分の保存済み承認状態。
@@ -227,6 +232,74 @@ impl GrantsStore {
         self.write_saved(manifest, &saved)?;
 
         Ok(self.sidecar_state_locked(manifest, name))
+    }
+
+    /// ファイルアクセスのルート 1 件の承認状態。判定規則は `state()` と同じ
+    /// (未保存 → 未承認 / fingerprint 不一致 → stale / 一致 → 保存値)。
+    pub fn filesystem_state(&self, manifest: &Manifest, name: &str) -> GrantState {
+        let _guard = self.lock.lock().unwrap_or_else(|p| p.into_inner());
+        self.filesystem_state_locked(manifest, name)
+    }
+
+    fn filesystem_state_locked(&self, manifest: &Manifest, name: &str) -> GrantState {
+        let Some(current) = manifest.filesystem_fingerprint(name) else {
+            return GrantState {
+                granted: false,
+                stale: false,
+            };
+        };
+        let Some(saved) = self.read_saved(manifest) else {
+            return GrantState {
+                granted: false,
+                stale: false,
+            };
+        };
+        let Some(entry) = saved.filesystem.get(name) else {
+            return GrantState {
+                granted: false,
+                stale: false,
+            };
+        };
+        if entry.fingerprint != current {
+            return GrantState {
+                granted: false,
+                stale: true,
+            };
+        }
+        GrantState {
+            granted: entry.granted,
+            stale: false,
+        }
+    }
+
+    /// ファイルアクセスのルート 1 件の承認/取消を保存する。manifest にない
+    /// `name` は no-op。
+    pub fn set_filesystem(
+        &self,
+        manifest: &Manifest,
+        name: &str,
+        granted: bool,
+    ) -> Result<GrantState, GrantsError> {
+        let _guard = self.lock.lock().unwrap_or_else(|p| p.into_inner());
+
+        let Some(current) = manifest.filesystem_fingerprint(name) else {
+            return Ok(GrantState {
+                granted: false,
+                stale: false,
+            });
+        };
+
+        let mut saved = self.read_saved(manifest).unwrap_or_default();
+        saved.filesystem.insert(
+            name.to_string(),
+            SavedSidecarGrant {
+                granted,
+                fingerprint: current,
+            },
+        );
+        self.write_saved(manifest, &saved)?;
+
+        Ok(self.filesystem_state_locked(manifest, name))
     }
 }
 
@@ -598,6 +671,96 @@ mod tests {
         assert_eq!(
             store.sidecar_state(&manifest, "tts"),
             GrantState { granted: true, stale: false }
+        );
+    }
+
+    fn manifest_with_fs(mode: crate::plugin::manifest::FilesystemMode) -> Manifest {
+        Manifest {
+            id: "fs-plugin".into(),
+            name: "FS".into(),
+            version: "0.1.0".into(),
+            description: String::new(),
+            entry: "plugin.wasm".into(),
+            events: vec![],
+            settings: vec![],
+            capabilities: vec![],
+            sidecars: vec![],
+            filesystem: vec![crate::plugin::manifest::FilesystemRequest {
+                name: "exports".into(),
+                reason: "reason".into(),
+                mode,
+            }],
+        }
+    }
+
+    #[test]
+    fn filesystem_grant_defaults_to_ungranted_and_persists() {
+        use crate::plugin::manifest::FilesystemMode;
+        let tmp = tempfile::tempdir().unwrap();
+        let store = GrantsStore::new(tmp.path().join("grants"));
+        let manifest = manifest_with_fs(FilesystemMode::ReadWrite);
+
+        assert_eq!(
+            store.filesystem_state(&manifest, "exports"),
+            GrantState { granted: false, stale: false }
+        );
+        store.set_filesystem(&manifest, "exports", true).unwrap();
+        assert_eq!(
+            store.filesystem_state(&manifest, "exports"),
+            GrantState { granted: true, stale: false }
+        );
+    }
+
+    #[test]
+    fn changing_the_mode_makes_the_filesystem_grant_stale() {
+        use crate::plugin::manifest::FilesystemMode;
+        let tmp = tempfile::tempdir().unwrap();
+        let store = GrantsStore::new(tmp.path().join("grants"));
+        store
+            .set_filesystem(&manifest_with_fs(FilesystemMode::Read), "exports", true)
+            .unwrap();
+
+        assert_eq!(
+            store.filesystem_state(&manifest_with_fs(FilesystemMode::ReadWrite), "exports"),
+            GrantState { granted: false, stale: true }
+        );
+    }
+
+    #[test]
+    fn filesystem_http_and_sidecar_grants_are_independent() {
+        use crate::plugin::manifest::FilesystemMode;
+        let tmp = tempfile::tempdir().unwrap();
+        let store = GrantsStore::new(tmp.path().join("grants"));
+        let mut manifest = manifest_with_fs(FilesystemMode::ReadWrite);
+        manifest.capabilities = vec![CapabilityRequest::Http {
+            hosts: vec!["https://api.example.com".into()],
+            reason: "fetch".into(),
+        }];
+
+        store.set_filesystem(&manifest, "exports", true).unwrap();
+        store.set(&manifest, true).unwrap();
+
+        assert!(store.state(&manifest).granted);
+        assert!(
+            store.filesystem_state(&manifest, "exports").granted,
+            "granting http must not clobber the filesystem grant"
+        );
+    }
+
+    #[test]
+    fn unknown_filesystem_root_is_never_granted() {
+        use crate::plugin::manifest::FilesystemMode;
+        let tmp = tempfile::tempdir().unwrap();
+        let store = GrantsStore::new(tmp.path().join("grants"));
+        let manifest = manifest_with_fs(FilesystemMode::Read);
+
+        assert_eq!(
+            store.filesystem_state(&manifest, "nope"),
+            GrantState { granted: false, stale: false }
+        );
+        assert_eq!(
+            store.set_filesystem(&manifest, "nope", true).unwrap(),
+            GrantState { granted: false, stale: false }
         );
     }
 
