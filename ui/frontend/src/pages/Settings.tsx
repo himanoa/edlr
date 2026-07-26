@@ -42,9 +42,16 @@ export default function Settings() {
   }, []);
 
   const handlePick = async () => {
-    const picked = await invoke<string | null>("pick_journal_dir");
-    if (!mountedRef.current || picked === null) return;
-    setDraft(picked);
+    setError(null);
+    setNotice(null);
+    try {
+      const picked = await invoke<string | null>("pick_journal_dir");
+      if (!mountedRef.current || picked === null) return;
+      setDraft(picked);
+    } catch (err) {
+      if (!mountedRef.current) return;
+      setError(err instanceof Error ? err.message : String(err));
+    }
   };
 
   const handleSave = async () => {

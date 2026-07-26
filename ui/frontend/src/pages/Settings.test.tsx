@@ -58,7 +58,8 @@ describe("Tauri 環境", () => {
     await userEvent.type(input, "/mnt/game/ED");
     await userEvent.click(screen.getByRole("button", { name: "保存" }));
 
-    expect(await screen.findByText(/保存しました/)).toBeInTheDocument();
+    expect(await screen.findByText(/デーモンを再起動しました/)).toBeInTheDocument();
+    expect(mockInvoke).toHaveBeenCalledWith("set_journal_dir", { path: "/mnt/game/ED" });
   });
 
   it("パスが不正ならエラーを出す", async () => {
@@ -108,5 +109,62 @@ describe("Tauri 環境", () => {
     render(<Settings />);
 
     expect(await screen.findByText(/設定ファイルを読み込めませんでした/)).toBeInTheDocument();
+  });
+
+  it("ディレクトリ選択に成功したら draft に反映する", async () => {
+    mockIsTauri.mockReturnValue(true);
+    mockInvoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "get_config") {
+        return { journalDir: null, daemonManaged: true, configError: null };
+      }
+      if (cmd === "pick_journal_dir") {
+        return "/mnt/game/Picked";
+      }
+      throw new Error(`unexpected command: ${cmd}`);
+    });
+
+    render(<Settings />);
+    await screen.findByLabelText("Journal ディレクトリ");
+    await userEvent.click(screen.getByRole("button", { name: "選択…" }));
+
+    expect(await screen.findByDisplayValue("/mnt/game/Picked")).toBeInTheDocument();
+  });
+
+  it("ディレクトリ選択がキャンセルされたら draft は変わらない", async () => {
+    mockIsTauri.mockReturnValue(true);
+    mockInvoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "get_config") {
+        return { journalDir: "/mnt/game/ED", daemonManaged: true, configError: null };
+      }
+      if (cmd === "pick_journal_dir") {
+        return null;
+      }
+      throw new Error(`unexpected command: ${cmd}`);
+    });
+
+    render(<Settings />);
+    await screen.findByDisplayValue("/mnt/game/ED");
+    await userEvent.click(screen.getByRole("button", { name: "選択…" }));
+
+    expect(await screen.findByDisplayValue("/mnt/game/ED")).toBeInTheDocument();
+  });
+
+  it("ディレクトリ選択に失敗したらエラーを出す", async () => {
+    mockIsTauri.mockReturnValue(true);
+    mockInvoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "get_config") {
+        return { journalDir: null, daemonManaged: true, configError: null };
+      }
+      if (cmd === "pick_journal_dir") {
+        throw new Error("no desktop portal available");
+      }
+      throw new Error(`unexpected command: ${cmd}`);
+    });
+
+    render(<Settings />);
+    await screen.findByLabelText("Journal ディレクトリ");
+    await userEvent.click(screen.getByRole("button", { name: "選択…" }));
+
+    expect(await screen.findByText(/no desktop portal available/)).toBeInTheDocument();
   });
 });

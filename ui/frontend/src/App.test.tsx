@@ -31,4 +31,25 @@ describe("初期タブ", () => {
     });
     vi.doUnmock("./lib/tauri");
   });
+
+  it("journalDir が設定済みなら Dashboard のままになる", async () => {
+    vi.resetModules();
+    vi.doMock("./lib/tauri", () => ({
+      isTauri: () => true,
+      invoke: vi.fn().mockResolvedValue({
+        journalDir: "/some/path",
+        daemonManaged: true,
+        configError: null,
+      }),
+    }));
+    const { default: FreshApp } = await import("./App");
+
+    render(<FreshApp />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Dashboard" })).toHaveClass("active");
+    });
+    expect(screen.getByRole("button", { name: "Settings" })).not.toHaveClass("active");
+    vi.doUnmock("./lib/tauri");
+  });
 });
