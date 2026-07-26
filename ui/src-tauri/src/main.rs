@@ -24,24 +24,30 @@ fn resolve_bin() -> Option<PathBuf> {
     )
 }
 
-/// 未起動ならデーモンを spawn して Child を返す。起動済み・失敗時は None。
+/// 未起動ならデーモンを spawn する。
+///
+/// 戻り値は `Child`(spawn できた場合のみ)と、どう扱ったかを表す
+/// `DaemonStartup`。`Child` の有無だけでは「外部で動いているので触らない」と
+/// 「起動に失敗した」を区別できないため、後者を呼び出し元へ明示的に伝える。
 ///
 /// `journal_dir` は呼び出し元(`main`)が `config::resolve_journal_dir` で
 /// env と設定ファイルを解決済みの実効値。restart / display と同じ解決
 /// ロジックを一箇所に集約するため、ここでは重ねて解決しない。
-fn autostart_daemon(journal_dir: Option<PathBuf>) -> Option<std::process::Child> {
+fn autostart_daemon(
+    journal_dir: Option<PathBuf>,
+) -> (Option<std::process::Child>, config::DaemonStartup) {
     if daemon::daemon_running(daemon::DAEMON_ADDR) {
         eprintln!(
             "edlr daemon already running on {}; leaving it alone",
             daemon::DAEMON_ADDR
         );
-        return None;
+        return (None, config::DaemonStartup::External);
     }
     let Some(bin) = resolve_bin() else {
-        eprintln!(
-            "edlr binary not found (set EDLR_BIN or put edlr on PATH); starting UI without daemon"
-        );
-        return None;
+        let reason =
+            "edlr binary not found (set EDLR_BIN or put edlr on PATH)".to_string();
+        eprintln!("{reason}; starting UI without daemon");
+        return (None, config::DaemonStartup::Failed(reason));
     };
     match daemon::spawn_daemon(&bin, journal_dir.as_deref()) {
         Ok(child) => {
@@ -50,11 +56,12 @@ fn autostart_daemon(journal_dir: Option<PathBuf>) -> Option<std::process::Child>
                 child.id(),
                 bin.display()
             );
-            Some(child)
+            (Some(child), config::DaemonStartup::Spawned)
         }
         Err(e) => {
-            eprintln!("failed to spawn edlr daemon from {}: {e}", bin.display());
-            None
+            let reason = format!("failed to spawn edlr daemon from {}: {e}", bin.display());
+            eprintln!("{reason}");
+            (None, config::DaemonStartup::Failed(reason))
         }
     }
 }
@@ -76,6 +83,11 @@ struct AppState {
     config_path: PathBuf,
     config: Mutex<edlr_config::AppConfig>,
     config_error: Mutex<Option<String>>,
+    /// デーモンが起動していない理由(起動時の spawn 失敗)。
+    ///
+    /// 再起動に成功したらクリアする。残したままだと、ユーザーが設定を直して
+    /// デーモンが動き出した後も古いエラーが出続けてしまう。
+    daemon_error: Mutex<Option<String>>,
     /// `EDLR_JOURNAL_DIR` の値。`main` 起動時に一度だけ読み、以降は不変。
     ///
     /// spawn(起動時)・restart(`set_journal_dir`)・display(`snapshot`)の
@@ -131,6 +143,11 @@ fn snapshot(state: &AppState) -> config::ConfigDto {
             .map(|p| p.to_string_lossy().to_string()),
         daemon_managed: state.owns_daemon,
         config_error: error.clone(),
+        daemon_error: state
+            .daemon_error
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone(),
         env_override: state.env_journal_dir.is_some(),
     }
 }
@@ -180,6 +197,48 @@ fn set_journal_dir(
         restart_daemon(&state.daemon, resolved.as_deref()).map_err(|e| {
             format!("設定は保存されました。ただしデーモンの再起動に失敗しました: {e}")
         })?;
+        // 再起動できたので、起動時の失敗理由はもう表示しない。
+        *state
+            .daemon_error
+            .lock()
+            .unwrap_or_else(|p| p.into_inner()) = None;
+    }
+
+    Ok(snapshot(&state))
+}
+
+/// 設定ファイルの journal_dir を消し、デーモンの自動検出へ戻す。
+///
+/// `set_journal_dir` に空文字を渡す形にしなかったのは、あちらの
+/// `is_dir()` 検証と意味が衝突するため。「消す」は別の操作として明示する。
+/// 保存後の再起動と、外部起動デーモンには触らない方針は `set_journal_dir`
+/// と同じ。
+#[tauri::command(async)]
+fn clear_journal_dir(state: tauri::State<'_, AppState>) -> Result<config::ConfigDto, String> {
+    let cleared = edlr_config::AppConfig { journal_dir: None };
+    cleared
+        .save(&state.config_path)
+        .map_err(|e| format!("設定の保存に失敗しました: {e}"))?;
+
+    {
+        let mut guard = state.config.lock().unwrap_or_else(|p| p.into_inner());
+        *guard = cleared;
+    }
+    {
+        let mut guard = state.config_error.lock().unwrap_or_else(|p| p.into_inner());
+        *guard = None;
+    }
+
+    if state.owns_daemon {
+        // 設定を消したので、実効値は env のみ(無ければ None = 自動検出)。
+        let resolved = config::resolve_journal_dir(state.env_journal_dir.clone(), None);
+        restart_daemon(&state.daemon, resolved.as_deref()).map_err(|e| {
+            format!("設定は消去されました。ただしデーモンの再起動に失敗しました: {e}")
+        })?;
+        *state
+            .daemon_error
+            .lock()
+            .unwrap_or_else(|p| p.into_inner()) = None;
     }
 
     Ok(snapshot(&state))
@@ -209,8 +268,9 @@ fn main() {
     let env_journal_dir = std::env::var_os("EDLR_JOURNAL_DIR").map(PathBuf::from);
     let resolved_journal_dir =
         config::resolve_journal_dir(env_journal_dir.clone(), loaded.config.journal_dir.clone());
-    let child = autostart_daemon(resolved_journal_dir);
-    let owns_daemon = child.is_some();
+    let (child, startup) = autostart_daemon(resolved_journal_dir);
+    let owns_daemon = startup.owns_daemon();
+    let daemon_error = startup.error();
 
     // state は manage へムーブされるため、停止用にこのハンドルを手元へ残す。
     let daemon = Arc::new(Mutex::new(child));
@@ -221,6 +281,7 @@ fn main() {
         config_path: loaded.path,
         config: Mutex::new(loaded.config),
         config_error: Mutex::new(loaded.error),
+        daemon_error: Mutex::new(daemon_error),
         env_journal_dir,
     };
 
@@ -230,6 +291,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             get_config,
             set_journal_dir,
+            clear_journal_dir,
             pick_journal_dir
         ])
         .build(tauri::generate_context!())

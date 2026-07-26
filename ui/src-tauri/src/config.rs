@@ -9,6 +9,41 @@ pub struct LoadedConfig {
     pub error: Option<String>,
 }
 
+/// 起動時にデーモンをどう扱ったか。
+///
+/// `Child` を持っているかどうかだけでは「外部で動いているので触らない」と
+/// 「起動しようとして失敗した」を区別できない。前者だけが `daemonManaged:
+/// false`(= このアプリは手出ししない)の正しい意味であり、後者を同じ扱いに
+/// すると UI が「外部のデーモンが動作中」と嘘をつくうえ、再試行の経路も
+/// 塞がってしまう。
+#[derive(Debug, Clone, PartialEq)]
+pub enum DaemonStartup {
+    /// このアプリが spawn した。
+    Spawned,
+    /// 外部で既に動いていたので触っていない。
+    External,
+    /// このアプリが起動を試みて失敗した。何も動いていない。
+    Failed(String),
+}
+
+impl DaemonStartup {
+    /// このアプリがデーモンのライフサイクルに責任を持つか。
+    ///
+    /// 失敗した場合も責任は持ち続ける(再試行できる)。責任を手放すのは
+    /// 外部起動のデーモンを見つけたときだけ。
+    pub fn owns_daemon(&self) -> bool {
+        !matches!(self, DaemonStartup::External)
+    }
+
+    /// UI に見せる起動失敗の理由。失敗していなければ `None`。
+    pub fn error(&self) -> Option<String> {
+        match self {
+            DaemonStartup::Failed(reason) => Some(reason.clone()),
+            _ => None,
+        }
+    }
+}
+
 /// 優先順位は env → 設定ファイル → None。
 ///
 /// `None` は「`--journal-dir` を渡さない」を意味し、デーモンが従来どおり
@@ -62,6 +97,12 @@ pub struct ConfigDto {
     /// 外部起動のデーモンなので再起動できない(勝手に殺さない)。
     pub daemon_managed: bool,
     pub config_error: Option<String>,
+    /// 起動時にデーモンを spawn しようとして失敗した理由。
+    ///
+    /// `daemon_managed: true` かつこれが `Some` のときは「このアプリの
+    /// 責任範囲だが今は動いていない」を意味する。設定を保存すれば
+    /// 再試行される。
+    pub daemon_error: Option<String>,
     /// `EDLR_JOURNAL_DIR` が設定されており、`journal_dir` がそれに
     /// 由来しているか。true の間は設定ファイルを保存しても実効値は
     /// 変わらない(env が優先される)。
@@ -100,6 +141,7 @@ mod tests {
             configured_journal_dir: Some("/mnt/game/ED".to_string()),
             daemon_managed: true,
             config_error: None,
+            daemon_error: None,
             env_override: false,
         };
 
@@ -110,6 +152,27 @@ mod tests {
         assert_eq!(json["daemonManaged"], true);
         assert!(json["configError"].is_null());
         assert_eq!(json["envOverride"], false);
+        assert!(json["daemonError"].is_null());
+    }
+
+    #[test]
+    fn dto_carries_daemon_startup_failure() {
+        // 起動に失敗したときは owns_daemon を保ったまま(= 外部デーモン扱いに
+        // しない)、理由を UI へ渡す。
+        let startup = DaemonStartup::Failed("edlr binary not found".to_string());
+        let dto = ConfigDto {
+            journal_dir: None,
+            configured_journal_dir: None,
+            daemon_managed: startup.owns_daemon(),
+            config_error: None,
+            env_override: false,
+            daemon_error: startup.error(),
+        };
+
+        let json = serde_json::to_value(&dto).unwrap();
+
+        assert_eq!(json["daemonManaged"], true);
+        assert_eq!(json["daemonError"], "edlr binary not found");
     }
 
     #[test]
@@ -123,6 +186,7 @@ mod tests {
             configured_journal_dir: Some("/from/config".to_string()),
             daemon_managed: true,
             config_error: None,
+            daemon_error: None,
             env_override: true,
         };
 
@@ -141,5 +205,30 @@ mod tests {
         let config = Some(PathBuf::from("/from/config"));
         let resolved = resolve_journal_dir(env.clone(), config);
         assert_eq!(resolved, env);
+    }
+
+    #[test]
+    fn spawned_daemon_is_owned_and_has_no_error() {
+        let startup = DaemonStartup::Spawned;
+        assert!(startup.owns_daemon());
+        assert_eq!(startup.error(), None);
+    }
+
+    #[test]
+    fn external_daemon_is_not_owned() {
+        // 外部で起動しているデーモンには触らない。これが daemonManaged: false
+        // の唯一の正しい意味。
+        let startup = DaemonStartup::External;
+        assert!(!startup.owns_daemon());
+        assert_eq!(startup.error(), None);
+    }
+
+    #[test]
+    fn failed_spawn_is_still_owned_and_reports_why() {
+        // 起動に失敗しただけで「外部のデーモンが動いている」と表示するのは嘘。
+        // 責任は依然このアプリにあり、再試行もできなければならない。
+        let startup = DaemonStartup::Failed("edlr binary not found".to_string());
+        assert!(startup.owns_daemon());
+        assert_eq!(startup.error(), Some("edlr binary not found".to_string()));
     }
 }

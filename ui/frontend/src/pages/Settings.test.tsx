@@ -247,3 +247,95 @@ describe("Tauri 環境", () => {
     expect(await screen.findByText(/no desktop portal available/)).toBeInTheDocument();
   });
 });
+
+describe("自動検出へ戻す", () => {
+  it("設定値があるときだけボタンを出す", async () => {
+    mockIsTauri.mockReturnValue(true);
+    mockInvoke.mockResolvedValue({
+      journalDir: "/mnt/game/ED",
+      configuredJournalDir: "/mnt/game/ED",
+      daemonManaged: true,
+      configError: null,
+      daemonError: null,
+      envOverride: false,
+    });
+
+    render(<Settings />);
+
+    expect(
+      await screen.findByRole("button", { name: "自動検出に戻す" }),
+    ).toBeInTheDocument();
+  });
+
+  it("設定値が無いときはボタンを出さない", async () => {
+    mockIsTauri.mockReturnValue(true);
+    mockInvoke.mockResolvedValue({
+      journalDir: null,
+      configuredJournalDir: null,
+      daemonManaged: true,
+      configError: null,
+      daemonError: null,
+      envOverride: false,
+    });
+
+    render(<Settings />);
+    await screen.findByLabelText("Journal ディレクトリ");
+
+    expect(
+      screen.queryByRole("button", { name: "自動検出に戻す" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("押すと clear_journal_dir を呼び、入力欄が空になる", async () => {
+    mockIsTauri.mockReturnValue(true);
+    mockInvoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "get_config") {
+        return {
+          journalDir: "/mnt/game/ED",
+          configuredJournalDir: "/mnt/game/ED",
+          daemonManaged: true,
+          configError: null,
+          daemonError: null,
+          envOverride: false,
+        };
+      }
+      if (cmd === "clear_journal_dir") {
+        return {
+          journalDir: null,
+          configuredJournalDir: null,
+          daemonManaged: true,
+          configError: null,
+          daemonError: null,
+          envOverride: false,
+        };
+      }
+      throw new Error(`unexpected command: ${cmd}`);
+    });
+
+    render(<Settings />);
+    await screen.findByDisplayValue("/mnt/game/ED");
+    await userEvent.click(screen.getByRole("button", { name: "自動検出に戻す" }));
+
+    expect(mockInvoke).toHaveBeenCalledWith("clear_journal_dir");
+    expect(await screen.findByText(/自動検出に戻しました/)).toBeInTheDocument();
+    expect(screen.getByLabelText("Journal ディレクトリ")).toHaveValue("");
+  });
+});
+
+describe("デーモン起動失敗", () => {
+  it("daemonError があれば理由を表示する", async () => {
+    mockIsTauri.mockReturnValue(true);
+    mockInvoke.mockResolvedValue({
+      journalDir: null,
+      configuredJournalDir: null,
+      daemonManaged: true,
+      configError: null,
+      daemonError: "edlr binary not found (set EDLR_BIN or put edlr on PATH)",
+      envOverride: false,
+    });
+
+    render(<Settings />);
+
+    expect(await screen.findByText(/edlr binary not found/)).toBeInTheDocument();
+  });
+});

@@ -58,6 +58,24 @@ export default function Settings() {
     }
   };
 
+  const handleClear = async () => {
+    setSaving(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const updated = await invoke<AppConfigDto>("clear_journal_dir");
+      if (!mountedRef.current) return;
+      setConfig(updated);
+      setDraft("");
+      setNotice("自動検出に戻しました。");
+    } catch (err) {
+      if (!mountedRef.current) return;
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      if (mountedRef.current) setSaving(false);
+    }
+  };
+
   const handleSave = async () => {
     setSaving(true);
     setError(null);
@@ -101,6 +119,14 @@ export default function Settings() {
             </p>
           )}
 
+          {config?.daemonError && (
+            <p className="form-error">
+              デーモンを起動できませんでした: {config.daemonError}
+              <br />
+              保存すると再度起動を試みます。
+            </p>
+          )}
+
           {config?.envOverride && (
             <p className="note">
               環境変数 EDLR_JOURNAL_DIR が設定されているため、デーモンは現在
@@ -125,6 +151,11 @@ export default function Settings() {
           <button type="button" onClick={handleSave} disabled={saving || draft === ""}>
             保存
           </button>
+          {config?.configuredJournalDir !== null && (
+            <button type="button" onClick={handleClear} disabled={saving}>
+              自動検出に戻す
+            </button>
+          )}
 
           <p className="note">
             未設定の場合は Proton の既定パスを自動検出します。自動検出が当たらない環境
