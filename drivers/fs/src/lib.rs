@@ -84,8 +84,13 @@ impl FsDriver {
             )));
         }
 
+        // `read_to_end` は上限を見ないので、`take` で上限 + 1 バイトに
+        // 制限してから読む。`fstat` の後にファイルが伸びても(`append` に
+        // サイズ上限は無い)、上限を超えて確保することは無い。
         let mut buf = Vec::with_capacity(size as usize);
-        file.read_to_end(&mut buf)
+        (&mut file)
+            .take(self.read_limit as u64 + 1)
+            .read_to_end(&mut buf)
             .map_err(|e| FsError::Io(e.to_string()))?;
         if buf.len() > self.read_limit {
             // 開いてから読み終えるまでに伸びた場合。
@@ -152,46 +157,48 @@ impl FsDriver {
 
     /// `prefix` 配下を再帰的に列挙する。ファイルのみを返し、ディレクトリ
     /// 自体は含めない。`prefix` が空文字ならルート直下から。
-    /// シンボリックリンクは(リンク先がルート内でも)列挙しない。
+    ///
+    /// 走査は最初から最後まで fd 基準で行う(起点は `openat::Dir::open`、
+    /// 降下は親 fd 相対の `openat2`)。パス文字列を組み立てて `read_dir` を
+    /// 呼ぶと、ディレクトリを見つけてから開くまでの間にシンボリックリンクへ
+    /// 差し替えられ、ルート外のファイル名・サイズ・更新時刻が「ルート配下の
+    /// 相対パス」として返りうる。`prefix` 自体がリンクの場合も同じ理由で
+    /// 拒否される(`read` と同じ扱い)。
+    ///
+    /// シンボリックリンクは、リンク先がルート内でも列挙しない。
     pub fn list(&self, root: &Path, prefix: &str) -> Result<Vec<Entry>, FsError> {
-        let root_canonical = path::canonical_root(root)?;
-        let base = if prefix.is_empty() {
-            root_canonical.clone()
-        } else {
-            path::resolve_existing(root, prefix)?
-        };
+        // 1・2 段目 + 3 段目。`prefix` がリンクならここで `InvalidPath`。
+        let base = openat::Dir::open(root, prefix)?;
 
         let mut entries = Vec::new();
-        let mut stack = vec![base];
-        while let Some(dir) = stack.pop() {
-            let read_dir = std::fs::read_dir(&dir).map_err(|e| FsError::Io(e.to_string()))?;
-            for item in read_dir {
-                let item = item.map_err(|e| FsError::Io(e.to_string()))?;
-                // `metadata` はリンク先を見てしまうので、種別は
-                // `file_type`(lstat 相当)で判定してリンクを先に弾く。
-                let file_type = item.file_type().map_err(|e| FsError::Io(e.to_string()))?;
-                if file_type.is_symlink() {
-                    continue;
+        let mut stack = vec![(base, prefix.to_string())];
+        while let Some((dir, dir_path)) = stack.pop() {
+            for item in dir.entries()? {
+                let relative = if dir_path.is_empty() {
+                    item.name.clone()
+                } else {
+                    format!("{dir_path}/{}", item.name)
+                };
+
+                match item.kind {
+                    openat::EntryKind::RegularFile => {}
+                    openat::EntryKind::Directory => {
+                        // `open_dir` は親 fd 相対に `O_NOFOLLOW` で開くので、
+                        // 列挙してから開くまでにリンクへ差し替えられていれば
+                        // `None` になって読み飛ばされる。
+                        if let Some(child) = dir.open_dir(&item.name)? {
+                            stack.push((child, relative));
+                        }
+                        continue;
+                    }
+                    // シンボリックリンク・FIFO・デバイスは列挙しない。
+                    openat::EntryKind::Other => continue,
                 }
-                let path = item.path();
-                if file_type.is_dir() {
-                    stack.push(path);
-                    continue;
-                }
-                if !file_type.is_file() {
-                    // FIFO やデバイスファイルは列挙しない。
-                    continue;
-                }
-                let meta = item.metadata().map_err(|e| FsError::Io(e.to_string()))?;
-                let relative = path
-                    .strip_prefix(&root_canonical)
-                    .map_err(|_| FsError::InvalidPath("entry escapes the granted root".into()))?
-                    .to_string_lossy()
-                    .to_string();
+
                 entries.push(Entry {
                     path: relative,
-                    size: meta.len(),
-                    modified: modified_secs(&meta),
+                    size: item.size,
+                    modified: item.modified,
                 });
                 if entries.len() > self.list_limit {
                     return Err(FsError::TooLarge(format!(
@@ -309,7 +316,6 @@ fn modified_secs(meta: &std::fs::Metadata) -> Option<u64> {
 mod tests {
     use super::*;
     use std::fs;
-    use std::path::Path;
 
     const READ_LIMIT: usize = 8 * 1024 * 1024;
 
@@ -550,5 +556,54 @@ mod tests {
         assert_eq!(fs::read(&victim).unwrap(), b"original");
     }
 
-    fn _assert_path_type(_: &Path) {}
+    /// `prefix` にルート内のシンボリックリンクディレクトリを渡した `list` は、
+    /// 同じリンクに対する `read` と同じく拒否されること。`list` だけ
+    /// シンボリックリンクを解決する、という不整合を固定で防ぐ。
+    #[test]
+    fn list_refuses_a_symlinked_prefix_exactly_like_read_does() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = driver();
+        d.write(dir.path(), "real/x.txt", b"x").unwrap();
+        std::os::unix::fs::symlink(dir.path().join("real"), dir.path().join("alias")).unwrap();
+
+        let read_err = d
+            .read(dir.path(), "alias/x.txt")
+            .expect_err("read through a symlinked directory must be refused");
+        let list_err = d
+            .list(dir.path(), "alias")
+            .expect_err("list through a symlinked directory must be refused too");
+
+        assert!(matches!(read_err, FsError::InvalidPath(_)), "{read_err:?}");
+        assert!(matches!(list_err, FsError::InvalidPath(_)), "{list_err:?}");
+    }
+
+    /// 再帰走査の途中に現れたシンボリックリンクディレクトリを辿らないこと。
+    /// 辿ると、ルート外のファイル名・サイズ・更新時刻が「ルート配下の相対
+    /// パス」として返ってしまう。
+    #[test]
+    fn list_does_not_descend_into_symlinked_directories_it_meets_while_recursing() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        fs::write(outside.path().join("secret.txt"), b"secret").unwrap();
+        let d = driver();
+
+        d.write(dir.path(), "sub/real.txt", b"x").unwrap();
+        // ルート外を指すリンクと、ルート内を指すリンクの両方。
+        std::os::unix::fs::symlink(outside.path(), dir.path().join("escape")).unwrap();
+        std::os::unix::fs::symlink(dir.path().join("sub"), dir.path().join("alias")).unwrap();
+
+        let mut listed: Vec<String> = d
+            .list(dir.path(), "")
+            .unwrap()
+            .into_iter()
+            .map(|e| e.path)
+            .collect();
+        listed.sort();
+
+        assert_eq!(
+            listed,
+            vec!["sub/real.txt".to_string()],
+            "list must neither follow symlinked directories nor report the links themselves"
+        );
+    }
 }
