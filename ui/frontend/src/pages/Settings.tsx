@@ -27,7 +27,11 @@ export default function Settings() {
       .then((res) => {
         if (!mountedRef.current) return;
         setConfig(res);
-        setDraft(res.journalDir ?? "");
+        // 編集フォームの初期値は設定ファイルの生の値から取る(実効値
+        // journalDir ではない)。envOverride 中に journalDir を使うと、
+        // 編集せずに保存しただけで env 由来の値を設定ファイルへ
+        // 書き戻してしまい、保存済みの値を消してしまう。
+        setDraft(res.configuredJournalDir ?? "");
         setStatus("ready");
       })
       .catch((err) => {
@@ -99,8 +103,11 @@ export default function Settings() {
 
           {config?.envOverride && (
             <p className="note">
-              環境変数 EDLR_JOURNAL_DIR が設定されているため、ここで保存してもデーモンには
-              環境変数の値が優先して使われます。
+              環境変数 EDLR_JOURNAL_DIR が設定されているため、デーモンは現在
+              {" "}
+              {config.journalDir} を使用しています。ここで編集・保存できるのは設定ファイルの値
+              (下の入力欄の初期値)で、環境変数が解除されるまでは保存しても実際の反映先は
+              変わりません。
             </p>
           )}
 

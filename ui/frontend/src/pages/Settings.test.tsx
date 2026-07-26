@@ -35,6 +35,7 @@ describe("Tauri 環境", () => {
     mockIsTauri.mockReturnValue(true);
     mockInvoke.mockResolvedValue({
       journalDir: "/mnt/game/ED",
+      configuredJournalDir: "/mnt/game/ED",
       daemonManaged: true,
       configError: null,
     });
@@ -42,6 +43,59 @@ describe("Tauri 環境", () => {
     render(<Settings />);
 
     expect(await screen.findByDisplayValue("/mnt/game/ED")).toBeInTheDocument();
+  });
+
+  it("envOverride 中は実効値ではなく設定ファイルの値を入力欄に表示する", async () => {
+    // envOverride が true で、実効値(journalDir)と設定ファイルの生の値
+    // (configuredJournalDir)が食い違うケース。編集フォームは設定ファイルの
+    // 値を起点にしないと、無編集で保存しただけで env 由来の値を設定ファイルへ
+    // 書き戻し、保存済みの値を消してしまう(Finding 1)。
+    mockIsTauri.mockReturnValue(true);
+    mockInvoke.mockResolvedValue({
+      journalDir: "/env/ED",
+      configuredJournalDir: "/mnt/game/ED",
+      daemonManaged: true,
+      configError: null,
+      envOverride: true,
+    });
+
+    render(<Settings />);
+
+    expect(await screen.findByDisplayValue("/mnt/game/ED")).toBeInTheDocument();
+    expect(screen.queryByDisplayValue("/env/ED")).not.toBeInTheDocument();
+  });
+
+  it("envOverride 中に無編集のまま保存すると、実効値ではなく設定ファイルの値を送る", async () => {
+    // 上のテストの続き: 実際に保存ボタンを押したとき set_journal_dir へ渡る
+    // path が env 値(/env/ED)ではなく設定ファイルの値(/mnt/game/ED)である
+    // ことを確認する。ここが env 値のままだと、保存のたびに設定ファイルが
+    // env 値で上書きされ、env を外したときに意図しないディレクトリで
+    // デーモンが起動してしまう。
+    mockIsTauri.mockReturnValue(true);
+    mockInvoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "get_config") {
+        return {
+          journalDir: "/env/ED",
+          configuredJournalDir: "/mnt/game/ED",
+          daemonManaged: true,
+          configError: null,
+          envOverride: true,
+        };
+      }
+      return {
+        journalDir: "/env/ED",
+        configuredJournalDir: "/mnt/game/ED",
+        daemonManaged: true,
+        configError: null,
+        envOverride: true,
+      };
+    });
+
+    render(<Settings />);
+    await screen.findByDisplayValue("/mnt/game/ED");
+    await userEvent.click(screen.getByRole("button", { name: "保存" }));
+
+    expect(mockInvoke).toHaveBeenCalledWith("set_journal_dir", { path: "/mnt/game/ED" });
   });
 
   it("保存に成功したら成功メッセージを出す", async () => {
@@ -154,7 +208,12 @@ describe("Tauri 環境", () => {
     mockIsTauri.mockReturnValue(true);
     mockInvoke.mockImplementation(async (cmd: string) => {
       if (cmd === "get_config") {
-        return { journalDir: "/mnt/game/ED", daemonManaged: true, configError: null };
+        return {
+          journalDir: "/mnt/game/ED",
+          configuredJournalDir: "/mnt/game/ED",
+          daemonManaged: true,
+          configError: null,
+        };
       }
       if (cmd === "pick_journal_dir") {
         return null;

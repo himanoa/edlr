@@ -47,7 +47,17 @@ pub struct ConfigDto {
     /// 実際にデーモンへ渡される(渡された)実効値。
     /// `resolve_journal_dir` で env と設定ファイルを解決した後の値であり、
     /// spawn・restart・この表示の 3 箇所は常にこの値で一致する。
+    ///
+    /// 表示用・`App.tsx` のルーティング判定用の値。編集・保存の起点には
+    /// 使わない(`env_override` が true のとき、これは env 由来の値になり、
+    /// 設定ファイルの値とは限らないため)。
     pub journal_dir: Option<String>,
+    /// 設定ファイル(`config.json`)に実際に保存されている生の値。
+    /// `env_override` の有無に関わらず、常に設定ファイルの内容そのもの。
+    /// Settings 画面の編集フォームはこの値を起点にする(`journal_dir` を
+    /// 起点にすると、env override 中の再保存で env の値を設定ファイルへ
+    /// 書き戻してしまい、保存済みの値を消してしまう)。
+    pub configured_journal_dir: Option<String>,
     /// Tauri が spawn したデーモンを保持しているか。`false` の場合は
     /// 外部起動のデーモンなので再起動できない(勝手に殺さない)。
     pub daemon_managed: bool,
@@ -87,6 +97,7 @@ mod tests {
     fn dto_serializes_to_camel_case() {
         let dto = ConfigDto {
             journal_dir: Some("/mnt/game/ED".to_string()),
+            configured_journal_dir: Some("/mnt/game/ED".to_string()),
             daemon_managed: true,
             config_error: None,
             env_override: false,
@@ -95,9 +106,31 @@ mod tests {
         let json = serde_json::to_value(&dto).unwrap();
 
         assert_eq!(json["journalDir"], "/mnt/game/ED");
+        assert_eq!(json["configuredJournalDir"], "/mnt/game/ED");
         assert_eq!(json["daemonManaged"], true);
         assert!(json["configError"].is_null());
         assert_eq!(json["envOverride"], false);
+    }
+
+    #[test]
+    fn dto_distinguishes_effective_from_configured_when_env_overrides() {
+        // env override 中は journal_dir(実効値)と configured_journal_dir
+        // (設定ファイルの生の値)が食い違いうる。Settings 画面はこの 2 つを
+        // 区別できないと、再保存のたびに env 由来の値で設定ファイルを
+        // 上書きしてしまう(このテストが守る不変条件)。
+        let dto = ConfigDto {
+            journal_dir: Some("/from/env".to_string()),
+            configured_journal_dir: Some("/from/config".to_string()),
+            daemon_managed: true,
+            config_error: None,
+            env_override: true,
+        };
+
+        let json = serde_json::to_value(&dto).unwrap();
+
+        assert_eq!(json["journalDir"], "/from/env");
+        assert_eq!(json["configuredJournalDir"], "/from/config");
+        assert_eq!(json["envOverride"], true);
     }
 
     #[test]

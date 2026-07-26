@@ -125,6 +125,10 @@ fn snapshot(state: &AppState) -> config::ConfigDto {
         config::resolve_journal_dir(state.env_journal_dir.clone(), config.journal_dir.clone());
     config::ConfigDto {
         journal_dir: resolved.map(|p| p.to_string_lossy().to_string()),
+        configured_journal_dir: config
+            .journal_dir
+            .clone()
+            .map(|p| p.to_string_lossy().to_string()),
         daemon_managed: state.owns_daemon,
         config_error: error.clone(),
         env_override: state.env_journal_dir.is_some(),
