@@ -157,12 +157,67 @@ fn get_config(state: tauri::State<'_, AppState>) -> config::ConfigDto {
     snapshot(&state)
 }
 
-/// journal_dir を検証・保存し、Tauri 管理下のデーモンを再起動する。
+/// 再起動したデーモンが実際に応答するようになるまで待つ。
 ///
-/// 外部起動のデーモンを掴んでいる場合は保存のみ行い、再起動しない
-/// (`daemonManaged: false` を返して UI 側に反映を促す)。
-/// 再起動に失敗しても保存はロールバックしない。ユーザーが入力した正しい値まで
-/// 失われるため。
+/// `spawn()` の成否は生存を意味しない(デーモンは journal ディレクトリを
+/// 決められないと `exit(1)` する)。listen し始めたかどうかで判定する。
+fn wait_until_listening(attempts: u32) -> bool {
+    for _ in 0..attempts {
+        if daemon::daemon_running(daemon::DAEMON_ADDR) {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+    false
+}
+
+/// 設定を保存し、Tauri 管理下のデーモンを実効値で再起動する共通処理。
+///
+/// `set_journal_dir` と `clear_journal_dir` は保存する中身が違うだけで
+/// 手順は同じなので、ここに集約する(片方だけ直して不変条件がずれるのを防ぐ)。
+///
+/// - 外部起動のデーモンを掴んでいる場合は保存のみ行い、再起動しない
+/// - 再起動に失敗しても保存はロールバックしない(ユーザーの正しい入力を消さない)
+/// - 再起動できても応答しなければ `daemon_error` を残す
+fn apply_config(
+    state: &AppState,
+    updated: edlr_config::AppConfig,
+    fail_prefix: &str,
+) -> Result<(), String> {
+    updated
+        .save(&state.config_path)
+        .map_err(|e| format!("設定の保存に失敗しました: {e}"))?;
+
+    let journal_dir = updated.journal_dir.clone();
+    {
+        let mut guard = state.config.lock().unwrap_or_else(|p| p.into_inner());
+        *guard = updated;
+    }
+    {
+        let mut guard = state.config_error.lock().unwrap_or_else(|p| p.into_inner());
+        *guard = None;
+    }
+
+    if !state.owns_daemon {
+        return Ok(());
+    }
+
+    // 保存した値そのものではなく、env を含めた実効値で再起動する。
+    // `snapshot` の表示・次回起動時の spawn 先と常に同じ値になるように。
+    let resolved = config::resolve_journal_dir(state.env_journal_dir.clone(), journal_dir);
+    restart_daemon(&state.daemon, resolved.as_deref())
+        .map_err(|e| format!("{fail_prefix}ただしデーモンの再起動に失敗しました: {e}"))?;
+
+    // spawn できただけでは足りない。応答を確認できて初めてエラーを消す。
+    let came_up = wait_until_listening(10);
+    *state
+        .daemon_error
+        .lock()
+        .unwrap_or_else(|p| p.into_inner()) = config::daemon_error_after_restart(came_up);
+    Ok(())
+}
+
+/// journal_dir を検証・保存し、Tauri 管理下のデーモンを再起動する。
 #[tauri::command(async)]
 fn set_journal_dir(
     state: tauri::State<'_, AppState>,
@@ -173,36 +228,13 @@ fn set_journal_dir(
         return Err(format!("ディレクトリが存在しません: {path}"));
     }
 
-    let updated = edlr_config::AppConfig {
-        journal_dir: Some(dir.clone()),
-    };
-    updated
-        .save(&state.config_path)
-        .map_err(|e| format!("設定の保存に失敗しました: {e}"))?;
-
-    {
-        let mut guard = state.config.lock().unwrap_or_else(|p| p.into_inner());
-        *guard = updated;
-    }
-    {
-        let mut guard = state.config_error.lock().unwrap_or_else(|p| p.into_inner());
-        *guard = None;
-    }
-
-    if state.owns_daemon {
-        // 保存した値そのものではなく、env を含めた実効値で再起動する。
-        // `snapshot` の表示・次回起動時の spawn 先と常に同じ値になるように
-        // (env が設定されていればそちらが優先される)。
-        let resolved = config::resolve_journal_dir(state.env_journal_dir.clone(), Some(dir));
-        restart_daemon(&state.daemon, resolved.as_deref()).map_err(|e| {
-            format!("設定は保存されました。ただしデーモンの再起動に失敗しました: {e}")
-        })?;
-        // 再起動できたので、起動時の失敗理由はもう表示しない。
-        *state
-            .daemon_error
-            .lock()
-            .unwrap_or_else(|p| p.into_inner()) = None;
-    }
+    apply_config(
+        &state,
+        edlr_config::AppConfig {
+            journal_dir: Some(dir),
+        },
+        "設定は保存されました。",
+    )?;
 
     Ok(snapshot(&state))
 }
@@ -211,35 +243,16 @@ fn set_journal_dir(
 ///
 /// `set_journal_dir` に空文字を渡す形にしなかったのは、あちらの
 /// `is_dir()` 検証と意味が衝突するため。「消す」は別の操作として明示する。
-/// 保存後の再起動と、外部起動デーモンには触らない方針は `set_journal_dir`
-/// と同じ。
+///
+/// デーモンが起動に失敗している状態からの再試行にもこれを使う
+/// (実体は「現在の実効値で spawn し直す」であり同じ操作)。
 #[tauri::command(async)]
 fn clear_journal_dir(state: tauri::State<'_, AppState>) -> Result<config::ConfigDto, String> {
-    let cleared = edlr_config::AppConfig { journal_dir: None };
-    cleared
-        .save(&state.config_path)
-        .map_err(|e| format!("設定の保存に失敗しました: {e}"))?;
-
-    {
-        let mut guard = state.config.lock().unwrap_or_else(|p| p.into_inner());
-        *guard = cleared;
-    }
-    {
-        let mut guard = state.config_error.lock().unwrap_or_else(|p| p.into_inner());
-        *guard = None;
-    }
-
-    if state.owns_daemon {
-        // 設定を消したので、実効値は env のみ(無ければ None = 自動検出)。
-        let resolved = config::resolve_journal_dir(state.env_journal_dir.clone(), None);
-        restart_daemon(&state.daemon, resolved.as_deref()).map_err(|e| {
-            format!("設定は消去されました。ただしデーモンの再起動に失敗しました: {e}")
-        })?;
-        *state
-            .daemon_error
-            .lock()
-            .unwrap_or_else(|p| p.into_inner()) = None;
-    }
+    apply_config(
+        &state,
+        edlr_config::AppConfig { journal_dir: None },
+        "設定は消去されました。",
+    )?;
 
     Ok(snapshot(&state))
 }

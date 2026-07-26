@@ -339,3 +339,109 @@ describe("デーモン起動失敗", () => {
     expect(await screen.findByText(/edlr binary not found/)).toBeInTheDocument();
   });
 });
+
+describe("get_config が失敗したとき", () => {
+  it("自動検出に戻すボタンを出さない", async () => {
+    // config が null のままなので、保存済みの値があるかどうか分からない。
+    // `config?.configuredJournalDir !== null` は undefined !== null で true に
+    // なってしまうため、この状態でボタンが出ないことを固定する。
+    mockIsTauri.mockReturnValue(true);
+    mockInvoke.mockRejectedValue(new Error("ipc unavailable"));
+
+    render(<Settings />);
+    await screen.findByText(/ipc unavailable/);
+
+    expect(
+      screen.queryByRole("button", { name: "自動検出に戻す" }),
+    ).not.toBeInTheDocument();
+  });
+});
+
+describe("デーモン起動失敗からの再試行", () => {
+  it("daemonError があれば設定値が無くても再試行できる", async () => {
+    // Part 1 の狙いは「起動に失敗しても責任を持ち続け、再試行できる」こと。
+    // 保存ボタンは draft === "" で無効、クリアボタンは設定値が無いと非表示、
+    // では再試行の経路が無い。
+    mockIsTauri.mockReturnValue(true);
+    mockInvoke.mockResolvedValue({
+      journalDir: null,
+      configuredJournalDir: null,
+      daemonManaged: true,
+      configError: null,
+      daemonError: "edlr binary not found",
+      envOverride: false,
+    });
+
+    render(<Settings />);
+    await screen.findByText(/edlr binary not found/);
+
+    expect(
+      screen.getByRole("button", { name: "デーモンの起動を再試行" }),
+    ).toBeEnabled();
+  });
+});
+
+describe("env override 中のクリア", () => {
+  it("自動検出ではなく環境変数が使われ続けると伝える", async () => {
+    mockIsTauri.mockReturnValue(true);
+    mockInvoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "get_config") {
+        return {
+          journalDir: "/from/env",
+          configuredJournalDir: "/mnt/game/ED",
+          daemonManaged: true,
+          configError: null,
+          daemonError: null,
+          envOverride: true,
+        };
+      }
+      return {
+        journalDir: "/from/env",
+        configuredJournalDir: null,
+        daemonManaged: true,
+        configError: null,
+        daemonError: null,
+        envOverride: true,
+      };
+    });
+
+    render(<Settings />);
+    await screen.findByDisplayValue("/mnt/game/ED");
+    await userEvent.click(screen.getByRole("button", { name: "自動検出に戻す" }));
+
+    // 「自動検出に戻しました」だけだと嘘になる。env が生きている限り
+    // デーモンは env の値を使い続ける。
+    expect(await screen.findByText(/引き続き環境変数の値/)).toBeInTheDocument();
+  });
+
+  it("env override が無ければ素直に自動検出に戻したと言う", async () => {
+    mockIsTauri.mockReturnValue(true);
+    mockInvoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "get_config") {
+        return {
+          journalDir: "/mnt/game/ED",
+          configuredJournalDir: "/mnt/game/ED",
+          daemonManaged: true,
+          configError: null,
+          daemonError: null,
+          envOverride: false,
+        };
+      }
+      return {
+        journalDir: null,
+        configuredJournalDir: null,
+        daemonManaged: true,
+        configError: null,
+        daemonError: null,
+        envOverride: false,
+      };
+    });
+
+    render(<Settings />);
+    await screen.findByDisplayValue("/mnt/game/ED");
+    await userEvent.click(screen.getByRole("button", { name: "自動検出に戻す" }));
+
+    expect(await screen.findByText(/自動検出に戻しました/)).toBeInTheDocument();
+    expect(screen.queryByText(/引き続き環境変数の値/)).not.toBeInTheDocument();
+  });
+});

@@ -53,6 +53,26 @@ pub fn resolve_journal_dir(env: Option<PathBuf>, config: Option<PathBuf>) -> Opt
     env.or(config)
 }
 
+/// 再起動後に `daemon_error` へ入れるべき値を決める。
+///
+/// `spawn()` が `Ok` を返すことと、デーモンが生きていることは別物である。
+/// デーモンは journal ディレクトリを決められないと `exit(1)` する
+/// (`core/src/bin/edlr.rs`)。設定値を消して自動検出へ戻したとき、
+/// 自動検出が外れる環境ではまさにこれが起きる — つまり、この機能を
+/// 必要としているユーザーほど踏みやすい。spawn の成否だけで成功と表示すると、
+/// 設定が消えデーモンも死んだ状態を「成功」と報告してしまう。
+pub fn daemon_error_after_restart(came_up: bool) -> Option<String> {
+    if came_up {
+        None
+    } else {
+        Some(
+            "デーモンを起動しましたが応答しません。Journal ディレクトリの自動検出に\
+             失敗した可能性があります(ディレクトリを明示的に指定してください)。"
+                .to_string(),
+        )
+    }
+}
+
 /// `$XDG_CONFIG_HOME` / `$HOME` からパスを解決して設定を読む。
 pub fn load_from_env() -> LoadedConfig {
     let xdg = std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from);
@@ -97,11 +117,12 @@ pub struct ConfigDto {
     /// 外部起動のデーモンなので再起動できない(勝手に殺さない)。
     pub daemon_managed: bool,
     pub config_error: Option<String>,
-    /// 起動時にデーモンを spawn しようとして失敗した理由。
+    /// デーモンが動いていない理由。起動時の spawn 失敗と、再起動はできたが
+    /// 応答しない場合の両方が入る。
     ///
     /// `daemon_managed: true` かつこれが `Some` のときは「このアプリの
-    /// 責任範囲だが今は動いていない」を意味する。設定を保存すれば
-    /// 再試行される。
+    /// 責任範囲だが今は動いていない」を意味する。設定を保存するか
+    /// 再試行すればもう一度起動を試みる。
     pub daemon_error: Option<String>,
     /// `EDLR_JOURNAL_DIR` が設定されており、`journal_dir` がそれに
     /// 由来しているか。true の間は設定ファイルを保存しても実効値は
@@ -153,6 +174,21 @@ mod tests {
         assert!(json["configError"].is_null());
         assert_eq!(json["envOverride"], false);
         assert!(json["daemonError"].is_null());
+    }
+
+    #[test]
+    fn restart_that_never_comes_up_keeps_an_error() {
+        // spawn() が Ok を返しても、デーモンは直後に exit(1) しうる
+        // (自動検出が外れる環境で journalDir を消した場合がまさにそれ)。
+        // 「起動した」ではなく「応答している」を成功の条件にする。
+        let err = daemon_error_after_restart(false);
+        assert!(err.is_some(), "daemon never came up, error must remain");
+        assert!(err.unwrap().contains("応答しません"));
+    }
+
+    #[test]
+    fn restart_that_comes_up_clears_the_error() {
+        assert_eq!(daemon_error_after_restart(true), None);
     }
 
     #[test]

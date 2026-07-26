@@ -67,7 +67,11 @@ export default function Settings() {
       if (!mountedRef.current) return;
       setConfig(updated);
       setDraft("");
-      setNotice("自動検出に戻しました。");
+      setNotice(
+        updated.envOverride
+          ? `設定ファイルの値を消しました。ただし EDLR_JOURNAL_DIR が優先されるため、デーモンは引き続き環境変数の値(${updated.journalDir})を使用します。`
+          : "自動検出に戻しました。",
+      );
     } catch (err) {
       if (!mountedRef.current) return;
       setError(err instanceof Error ? err.message : String(err));
@@ -151,9 +155,21 @@ export default function Settings() {
           <button type="button" onClick={handleSave} disabled={saving || draft === ""}>
             保存
           </button>
-          {config?.configuredJournalDir !== null && (
+          {/* config が null(get_config 失敗)のときは保存済みの値が
+              あるか分からないので出さない。`!== null` だと undefined を
+              拾ってしまうため `!= null` で両方を弾く。 */}
+          {config?.configuredJournalDir != null && (
             <button type="button" onClick={handleClear} disabled={saving}>
               自動検出に戻す
+            </button>
+          )}
+          {/* 起動に失敗している間は、保存(draft 必須)もクリア(設定値必須)も
+              押せない状況があり得る。責任は持ち続けている以上、再試行の経路を
+              必ず一つ残す。実体は「現在の実効値で spawn し直す」なので
+              clear_journal_dir と同じ操作。 */}
+          {config?.daemonError && config.configuredJournalDir == null && (
+            <button type="button" onClick={handleClear} disabled={saving}>
+              デーモンの起動を再試行
             </button>
           )}
 

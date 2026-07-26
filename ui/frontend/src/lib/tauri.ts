@@ -21,7 +21,10 @@ export type AppConfigDto = {
   /** false なら外部起動のデーモン。設定は保存できるが再起動はされない。 */
   daemonManaged: boolean;
   configError: string | null;
-  /** デーモンが起動していない理由(起動時の spawn 失敗)。動いていれば null。 */
+  /**
+   * デーモンが動いていない理由。起動時の spawn 失敗と、再起動はできたが
+   * 応答しない場合の両方が入る。応答を確認できていれば null。
+   */
   daemonError: string | null;
   /** EDLR_JOURNAL_DIR が journalDir を上書きしているか。 */
   envOverride: boolean;
