@@ -399,7 +399,11 @@ impl DriverProcessHost for HostCtx {
     fn stop(&mut self, name: String) -> Result<(), WitProcessError> {
         // 停止は「承認済みで設定済み」まで解決できなくても許したいが、
         // 未知の名前は誤りとして返す(承認取消後に自分で止める経路のため、
-        // permission-denied では停止できないと困る)。
+        // permission-denied では停止できないと困る)。この非対称性
+        // (`status`/`ensure_started` は `resolve_sidecar` を通るので承認
+        // 取消直後は permission-denied になるが、`stop` は取消後も動く)は
+        // 意図的: 承認を取り消された直後でも、プラグイン自身が起動した
+        // サイドカーを自分で止められる経路は残しておきたい。
         let key = self.sidecar_key(&name);
         let raw = self
             .sidecars_json
@@ -411,7 +415,20 @@ impl DriverProcessHost for HostCtx {
                 "no such sidecar: {name}"
             )));
         }
-        self.process_driver.stop(&key);
+        // ゲスト呼び出し向けに fire-and-forget 版を使う: 同期版の `stop` は
+        // SIGTERM 送信から `shutdown_grace`(既定 3 秒)経過後の SIGKILL まで
+        // 呼び出しスレッドをブロックしうるが、これは
+        // `PluginInstance::CALL_DEADLINE`(2 秒)を超え、かつエポック割り込み
+        // はホスト呼び出し中は作動しないため trap もされない -- プラグイン
+        // 専用スレッドが最大 3 秒詰まり、その間のイベントキューが滞留する。
+        // `stop_detached` は「`Child` を detach し `terminating` を立てる」
+        // ところまでを同期的に行ってから返るので、`status`/`ensure_started`
+        // から見た効果(re-spawn 抑止・running=false の報告)は即座に効く。
+        // 実際の kill/wait 待ちだけをバックグラウンドスレッドへ逃がす。
+        // ホスト起点の停止(デーモン shutdown の `stop_all` や、将来
+        // `Registry` が呼ぶ停止)は「戻った時点で確実に死んでいる」ことに
+        // 依存するため、そちらは同期版のままにする。
+        self.process_driver.clone().stop_detached(&key);
         Ok(())
     }
 
@@ -740,5 +757,54 @@ mod tests {
         ctx.stop("tts".to_string()).expect("stop");
         let after = ctx.status("tts".to_string()).expect("status");
         assert!(matches!(after[0].state, WitInstanceState::Exited));
+    }
+
+    /// Regression test for a review finding: `DriverProcessHost::stop` used
+    /// to call `ProcessDriver::stop` (the synchronous version), which waits
+    /// out `shutdown_grace` (SIGTERM -> grace -> SIGKILL) on the calling
+    /// thread. Against a sidecar that ignores SIGTERM, that meant the
+    /// guest's `stop` call -- and therefore the plugin's dedicated thread --
+    /// blocked for the full grace period, which can exceed
+    /// `PluginInstance::CALL_DEADLINE` and stalls that plugin's event queue
+    /// in the meantime. `stop` must now return promptly regardless of how
+    /// long the sidecar takes to actually die (see `stop`'s doc comment and
+    /// `ProcessDriver::stop_detached`).
+    #[test]
+    fn stop_returns_promptly_even_when_the_sidecar_ignores_sigterm() {
+        use crate::plugin::sidecar_runtime::{sidecars_json_string, SidecarRuntimeEntry};
+
+        let sidecars_json = sidecars_json_string(&[SidecarRuntimeEntry {
+            name: "tts".to_string(),
+            granted: true,
+            command: "/bin/sh".to_string(),
+            args: vec!["-c".to_string(), "trap '' TERM; sleep 30".to_string()],
+            ports: vec![50202],
+        }]);
+        let mut ctx = HostCtx::new(
+            "test-plugin".to_string(),
+            Arc::new(Mutex::new("{}".to_string())),
+            Arc::new(Mutex::new(capabilities_json_string(&[]))),
+            Arc::new(Mutex::new(sidecars_json)),
+            test_http_driver(),
+            // A grace period long enough that waiting it out synchronously
+            // would trivially blow past both the assertion below and
+            // `PluginInstance::CALL_DEADLINE`.
+            Arc::new(edlr_driver_process::ProcessDriver::new(
+                Duration::from_secs(2),
+                Duration::from_secs(1),
+            )),
+        );
+
+        ctx.ensure_started("tts".to_string()).expect("start");
+
+        let started = std::time::Instant::now();
+        ctx.stop("tts".to_string()).expect("stop");
+        let elapsed = started.elapsed();
+
+        assert!(
+            elapsed < Duration::from_millis(500),
+            "guest-facing stop() must not wait out the sidecar's shutdown \
+             grace period; took {elapsed:?}"
+        );
     }
 }

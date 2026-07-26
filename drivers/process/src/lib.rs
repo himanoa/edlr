@@ -7,7 +7,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 /// 起動するプロセスの仕様。`args` 内の `{port}` は各インスタンスの実ポートに展開される。
@@ -187,6 +187,49 @@ impl ProcessDriver {
             }
         };
         self.finish_stop(key, taken);
+    }
+
+    /// `stop` のゲスト(wasm)向け fire-and-forget 版。呼び出しスレッドを
+    /// `shutdown_grace` 分ブロックしない代わりに、戻った時点では実プロセス
+    /// がまだ生きている可能性がある。
+    ///
+    /// `take_for_stop`(ロック下で `Child` を detach し `terminating = true`
+    /// を立てる)までは `stop` と同じく同期的に行ってから返るため、戻った
+    /// 直後から以下は `stop` と同じ強さで成り立つ:
+    /// - `align_instances` はこのキーのポート再構築を(`terminating` が
+    ///   解除されるまで)延期し続ける -- 古いプロセスがポートを離す前に
+    ///   新しいプロセスを同じポートへ spawn しない、という round 2 の保証は
+    ///   そのまま
+    /// - `status` はこのインスタンスを `running` と報告しない(`running`
+    ///   は `child.is_some()` そのものなので、detach 済みなら直ちに
+    ///   `false`)
+    ///
+    /// 実際の SIGTERM 送信〜`shutdown_grace` 猶予〜SIGKILL〜結果の書き戻し
+    /// (`finish_stop`)はバックグラウンドスレッドへ移す。`take_for_stop` は
+    /// 既に `terminating` なインスタンスを拾わないため、同じキーに対して
+    /// 連投しても 2 つ目以降は空の `Vec` を受け取ってスレッドを立てずに
+    /// 即座に戻る -- ループで `stop` を呼ばれてもスレッドが際限なく増える
+    /// ことはない。
+    ///
+    /// デーモン終了時の一括停止(`stop_all`)や、後続タスクで `Registry` が
+    /// 呼ぶホスト起点の停止には使わない -- そちらは「戻った時点で実際に
+    /// 死んでいる」ことに依存しているため、同期版の `stop`/`stop_all` の
+    /// ままにする。
+    pub fn stop_detached(self: Arc<Self>, key: &str) {
+        let taken = {
+            let mut groups = self.lock();
+            match groups.get_mut(key) {
+                Some(group) => take_for_stop(group),
+                None => Vec::new(),
+            }
+        };
+        if taken.is_empty() {
+            return;
+        }
+        let key = key.to_string();
+        std::thread::spawn(move || {
+            self.finish_stop(&key, taken);
+        });
     }
 
     /// 全 key の全インスタンスを停止する(デーモン shutdown 用)。
@@ -726,5 +769,123 @@ mod tests {
         assert!(after.iter().all(|i| i.running));
 
         driver.stop("p/reconfig");
+    }
+
+    /// `stop_detached` はゲスト(wasm)呼び出し向けの非ブロッキング版で、
+    /// `shutdown_grace` を待ち切らずに戻らなければならない。それでいて、
+    /// バックグラウンドスレッドが SIGTERM を無視する子でも最終的に SIGKILL
+    /// まで昇格させて実際に殺すことを検証する。
+    #[test]
+    fn stop_detached_returns_promptly_and_still_kills_in_the_background() {
+        let tmp =
+            std::env::temp_dir().join(format!("edlr-stop-detached-test-{}", std::process::id()));
+        let _ = std::fs::remove_file(&tmp);
+
+        let driver = Arc::new(ProcessDriver::new(Duration::from_secs(2), Duration::from_millis(0)));
+        let stubborn_spec = ProcessSpec {
+            command: PathBuf::from("/bin/sh"),
+            args: vec![
+                "-c".to_string(),
+                format!("echo $$ > {}; trap '' TERM; sleep 30", tmp.display()),
+            ],
+            ports: vec![50140],
+        };
+
+        driver
+            .ensure_started("p/detached", &stubborn_spec)
+            .expect("start");
+
+        let mut pid = None;
+        for _ in 0..200 {
+            if let Ok(content) = std::fs::read_to_string(&tmp) {
+                if let Ok(p) = content.trim().parse::<i32>() {
+                    pid = Some(p);
+                    break;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let pid = pid.expect("process should report its pid");
+
+        let started = Instant::now();
+        Arc::clone(&driver).stop_detached("p/detached");
+        let elapsed = started.elapsed();
+        let _ = std::fs::remove_file(&tmp);
+
+        assert!(
+            elapsed < Duration::from_millis(500),
+            "stop_detached must return promptly rather than waiting out the grace \
+             period; took {elapsed:?}"
+        );
+
+        // SAFETY: signal 0 is existence-check only, no signal is sent.
+        let alive_immediately = unsafe { libc::kill(pid, 0) } == 0;
+        assert!(
+            alive_immediately,
+            "process ignores SIGTERM, so it should still be alive right after \
+             stop_detached returns (the kill/wait happens in the background)"
+        );
+
+        // The background thread should eventually escalate to SIGKILL once
+        // the grace period elapses.
+        let mut dead = false;
+        for _ in 0..400 {
+            // SAFETY: same as above.
+            if unsafe { libc::kill(pid, 0) } != 0 {
+                dead = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            dead,
+            "stop_detached's background thread should eventually SIGKILL \
+             the stubborn process"
+        );
+    }
+
+    /// `stop_all`(デーモン shutdown 用)は `stop_detached` を新設した後も、
+    /// 戻った時点で実プロセスが確実に死んでいる同期的な保証を保ち続ける
+    /// べきである。
+    #[test]
+    fn stop_all_blocks_until_processes_are_dead() {
+        let tmp = std::env::temp_dir().join(format!("edlr-stop-all-test-{}", std::process::id()));
+        let _ = std::fs::remove_file(&tmp);
+
+        let driver = ProcessDriver::new(Duration::from_millis(200), Duration::from_millis(0));
+        let stubborn_spec = ProcessSpec {
+            command: PathBuf::from("/bin/sh"),
+            args: vec![
+                "-c".to_string(),
+                format!("echo $$ > {}; trap '' TERM; sleep 30", tmp.display()),
+            ],
+            ports: vec![50141],
+        };
+
+        driver
+            .ensure_started("p/stop-all", &stubborn_spec)
+            .expect("start");
+
+        let mut pid = None;
+        for _ in 0..200 {
+            if let Ok(content) = std::fs::read_to_string(&tmp) {
+                if let Ok(p) = content.trim().parse::<i32>() {
+                    pid = Some(p);
+                    break;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let pid = pid.expect("process should report its pid");
+
+        driver.stop_all();
+        let _ = std::fs::remove_file(&tmp);
+
+        // SAFETY: existence check only.
+        let alive = unsafe { libc::kill(pid, 0) } == 0;
+        assert!(
+            !alive,
+            "stop_all must not return until every process is actually dead"
+        );
     }
 }
