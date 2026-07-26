@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from "react";
+import CapabilitySection from "../components/CapabilitySection";
 import PluginForm from "../components/PluginForm";
 import { RpcClient } from "../rpc";
-import type { PluginInfo, PluginsList } from "../types/plugin";
+import type { Capabilities, PluginInfo, PluginsList } from "../types/plugin";
 import { defaultWsUrl } from "../ws";
 
 type Status = "loading" | "ready" | "error";
@@ -67,6 +68,19 @@ export default function Plugins() {
     );
   };
 
+  const handleCapabilityToggle = (pluginId: string) => async (granted: boolean) => {
+    const client = clientRef.current;
+    if (!client) throw new Error("RPC に接続されていません");
+    const updated = await client.call<Capabilities>("plugins/set-capabilities", {
+      plugin: pluginId,
+      granted,
+    });
+    if (!mountedRef.current) return;
+    setPlugins((prev) =>
+      prev.map((p) => (p.id === pluginId ? { ...p, capabilities: updated } : p)),
+    );
+  };
+
   return (
     <section>
       <h1>Plugins</h1>
@@ -85,6 +99,10 @@ export default function Plugins() {
             </h2>
             <p>{p.description}</p>
             <PluginForm plugin={p} onChange={handleChange(p.id)} />
+            <CapabilitySection
+              capabilities={p.capabilities}
+              onToggle={handleCapabilityToggle(p.id)}
+            />
           </article>
         ))}
     </section>

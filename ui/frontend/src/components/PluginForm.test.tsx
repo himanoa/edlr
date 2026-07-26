@@ -18,6 +18,7 @@ function makePlugin(overrides: Partial<PluginInfo> = {}): PluginInfo {
       { type: "select", key: "voice", label: "音声", default: "Amber", options: ["Amber", "Blue"] },
     ],
     values: { enabled: true, endpoint: "http://localhost", volume: 80, voice: "Amber" },
+    capabilities: { requests: [], granted: false, staleGrant: false },
     ...overrides,
   };
 }
