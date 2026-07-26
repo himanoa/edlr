@@ -1241,6 +1241,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "edlr-driver-process"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "tracing",
+]
+
+[[package]]
 name = "edlr-ui"
 version = "0.1.0"
 dependencies = [
