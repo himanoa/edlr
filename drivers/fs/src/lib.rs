@@ -169,7 +169,9 @@ impl FsDriver {
 
     pub fn stat(&self, root: &Path, rel: &str) -> Result<Entry, FsError> {
         let (dir, name) = self.locate_existing(root, rel)?;
-        // `open_read` 経由なので、シンボリックリンクは stat も拒否される。
+        // `open_read` 経由なので、シンボリックリンクも、通常ファイル以外
+        // (ディレクトリ・FIFO・デバイス・ソケット)も stat できない。
+        // `list` が返すのは通常ファイルだけなので、`stat` の対象も揃う。
         let file = dir.open_read(&name)?;
         let meta = file.metadata().map_err(|e| FsError::Io(e.to_string()))?;
         Ok(Entry {
