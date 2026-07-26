@@ -1236,6 +1236,14 @@ name = "edlr-driver-channel"
 version = "0.1.0"
 
 [[package]]
+name = "edlr-driver-fs"
+version = "0.1.0"
+dependencies = [
+ "rustix",
+ "tempfile",
+]
+
+[[package]]
 name = "edlr-driver-http"
 version = "0.1.0"
 dependencies = [
