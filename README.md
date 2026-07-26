@@ -8,10 +8,11 @@ Elite Dangerous の Journal / Status.json を監視し、イベントをドラ�
 - `core/` — Rust 製カーネル。Journal tail(inotify + ポーリング常時併用)、JSON Lines パース、
   Status.json 監視、broadcast によるイベント配信。バイナリ名 `edlr`
 - `drivers/` — 特権 capability を持つドライバ層(http / channel、現在はスケルトン)
-- `config/` — `edlr-config` クレート。Tauri アプリが読み書きする設定ファイル
-  (`$XDG_CONFIG_HOME/edlr/config.json`)のパス解決とシリアライズ、Proton 既定
-  Journal パスの探索を担う純粋ロジック。デーモン本体(`core/`)はこのクレートに
-  依存しない
+- `config/` — `edlr-config` クレート。設定ファイル(`$XDG_CONFIG_HOME/edlr/config.json`)
+  のパス解決とシリアライズ、Proton 既定 Journal パスの探索を担う、依存の薄い
+  純粋ロジック。デーモンの自動検出(`core/`)・Tauri アプリの設定管理(`ui/`)
+  の両方から使われる共有クレートで、`edlr-core` は `edlr_core::config` として
+  再エクスポートしている(呼び出し側のコードは変わらない)
 - `ui/` — GUI クライアント。`frontend/`(React + Vite の SPA: Logs / Plugins /
   Dashboard / Settings)と `src-tauri/`(Tauri 2 の薄い皮)。デーモンとは
   WebSocket(既定 `ws://127.0.0.1:8137/ws`)で通信
