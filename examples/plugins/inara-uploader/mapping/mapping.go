@@ -43,12 +43,21 @@ func handlerFor[T converter]() handler {
 }
 
 var handlers = map[string]handler{
-	"Commander":   handlerFor[commander](),
-	"LoadGame":    handlerFor[loadGame](),
-	"FSDJump":     handlerFor[fsdJump](),
-	"CarrierJump": handlerFor[carrierJump](),
-	"Docked":      handlerFor[docked](),
-	"Location":    handlerFor[location](),
+	"Commander":        handlerFor[commander](),
+	"LoadGame":         handlerFor[loadGame](),
+	"FSDJump":          handlerFor[fsdJump](),
+	"CarrierJump":      handlerFor[carrierJump](),
+	"Docked":           handlerFor[docked](),
+	"Location":         handlerFor[location](),
+	"Rank":             handlerFor[rank](),
+	"Progress":         handlerFor[progress](),
+	"Reputation":       handlerFor[reputation](),
+	"EngineerProgress": handlerFor[engineerProgress](),
+	"Materials":        handlerFor[materials](),
+	"Statistics":       handlerFor[statistics](),
+	"Died":             handlerFor[died](),
+	// Shutdown は送るものが無く、live モードでの即時フラッシュだけを促す。
+	"Shutdown": {flushLive: true},
 }
 
 // Result は Journal イベント 1 件を扱った結果。
