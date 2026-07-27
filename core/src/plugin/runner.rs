@@ -29,22 +29,32 @@ use std::path::{Path, PathBuf};
 use std::sync::{mpsc as std_mpsc, Arc, Mutex};
 use std::thread;
 
-/// Capacity of the per-plugin journal-event queue (`events_tx`/`events_rx`
-/// below). `driver-http.send` can block a plugin's dedicated thread for up
-/// to `host::HTTP_TIMEOUT` per call (a host the plugin author controls can
+/// Capacity of the per-plugin work queue (`work_tx`/`work_rx` below), which
+/// carries both journal events (`PluginWork::Event`) and bus deliveries from
+/// a driver (`PluginWork::Message`) -- the two sources are merged onto this
+/// one bounded channel so that both kinds of wasm calls stay serialized on
+/// the plugin's single dedicated thread (see the module doc comment and
+/// `PluginWork`). It is also reused as the capacity of the per-plugin
+/// `Delivery` channel that `spawn_bus_subscriber` reads from before
+/// re-packing accepted deliveries into `PluginWork::Message` on this queue.
+///
+/// `driver-http.send` can block a plugin's dedicated thread for up to
+/// `host::HTTP_TIMEOUT` per call (a host the plugin author controls can
 /// simply not respond), during which the plugin's own thread is not
-/// draining `events_rx` at all. The channel used to be unbounded
-/// (`std_mpsc::channel`), so a stalled plugin let the router/monitor's
-/// broadcast events accumulate in host memory without limit -- outside
-/// anything `StoreLimits` can see, since it lives on the host side of the
-/// boundary, not in the plugin's wasm linear memory. Bounding it here caps
-/// that growth at a fixed, small number of pending events per plugin.
+/// draining `work_rx` at all. The channel used to be unbounded
+/// (`std_mpsc::channel`) and carried only journal events, so a stalled
+/// plugin let the router/monitor's broadcast events accumulate in host
+/// memory without limit -- outside anything `StoreLimits` can see, since it
+/// lives on the host side of the boundary, not in the plugin's wasm linear
+/// memory. Bounding it here caps that growth at a fixed, small number of
+/// pending items (events or bus deliveries) per plugin.
 ///
 /// Overflow policy: when full, `spawn_event_subscriber` drops the new event
-/// and logs a `tracing::warn!` rather than blocking the subscriber task (see
-/// its doc comment) or disabling the plugin outright -- a plugin that's
-/// merely slow (e.g. waiting out its own `driver-http.send` call) should be
-/// allowed to catch up and keep running, not be killed for falling behind.
+/// and `spawn_bus_subscriber` drops the new delivery, each logging a
+/// `tracing::warn!` rather than blocking its subscriber task (see their doc
+/// comments) or disabling the plugin outright -- a plugin that's merely slow
+/// (e.g. waiting out its own `driver-http.send` call) should be allowed to
+/// catch up and keep running, not be killed for falling behind.
 const PLUGIN_EVENT_QUEUE_CAPACITY: usize = 32;
 
 use tokio::sync::broadcast;
@@ -781,42 +791,44 @@ mod tests {
             }])
         };
 
-        // ケース 1: 承認あり。配信は work_rx へ届く。
-        {
-            let bus_json = Arc::new(Mutex::new(granted_entry(true)));
-            let (delivery_tx, delivery_rx) = std_mpsc::sync_channel(4);
-            let (work_tx, work_rx) = std_mpsc::sync_channel::<PluginWork>(4);
-            bus.subscribe("translator", "ed-state", "current-system", delivery_tx);
-            spawn_bus_subscriber(test_manifest(), bus_json, delivery_rx, work_tx);
+        // 承認あり・承認なしを 2 つの独立したケースとして作ると、それぞれが
+        // 「配信を 1 回しか送らない」ため、「サブスクライバ起動時に承認を
+        // 一度だけ確認する」実装と「配信のたびに再確認する」実装のどちらでも
+        // 両ケースが通ってしまう(前者は起動時の `bus_json` の値をそのまま
+        // 使い続けるだけで、たまたま両ケースとも「起動時点の値」と「配信時点
+        // の値」が一致しているに過ぎない)。ここでは **1 つのサブスクライバの
+        // 生存期間の中で** 同じ `bus_json` バッファを書き換えることで、
+        // 「配信のたびに再確認している」ことしか通らないようにする:
+        // 1. 承認ありで購読・emit → 届く
+        // 2. 同じバッファを(`refresh_bus_runtime` がやるのと同じように)
+        //    承認なしへ書き換える
+        // 3. 同じ購読のまま再度 emit → 届かない
+        let bus_json = Arc::new(Mutex::new(granted_entry(true)));
+        let (delivery_tx, delivery_rx) = std_mpsc::sync_channel(4);
+        let (work_tx, work_rx) = std_mpsc::sync_channel::<PluginWork>(4);
+        bus.subscribe("translator", "ed-state", "current-system", delivery_tx);
+        spawn_bus_subscriber(test_manifest(), bus_json.clone(), delivery_rx, work_tx);
 
-            bus.emit("ed-state", "current-system", b"Sol".to_vec())
-                .unwrap();
-            tokio::time::sleep(Duration::from_millis(50)).await;
-
-            match work_rx.try_recv() {
-                Ok(PluginWork::Message(delivery)) => {
-                    assert_eq!(delivery.payload, b"Sol".to_vec())
-                }
-                other => panic!("expected a granted delivery to reach the plugin queue, got {other:?}"),
-            }
+        bus.emit("ed-state", "current-system", b"Sol".to_vec())
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        match work_rx.try_recv() {
+            Ok(PluginWork::Message(delivery)) => assert_eq!(delivery.payload, b"Sol".to_vec()),
+            other => panic!("expected a granted delivery to reach the plugin queue, got {other:?}"),
         }
 
-        // ケース 2: 承認なし。全く同じ購読・同じ emit だが、届かない。
-        {
-            let bus_json = Arc::new(Mutex::new(granted_entry(false)));
-            let (delivery_tx, delivery_rx) = std_mpsc::sync_channel(4);
-            let (work_tx, work_rx) = std_mpsc::sync_channel::<PluginWork>(4);
-            bus.subscribe("translator", "ed-state", "current-system", delivery_tx);
-            spawn_bus_subscriber(test_manifest(), bus_json, delivery_rx, work_tx);
+        // `Registry::refresh_bus_runtime` が実際に行うのと同じ操作: 同じ
+        // 共有バッファの中身を書き換えるだけで、購読もサブスクライバタスクも
+        // 再起動しない。
+        *bus_json.lock().unwrap() = granted_entry(false);
 
-            bus.emit("ed-state", "current-system", b"Sol".to_vec())
-                .unwrap();
-            tokio::time::sleep(Duration::from_millis(50)).await;
-
-            assert!(
-                work_rx.try_recv().is_err(),
-                "a revoked grant must not let the delivery reach the plugin queue"
-            );
-        }
+        bus.emit("ed-state", "current-system", b"Jameson".to_vec())
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            work_rx.try_recv().is_err(),
+            "revoking the grant on the same running subscriber must stop further \
+             deliveries immediately, without re-subscribing"
+        );
     }
 }
