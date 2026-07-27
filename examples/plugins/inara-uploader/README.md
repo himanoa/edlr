@@ -75,7 +75,7 @@ wit-bindgen-go generate --world plugin --out gen ../../../core/wit
 | `commanderName` | string | `""` | 空なら Journal の `LoadGame` / `Commander` から学習 |
 | `isBeingDeveloped` | boolean | `true` | INARA 側で「開発中クライアント」として扱わせる |
 | `batchSize` | number | `10` | この件数溜まったら送る(live モードのみ。replay 中は無視される) |
-| `minIntervalSeconds` | number | `60` | 送信の最短間隔。INARA は高頻度の送信を控えるよう求めている(live モードのみ。replay 中は無視される) |
+| `minIntervalSeconds` | number | `60` | 送信の最短間隔。INARA は高頻度の送信を控えるよう求めている(replay 中は原則無視されるが、送れない状態が続く間の再試行間隔としては効く) |
 | `uploadHistorical` | boolean | `true` | デーモン起動より前に既に Journal へ書かれていたイベント(`event.replay = true`)も送る。edlr は Journal の読み取り位置を永続化しており、再起動しても続きから配信するため、既定で送っても重複送信にはならない。**`false` にすると、デーモンが止まっていた間に書かれたイベントは INARA へ送られない**(その分は欠測になる) |
 | `dryRun` | boolean | `false` | 送信せず、組み立てた JSON をログに出す |
 
@@ -84,8 +84,10 @@ wit-bindgen-go generate --world plugin --out gen ../../../core/wit
 
 **replay(バックログを流し切る)**
 
-- キューが 100 件たまるごとに送る
-- `minIntervalSeconds` は適用しない(バックログを流し切ることを優先する)
+- キューが 100 件以上たまったら送る
+- `minIntervalSeconds` は適用しない(バックログを流し切ることを優先する)。ただし
+  直前の送信試行でキューを空にできなかった場合(API キー未設定・capability
+  未承認・通信失敗など)は、`minIntervalSeconds` の間隔を空けてから再試行する
 - `Shutdown` を受け取っても送信は促さない。過去のゲーム終了ログであって
   「もうイベントは来ない」ことを意味しないため
 - live のイベントを初めて受け取った時点で、溜まっている端数を送り切る
