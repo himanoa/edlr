@@ -1,5 +1,4 @@
 use std::collections::HashSet;
-use std::fmt;
 use std::fs;
 use std::path::Path;
 
@@ -48,9 +47,9 @@ impl DriverManifest {
 fn validate_topics(topics: &[TopicSpec]) -> Result<(), ManifestError> {
     let mut seen = HashSet::new();
     for topic in topics {
-        edlr_driver_channel::topic::validate_name(&topic.name).map_err(ManifestError::BadBus)?;
+        edlr_driver_channel::topic::validate_name(&topic.name).map_err(ManifestError::BadTopic)?;
         if !seen.insert(topic.name.as_str()) {
-            return Err(ManifestError::BadBus(format!(
+            return Err(ManifestError::BadTopic(format!(
                 "duplicate topic name: {}",
                 topic.name
             )));
@@ -152,9 +151,15 @@ description = "現在のスターシステム"
 
     #[test]
     fn rejects_duplicate_topic_names() {
+        // `id` をディレクトリ名と一致させ、`IdMismatch` ではなく実際に
+        // `validate_topics` まで到達することを保証する(見せかけの is_err()
+        // にしない -- レビュー指摘 Finding 1)。
         let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("ed-state");
+        std::fs::create_dir(&sub).unwrap();
+        write_entry(&sub);
         write(
-            dir.path(),
+            &sub,
             r#"
 id = "ed-state"
 name = "ED State"
@@ -168,14 +173,27 @@ name = "a"
 name = "a"
 "#,
         );
-        assert!(load_driver_manifest(dir.path()).is_err());
+        let err = load_driver_manifest(&sub).expect_err("duplicate topic name should be rejected");
+        match err {
+            ManifestError::BadTopic(msg) => {
+                assert!(
+                    msg.contains('a'),
+                    "error message should name the offending topic: {msg}"
+                );
+            }
+            other => panic!("expected ManifestError::BadTopic, got {other:?}"),
+        }
     }
 
     #[test]
     fn rejects_an_invalid_topic_name() {
+        // 同上(Finding 1): ディレクトリ名を `id` に一致させて topic 検証まで到達させる。
         let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("ed-state");
+        std::fs::create_dir(&sub).unwrap();
+        write_entry(&sub);
         write(
-            dir.path(),
+            &sub,
             r#"
 id = "ed-state"
 name = "ED State"
@@ -186,7 +204,16 @@ entry = "driver.wasm"
 name = "Bad_Name"
 "#,
         );
-        assert!(load_driver_manifest(dir.path()).is_err());
+        let err = load_driver_manifest(&sub).expect_err("invalid topic name should be rejected");
+        match err {
+            ManifestError::BadTopic(msg) => {
+                assert!(
+                    msg.contains("Bad_Name"),
+                    "error message should name the offending topic: {msg}"
+                );
+            }
+            other => panic!("expected ManifestError::BadTopic, got {other:?}"),
+        }
     }
 
     #[test]

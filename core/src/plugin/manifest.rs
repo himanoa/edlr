@@ -338,6 +338,8 @@ pub enum ManifestError {
     /// `bus` の内容が不正(driver の形式・重複・空の publish/subscribe・
     /// トピック名・reason 空など)。
     BadBus(String),
+    /// `topics`(ドライバの `[[topics]]`)の内容が不正(名前の形式・重複など)。
+    BadTopic(String),
 }
 
 impl fmt::Display for ManifestError {
@@ -355,6 +357,7 @@ impl fmt::Display for ManifestError {
             ManifestError::BadSidecar(msg) => write!(f, "invalid sidecar request: {msg}"),
             ManifestError::BadFilesystem(msg) => write!(f, "invalid filesystem request: {msg}"),
             ManifestError::BadBus(msg) => write!(f, "invalid bus request: {msg}"),
+            ManifestError::BadTopic(msg) => write!(f, "invalid topic: {msg}"),
         }
     }
 }
