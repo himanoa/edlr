@@ -38,6 +38,31 @@ impl DriverManifest {
     pub fn topic(&self, name: &str) -> Option<&TopicSpec> {
         self.topics.iter().find(|t| t.name == name)
     }
+
+    /// `SettingsStore`/`GrantsStore`/`SidecarConfigStore`/`FilesystemConfigStore`
+    /// はいずれも `crate::plugin::Manifest` を引数に取るよう作られている
+    /// (`driver` モジュールのドキュメントコメントが言う「共有するのは
+    /// grants / settings の下位ユーティリティ程度」の実体)。ドライバはこれら
+    /// を書き換えずにそのまま再利用するため、それぞれのメソッドが実際に参照
+    /// する値(`id`・`settings`・`capabilities`・`sidecars`・`filesystem`)だけを
+    /// 詰めた `Manifest` をここで組み立てて渡す。`name`/`version`/
+    /// `description`/`entry`/`events`/`bus` はこれらのストアのどのメソッドから
+    /// も読まれないため、空/既定値のままでよい。
+    pub(crate) fn as_settings_manifest(&self) -> crate::plugin::Manifest {
+        crate::plugin::Manifest {
+            id: self.id.clone(),
+            name: self.name.clone(),
+            version: self.version.clone(),
+            description: String::new(),
+            entry: self.entry.clone(),
+            events: Vec::new(),
+            settings: self.settings.clone(),
+            capabilities: self.capabilities.clone(),
+            sidecars: self.sidecars.clone(),
+            filesystem: self.filesystem.clone(),
+            bus: Vec::new(),
+        }
+    }
 }
 
 /// `[[topics]]` を検証する。

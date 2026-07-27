@@ -127,6 +127,7 @@ async fn hello_logger_stays_running_and_busy_loop_gets_disabled_after_publish() 
         filesystem_config_store,
         grants_store,
         &router,
+        edlr_driver_channel::Bus::new(),
         host,
     );
 
@@ -207,6 +208,7 @@ async fn broken_manifest_directory_is_skipped_but_others_still_load() {
         filesystem_config_store,
         grants_store,
         &router,
+        edlr_driver_channel::Bus::new(),
         host,
     );
 
@@ -240,6 +242,7 @@ async fn nonexistent_plugins_dir_yields_empty_registry() {
         filesystem_config_store,
         grants_store,
         &router,
+        edlr_driver_channel::Bus::new(),
         host,
     );
 
@@ -274,6 +277,7 @@ async fn init_failure_registers_disabled_and_starts_no_event_task() {
         filesystem_config_store,
         grants_store,
         &router,
+        edlr_driver_channel::Bus::new(),
         host,
     );
 
@@ -352,6 +356,7 @@ async fn list_returns_plugin_info_with_effective_values_matching_manifest_defaul
         filesystem_config_store,
         grants_store,
         &router,
+        edlr_driver_channel::Bus::new(),
         host,
     );
 
@@ -399,6 +404,7 @@ async fn set_values_persists_validates_and_updates_shared_settings_json() {
         filesystem_config_store,
         grants_store,
         &router,
+        edlr_driver_channel::Bus::new(),
         host,
     );
 
@@ -459,6 +465,7 @@ async fn set_values_with_unknown_key_returns_err_and_leaves_values_unchanged() {
         filesystem_config_store,
         grants_store,
         &router,
+        edlr_driver_channel::Bus::new(),
         host,
     );
 

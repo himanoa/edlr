@@ -4,5 +4,9 @@
 
 pub mod host;
 pub mod manifest;
+pub mod registry;
+pub mod runner;
 
 pub use manifest::{load_driver_manifest, DriverManifest};
+pub use registry::{DriverEntry, DriverInfo, DriverRegistry, DriverRegistryError, DriverState};
+pub use runner::start_drivers;

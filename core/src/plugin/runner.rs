@@ -40,7 +40,10 @@ const PLUGIN_EVENT_QUEUE_CAPACITY: usize = 32;
 
 use tokio::sync::broadcast;
 
+use edlr_driver_channel::Bus;
+
 use crate::event::Event;
+use crate::plugin::bus_runtime::{bus_json_string, BusRuntimeEntry};
 use crate::plugin::filesystem::FilesystemConfigStore;
 use crate::plugin::fs_runtime::{filesystem_json_string, FsRuntimeEntry};
 use crate::plugin::grants::GrantsStore;
@@ -64,6 +67,17 @@ use crate::router::Router;
 /// `sidecars_json`/`capabilities_json` はあくまで承認・設定状態のスナップ
 /// ショットで、実プロセスの起動はプラグイン自身の `ensure-started` 呼び出し
 /// か、ユーザー操作(`Registry::control_sidecar`)を経て初めて行われる。
+///
+/// **`bus` は呼び出し元が構築した 1 つのインスタンスを渡す**: ここで組み立て
+/// る各プラグインの `HostCtx` はこの同じ `bus` を(`Clone` して)共有する
+/// (`http_driver`/`process_driver`/`fs_driver` と同様、`HostCtx::bus` の
+/// ドキュメントコメント参照)。呼び出し元は `crate::driver::start_drivers` を
+/// この関数より先に呼び、そこで返した `DriverRegistry` の構築に使ったのと
+/// 同じ `bus` をここへ渡すこと -- そうしないと、ドライバの登録
+/// (`Bus::register_driver`)が完了する前にプラグインが起動し、`init` 中の
+/// 最初の `bus.get` 呼び出しが `unknown-driver` を見てしまう(設計書
+/// 「起動順序」参照)。
+#[allow(clippy::too_many_arguments)]
 pub fn start_plugins(
     plugins_dir: &Path,
     settings_store: SettingsStore,
@@ -71,6 +85,7 @@ pub fn start_plugins(
     filesystem_config_store: FilesystemConfigStore,
     grants_store: GrantsStore,
     router: &Router,
+    bus: Bus,
     host: PluginHost,
 ) -> Registry {
     let host = Arc::new(host);
@@ -126,6 +141,7 @@ pub fn start_plugins(
             &sidecar_config_store,
             &filesystem_config_store,
             router,
+            &bus,
             &host,
             &registry,
         );
@@ -145,6 +161,7 @@ fn load_and_run_plugin(
     sidecar_config_store: &SidecarConfigStore,
     filesystem_config_store: &FilesystemConfigStore,
     router: &Router,
+    bus: &Bus,
     host: &Arc<PluginHost>,
     registry: &Registry,
 ) {
@@ -222,6 +239,27 @@ fn load_and_run_plugin(
         .collect();
     let filesystem_json = Arc::new(Mutex::new(filesystem_json_string(&filesystem_entries)));
 
+    // バス接続先ごとの承認(`GrantsStore::bus_state`)を解決して
+    // `BusRuntimeEntry` にまとめる。サイドカー/ファイルアクセスの初期値組み
+    // 立てと同じ流儀(未承認の接続先は `bus_json_string` が `publish`/
+    // `subscribe` を落とす -- `bus_runtime` のドキュメント参照)。トピック
+    // 一覧自体は manifest の要求をそのまま載せる(`GrantsStore` はトピック
+    // の中身を持たない)。
+    let bus_entries: Vec<BusRuntimeEntry> = manifest
+        .bus
+        .iter()
+        .map(|request| {
+            let granted = grants_store.bus_state(manifest, &request.driver).granted;
+            BusRuntimeEntry {
+                driver: request.driver.clone(),
+                granted,
+                publish: request.publish.clone(),
+                subscribe: request.subscribe.clone(),
+            }
+        })
+        .collect();
+    let bus_json = Arc::new(Mutex::new(bus_json_string(&bus_entries)));
+
     let (events_tx, events_rx) = std_mpsc::sync_channel::<Arc<Event>>(PLUGIN_EVENT_QUEUE_CAPACITY);
     let (ready_tx, ready_rx) = std_mpsc::channel::<PluginState>();
 
@@ -232,6 +270,8 @@ fn load_and_run_plugin(
         let capabilities_json = capabilities_json.clone();
         let sidecars_json = sidecars_json.clone();
         let filesystem_json = filesystem_json.clone();
+        let bus_json = bus_json.clone();
+        let bus = bus.clone();
         let registry = registry.clone();
         move || {
             run_plugin_thread(
@@ -242,6 +282,8 @@ fn load_and_run_plugin(
                 capabilities_json,
                 sidecars_json,
                 filesystem_json,
+                bus_json,
+                bus,
                 registry,
                 events_rx,
                 ready_tx,
@@ -261,6 +303,7 @@ fn load_and_run_plugin(
         capabilities_json,
         sidecars_json,
         filesystem_json,
+        bus_json,
     });
 
     if running {
@@ -281,6 +324,8 @@ fn run_plugin_thread(
     capabilities_json: Arc<Mutex<String>>,
     sidecars_json: Arc<Mutex<String>>,
     filesystem_json: Arc<Mutex<String>>,
+    bus_json: Arc<Mutex<String>>,
+    bus: Bus,
     registry: Registry,
     events_rx: std_mpsc::Receiver<Arc<Event>>,
     ready_tx: std_mpsc::Sender<PluginState>,
@@ -291,8 +336,8 @@ fn run_plugin_thread(
         capabilities_json,
         sidecars_json,
         filesystem_json,
-        Arc::new(Mutex::new("[]".to_string())),
-        edlr_driver_channel::Bus::new(),
+        bus_json,
+        bus,
         host.http_driver(),
         host.process_driver(),
         host.fs_driver(),

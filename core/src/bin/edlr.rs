@@ -132,6 +132,14 @@ async fn main() {
             let filesystem_config_store =
                 FilesystemConfigStore::new(settings_dir, vec![grants_dir, plugins_dir.clone()]);
             let plugins_dir_for_blocking = plugins_dir.clone();
+            // TODO(drivers): 実際にはユーザーが設置したドライバを
+            // `edlr_core::driver::start_drivers` でロードし、その戻り値の
+            // `Bus` をここへ渡す(drivers を先に起動しないと、この直後に
+            // 起動するプラグインの `init` 中の `bus.get` が
+            // `unknown-driver` を見てしまう -- `start_plugins` のドキュメント
+            // コメント参照)。ドライバディレクトリの CLI 引数配線はこの
+            // タスクのスコープ外なので、ここでは空の `Bus` を渡すに留める。
+            let bus = edlr_driver_channel::Bus::new();
             match tokio::task::spawn_blocking(move || {
                 start_plugins(
                     &plugins_dir_for_blocking,
@@ -140,6 +148,7 @@ async fn main() {
                     filesystem_config_store,
                     grants_store,
                     &router_for_plugins,
+                    bus,
                     host,
                 )
             })

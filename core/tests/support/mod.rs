@@ -80,6 +80,7 @@ pub fn sidecar_env(name: &str, port: u16, scalable: bool) -> Env {
         FilesystemConfigStore::new(tmp.path().join("settings"), Vec::new()),
         GrantsStore::new(tmp.path().join("grants")),
         &router,
+        edlr_driver_channel::Bus::new(),
         PluginHost::new().expect("plugin host"),
     );
 
@@ -117,6 +118,7 @@ pub fn two_plugin_sidecar_env(sidecar_name: &str, port_a: u16, port_b: u16) -> E
         FilesystemConfigStore::new(tmp.path().join("settings"), Vec::new()),
         GrantsStore::new(tmp.path().join("grants")),
         &router,
+        edlr_driver_channel::Bus::new(),
         PluginHost::new().expect("plugin host"),
     );
 
@@ -166,6 +168,7 @@ pub fn filesystem_env(name: &str, mode: &str) -> Env {
         FilesystemConfigStore::new(tmp.path().join("settings"), Vec::new()),
         GrantsStore::new(tmp.path().join("grants")),
         &router,
+        edlr_driver_channel::Bus::new(),
         PluginHost::new().expect("plugin host"),
     );
 

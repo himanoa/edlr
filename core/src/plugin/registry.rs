@@ -51,6 +51,11 @@ pub struct PluginEntry {
     /// `driver-fs.*` 呼び出しに再起動不要で反映される。未承認のルートは
     /// `path` を持たない(`fs_runtime` のドキュメント参照)。
     pub filesystem_json: Arc<Mutex<String>>,
+    /// `HostCtx` と共有されるバス承認状態・宣言済みトピック JSON。形は
+    /// `bus_runtime::bus_json_string` を参照。`filesystem_json` と同じく
+    /// 起動時に `GrantsStore::bus_state` と manifest から組み立てられ、以後は
+    /// 将来の `Registry` の bus 承認 API(Task 10)が更新する。
+    pub bus_json: Arc<Mutex<String>>,
 }
 
 /// サイドカー 1 件分の現在状態(`Registry::sidecars` / `PluginInfo::sidecars` 用)。
@@ -1321,6 +1326,7 @@ mod tests {
             ))),
             sidecars_json: Arc::new(Mutex::new("[]".to_string())),
             filesystem_json: filesystem_json.clone(),
+            bus_json: Arc::new(Mutex::new("[]".to_string())),
         });
 
         let root = tmp.path().join("exports");
@@ -1415,6 +1421,7 @@ mod tests {
             ))),
             sidecars_json: Arc::new(Mutex::new("[]".to_string())),
             filesystem_json: Arc::new(Mutex::new("[]".to_string())),
+            bus_json: Arc::new(Mutex::new("[]".to_string())),
         });
 
         let key = Registry::sidecar_key("sc-plugin", "tts");
@@ -1470,6 +1477,7 @@ mod tests {
             ))),
             sidecars_json: Arc::new(Mutex::new("[]".to_string())),
             filesystem_json: Arc::new(Mutex::new("[]".to_string())),
+            bus_json: Arc::new(Mutex::new("[]".to_string())),
         });
         registry
             .grants_store
@@ -1555,6 +1563,7 @@ mod tests {
             ))),
             sidecars_json: Arc::new(Mutex::new("[]".to_string())),
             filesystem_json: Arc::new(Mutex::new("[]".to_string())),
+            bus_json: Arc::new(Mutex::new("[]".to_string())),
         });
 
         registry
@@ -1658,6 +1667,7 @@ mod tests {
             ))),
             sidecars_json: Arc::new(Mutex::new("[]".to_string())),
             filesystem_json: Arc::new(Mutex::new("[]".to_string())),
+            bus_json: Arc::new(Mutex::new("[]".to_string())),
         });
 
         let result = registry.set_sidecar_grant("sc-plugin", "tts", true);
@@ -1740,6 +1750,7 @@ mod tests {
             capabilities_json: capabilities_json.clone(),
             sidecars_json: Arc::new(Mutex::new("[]".to_string())),
             filesystem_json: Arc::new(Mutex::new("[]".to_string())),
+            bus_json: Arc::new(Mutex::new("[]".to_string())),
         });
 
         let state = registry
@@ -1822,6 +1833,7 @@ mod tests {
             capabilities_json: capabilities_json.clone(),
             sidecars_json: Arc::new(Mutex::new("[]".to_string())),
             filesystem_json: Arc::new(Mutex::new("[]".to_string())),
+            bus_json: Arc::new(Mutex::new("[]".to_string())),
         });
 
         const THREADS: usize = 16;

@@ -37,7 +37,7 @@ use bindings::edlr::plugin::driver_process::{
 };
 use bindings::edlr::plugin::host_log::{Host as HostLogHost, Level as WitLevel};
 use bindings::edlr::plugin::host_settings::Host as HostSettingsHost;
-use bindings::{Driver as DriverBindings};
+use bindings::Driver as DriverBindings;
 
 use crate::plugin::allowlist::check_url;
 
