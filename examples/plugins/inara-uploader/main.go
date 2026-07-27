@@ -1,68 +1,41 @@
 // inara-uploader は Journal イベントを INARA (https://inara.cz) の
 // API v1 へアップロードする edlr プラグイン。
 //
+// このファイルはホスト境界のアダプタに徹する。設定を読んで uploader へ渡し、
+// driver-http を呼び、返ってきた Outcome をログへ整形するだけで、判断は
+// 持たない(main は //go:wasmimport を含むためテストが書けない)。
+//
 // 設計上の前提:
 //   - プラグインはイベント到着時にしか動けない(ホストにタイマーが無い)。
 //     そのため送信は「イベントを受け取ったついでに」行う。最後のイベントから
-//     ゲーム終了までの間に溜まったぶんは、Journal の `Shutdown` イベントで
-//     まとめて送る。
+//     ゲーム終了までの間に溜まったぶんは、Journal の `Shutdown` でまとめて送る。
 //   - edlr は Journal の読み取り位置を永続化しており、デーモン再起動をまたいで
 //     続きから配信する。デーモンが動き出す前に既に書かれていたイベントには
-//     `event.replay` が立つが、重複配信は起きないので既定ではこれも送る
-//     (`uploadHistorical = false` にすると、デーモンが止まっていた間の
-//     イベントは送られない)。
+//     `event.replay` が立つが、重複配信は起きないので既定ではこれも送る。
 //
-// 詳細は README.md の「不足している実装」を参照。
+// 詳細は README.md を参照。
 package main
 
 import (
-	"encoding/json"
 	"fmt"
 	"time"
 
+	"go.bytecodealliance.org/cm"
+
+	driverhttp "github.com/himanoa/edlr/examples/plugins/inara-uploader/gen/edlr/plugin/driver-http"
 	hostlog "github.com/himanoa/edlr/examples/plugins/inara-uploader/gen/edlr/plugin/host-log"
 	hostsettings "github.com/himanoa/edlr/examples/plugins/inara-uploader/gen/edlr/plugin/host-settings"
 	plugin "github.com/himanoa/edlr/examples/plugins/inara-uploader/gen/edlr/plugin/plugin"
-	settingspkg "github.com/himanoa/edlr/examples/plugins/inara-uploader/settings"
+	"github.com/himanoa/edlr/examples/plugins/inara-uploader/settings"
+	"github.com/himanoa/edlr/examples/plugins/inara-uploader/uploader"
 )
 
-// appName / appVersion は INARA のヘッダに載せるクライアント識別子。
-const (
-	appName    = "edlr-inara-uploader"
-	appVersion = "0.1.0"
-)
+// inaraEndpoint は INARA API v1 のエンドポイント。manifest の
+// `[[capabilities]]` で `https://inara.cz` を要求し、ユーザーが承認した
+// 場合にだけ `driver-http.send` が通る。
+const inaraEndpoint = "https://inara.cz/inapi/v1/"
 
-// キューの上限。これを超えたら `minInterval` を無視して強制送信する。
-// 送信できないまま無制限にメモリを食うのを防ぐための保険。
-const maxQueued = 200
-
-// settings の実体は `settings` パッケージにある。main は `//go:wasmimport` を
-// 含むため `go test` でリンクできず、設定の解釈だけを別パッケージへ出してある。
-type settings = settingspkg.Settings
-
-// state はプラグインのプロセス内状態。永続化はされない。
-type state struct {
-	// startedAt は init() が呼ばれた時刻。ログ表示にのみ使う
-	// (replay の判定はホストから渡る event.replay を使う)。
-	startedAt time.Time
-
-	commanderName string
-	frontierID    string
-	// lastSystem は直近に確認した星系。Died は星系名を含まないため、
-	// 移動系イベントから覚えておいたものを添える。
-	lastSystem string
-
-	queue      []inaraEvent
-	lastFlush  time.Time
-	lastRanks  map[string]int
-	lastProg   map[string]float64
-	skippedOld int
-}
-
-var st = &state{
-	lastRanks: map[string]int{},
-	lastProg:  map[string]float64{},
-}
+var up *uploader.Uploader
 
 func init() {
 	plugin.Exports.Init = onInit
@@ -74,159 +47,110 @@ func init() {
 func main() {}
 
 func onInit() {
-	st.startedAt = time.Now().UTC()
-	st.lastFlush = st.startedAt
-	logf(hostlog.LevelInfo, "inara-uploader initialized (started at %s)", st.startedAt.Format(time.RFC3339))
+	up = uploader.New(func() time.Time { return time.Now().UTC() }, httpSender{})
+	logf(hostlog.LevelInfo, "inara-uploader initialized")
 }
 
 func onEvent(ev plugin.Event) {
-	cfg := loadSettings()
-	if !cfg.Enabled {
-		return
-	}
-
-	// Status.json 更新には INARA へ送るものが無い。
-	if ev.Kind != "journal" {
-		return
-	}
-
-	name := ""
-	if n := ev.Name.Some(); n != nil {
-		name = *n
-	}
-
-	var payload map[string]any
-	if err := json.Unmarshal([]byte(ev.PayloadJSON), &payload); err != nil {
-		logf(hostlog.LevelWarn, "unparsable journal payload for %s: %v", name, err)
-		return
-	}
-
-	timestamp := ""
-	if t := ev.Timestamp.Some(); t != nil {
-		timestamp = *t
-	}
-
-	// コマンダー識別子は、送信対象かどうかに関わらず常に拾っておく
-	// (リプレイ中の LoadGame からでも名前は学習してよい)。
-	learnIdentity(name, payload)
-
-	if !cfg.UploadHistorical && ev.Replay {
-		st.skippedOld++
-		if st.skippedOld == 1 || st.skippedOld%100 == 0 {
-			logf(hostlog.LevelInfo,
-				"skipping %d replayed journal event(s) (set uploadHistorical to send them)",
-				st.skippedOld)
-		}
-		return
-	}
-
-	st.queue = append(st.queue, mapEvent(name, timestamp, payload, st)...)
-
-	flushIfDue(cfg, name)
+	cfg := settings.Parse(hostsettings.GetAll())
+	report(up.Handle(cfg, uploader.Event{
+		Kind:      ev.Kind,
+		Name:      option(ev.Name),
+		Timestamp: option(ev.Timestamp),
+		Payload:   ev.PayloadJSON,
+		Replay:    ev.Replay,
+	}))
 }
 
-// flushIfDue は送信条件を満たしていればキューを送る。
+// option は WIT の option<string> を素の string にする。
+func option(o cm.Option[string]) string {
+	if v := o.Some(); v != nil {
+		return *v
+	}
+	return ""
+}
+
+// httpSender は driver-http による送信。
 //
-// 条件は次のいずれか:
-//   - `Shutdown` を受け取った(ゲーム終了。次のイベントはもう来ない)
-//   - キューが `maxQueued` を超えた(メモリ保護)
-//   - キューが `batchSize` 以上あり、かつ前回送信から `minIntervalSec` 経過
-//
-// INARA はクライアントに高頻度の送信を控えるよう求めているため、通常経路では
-// 必ず `minIntervalSec` を尊重する。
-func flushIfDue(cfg settings, eventName string) {
-	if len(st.queue) == 0 {
-		return
+// ホスト側で 1.5 秒のタイムアウトが掛かっており、リダイレクトも追わない。
+// タイムアウトやネットワークエラーはここで error になり、uploader が
+// キューを保持して再試行する。
+type httpSender struct{}
+
+func (httpSender) Send(body []byte) (int, []byte, error) {
+	result := driverhttp.Send(driverhttp.Request{
+		Method: "POST",
+		URL:    inaraEndpoint,
+		Headers: cm.ToList([][2]string{
+			{"content-type", "application/json"},
+			{"accept", "application/json"},
+		}),
+		Body: cm.Some(cm.ToList(body)),
+	})
+
+	if err := result.Err(); err != nil {
+		return 0, nil, fmt.Errorf("%s: %s", err.String(), driverErrorMessage(err))
 	}
 
-	forced := eventName == "Shutdown" || len(st.queue) >= maxQueued
-	if !forced {
-		if len(st.queue) < cfg.BatchSize {
-			return
-		}
-		if time.Since(st.lastFlush) < time.Duration(cfg.MinIntervalSec)*time.Second {
-			return
-		}
-	}
-
-	flush(cfg)
+	resp := result.OK()
+	return int(resp.Status), resp.Body.Slice(), nil
 }
 
-func flush(cfg settings) {
-	commander := cfg.CommanderName
-	if commander == "" {
-		commander = st.commanderName
+// driverErrorMessage は variant の中身(理由文字列)を取り出す。
+func driverErrorMessage(err *driverhttp.DriverError) string {
+	if m := err.PermissionDenied(); m != nil {
+		return *m
 	}
-	if commander == "" {
-		// INARA はヘッダにコマンダー名を要求する。まだ LoadGame を見ていない
-		// 段階では送れないので、キューに積んだまま次の機会を待つ。
-		logf(hostlog.LevelDebug, "holding %d event(s): commander name not known yet", len(st.queue))
-		return
+	if m := err.InvalidRequest(); m != nil {
+		return *m
 	}
-	if cfg.APIKey == "" {
-		logf(hostlog.LevelWarn, "holding %d event(s): apiKey is not configured", len(st.queue))
-		return
+	if m := err.Transport(); m != nil {
+		return *m
 	}
-
-	batch := st.queue
-	payload := inaraRequest{
-		Header: inaraHeader{
-			AppName:          appName,
-			AppVersion:       appVersion,
-			IsBeingDeveloped: cfg.IsBeingDeveloped,
-			APIKey:           cfg.APIKey,
-			CommanderName:    commander,
-			FrontierID:       st.frontierID,
-		},
-		Events: batch,
-	}
-
-	body, err := json.Marshal(payload)
-	if err != nil {
-		// 組み立てに失敗したバッチは捨てる(残しても次回同じ失敗をするため)。
-		logf(hostlog.LevelError, "dropping %d event(s): failed to encode payload: %v", len(batch), err)
-		st.queue = nil
-		st.lastFlush = time.Now()
-		return
-	}
-
-	if cfg.DryRun {
-		logf(hostlog.LevelInfo, "dry run: would upload %d event(s): %s", len(batch), string(body))
-		st.queue = nil
-		st.lastFlush = time.Now()
-		return
-	}
-
-	result, err := postToInara(body)
-	st.lastFlush = time.Now()
-	if err != nil {
-		// 送信自体が失敗(ネットワーク・タイムアウト・未承認)。キューは
-		// 残して次のイベントで再試行する。上限は maxQueued。
-		logf(hostlog.LevelWarn, "upload of %d event(s) failed, will retry: %v", len(batch), err)
-		return
-	}
-
-	st.queue = nil
-	logResult(result, len(batch))
+	return "unknown driver error"
 }
 
-func learnIdentity(name string, payload map[string]any) {
-	switch name {
-	case "Commander", "LoadGame":
-		if v, ok := payload["Name"].(string); ok && v != "" {
-			st.commanderName = v
-		}
-		if v, ok := payload["Commander"].(string); ok && v != "" {
-			st.commanderName = v
-		}
-		if v, ok := payload["FID"].(string); ok && v != "" {
-			st.frontierID = v
-		}
+// report は Outcome をログへ落とす。判断はせず、起きたことをそのまま出す。
+func report(out uploader.Outcome) {
+	if out.Skipped > 0 {
+		logf(hostlog.LevelInfo,
+			"skipped %d event(s) from the replayed backlog (set uploadHistorical to send them)",
+			out.Skipped)
 	}
-}
-
-func loadSettings() settings {
-	return settingspkg.Parse(hostsettings.GetAll())
+	if out.Dropped > 0 {
+		logf(hostlog.LevelWarn,
+			"dropped %d queued event(s); the queue keeps the most recent %d",
+			out.Dropped, uploader.MaxQueued)
+	}
+	if out.Held != "" {
+		logf(hostlog.LevelWarn, "holding %d event(s): %s", out.Pending, out.Held)
+	}
+	if out.DryRun != nil {
+		logf(hostlog.LevelInfo, "dry run: would upload %d event(s): %s", out.Sent, string(out.DryRun))
+	}
+	for _, rejected := range out.Rejected {
+		logf(hostlog.LevelWarn, "inara rejected event %d: %d %s",
+			rejected.Index, rejected.Status, rejected.StatusText)
+	}
+	if out.Warning != "" {
+		// ヘッダの eventStatus が 200 以外の 2xx(202/204)。形式上は成功
+		// なので Fatal ではないが、内容は把握できるよう WARN で残す。
+		logf(hostlog.LevelWarn, "inara returned a warning for the batch: %s", out.Warning)
+	}
+	for _, warned := range out.Warned {
+		logf(hostlog.LevelWarn, "inara returned a warning for event %d: %d %s",
+			warned.Index, warned.Status, warned.StatusText)
+	}
+	if out.Err != nil {
+		level := hostlog.LevelWarn
+		if out.Fatal {
+			level = hostlog.LevelError
+		}
+		logf(level, "%v", out.Err)
+	}
+	if out.Sent > 0 && out.DryRun == nil {
+		logf(hostlog.LevelInfo, "uploaded %d event(s) to inara", out.Sent)
+	}
 }
 
 func logf(level hostlog.Level, format string, args ...any) {
