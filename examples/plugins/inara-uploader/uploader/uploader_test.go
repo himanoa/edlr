@@ -140,6 +140,52 @@ func TestTransitionToLiveFlushesTheBacklog(t *testing.T) {
 	}
 }
 
+// replay 中に送れない状態(API キー未設定など)が続くと backoff が立ち、
+// minIntervalSeconds が経つまで全速リトライしない。
+func TestReplayBacksOffWhenItCannotSend(t *testing.T) {
+	sender := okSender()
+	c := newClock()
+	u := New(c.now, sender)
+	cfg := testSettings()
+	cfg.APIKey = ""
+
+	outs := feed(u, cfg, ReplayBatchSize, true)
+	last := outs[len(outs)-1]
+	if last.Held == "" {
+		t.Fatalf("expected the first flush attempt to be held, got %+v", last)
+	}
+
+	// 時計を進めずに追加の replay イベントを流す。backoff が立っているので
+	// 全速リトライは起きず、Held は再び現れないはずである。
+	for _, out := range feed(u, cfg, 5, true) {
+		if out.Held != "" {
+			t.Errorf("expected no retry before the interval elapses, got %+v", out)
+		}
+	}
+
+	c.advance(time.Duration(cfg.MinIntervalSec) * time.Second)
+	retry := u.Handle(cfg, jump("Sol", true))
+	if retry.Held == "" {
+		t.Errorf("expected the retry to be attempted once the interval elapsed, got %+v", retry)
+	}
+	if len(sender.calls) != 0 {
+		t.Errorf("nothing may be uploaded without an api key, got %d", len(sender.calls))
+	}
+}
+
+// バックログが無ければ、最初の live イベントだけでは送信しない
+// (batchSize/minIntervalSeconds を満たすまで待つ)。
+func TestFirstLiveEventWithoutBacklogDoesNotFlush(t *testing.T) {
+	sender := okSender()
+	u := New(newClock().now, sender)
+	cfg := testSettings()
+
+	out := u.Handle(cfg, jump("Sol", false))
+	if len(sender.calls) != 0 {
+		t.Errorf("the first live event alone must not flush, got %d uploads / %+v", len(sender.calls), out)
+	}
+}
+
 // uploadHistorical=false のスキップ件数は、遷移時に 1 回だけ報告する。
 func TestSkippedReplayIsReportedOnceAtTheTransition(t *testing.T) {
 	sender := okSender()
