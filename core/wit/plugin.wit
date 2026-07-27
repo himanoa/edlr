@@ -1,4 +1,4 @@
-package edlr:plugin@0.2.0;
+package edlr:plugin@0.3.0;
 
 interface host-log {
   enum level { debug, info, warn, error }
@@ -86,12 +86,33 @@ interface driver-fs {
   delete:     func(root: string, path: string) -> result<_, driver-error>;
 }
 
+interface bus {
+  variant bus-error {
+    permission-denied(string),
+    unknown-driver(string),
+    unknown-topic(string),
+    driver-unavailable(string),
+    queue-full(string),
+    too-large(string),
+  }
+
+  publish: func(driver: string, topic: string, payload: list<u8>) -> result<_, bus-error>;
+  get:     func(driver: string, topic: string) -> result<option<list<u8>>, bus-error>;
+}
+
+interface bus-host {
+  use bus.{bus-error};
+
+  emit: func(topic: string, payload: list<u8>) -> result<_, bus-error>;
+}
+
 world plugin {
   import host-log;
   import host-settings;
   import driver-http;
   import driver-process;
   import driver-fs;
+  import bus;
 
   record event {
     // "journal" | "status"
@@ -107,6 +128,7 @@ world plugin {
 
   export init: func();
   export on-event: func(ev: event);
+  export on-message: func(driver: string, topic: string, payload: list<u8>);
 }
 
 /// ゲスト(プラグイン)がビルド時に対象とする world。
@@ -128,5 +150,27 @@ world plugin {
 /// ホストの world に WASI を含めると二重登録になってしまう。
 world plugin-guest {
   include plugin;
+  include wasi:cli/imports@0.2.0;
+}
+
+/// ドライバ(ホスト側 `bindgen!` が使う)。`bus` は import しない
+/// -- ドライバ間の呼び出しを構造的に不可能にするため。`on-event` も無い
+/// -- ドライバは journal / status を受け取らない。
+world driver {
+  import host-log;
+  import host-settings;
+  import driver-http;
+  import driver-process;
+  import driver-fs;
+  import bus-host;
+
+  export init: func();
+  export on-message: func(%from: string, topic: string, payload: list<u8>);
+}
+
+/// ドライバ(ゲスト)がビルド時に対象とする world。`plugin-guest` と同じ理由で
+/// WASI の import 一式を足してある。
+world driver-guest {
+  include driver;
   include wasi:cli/imports@0.2.0;
 }

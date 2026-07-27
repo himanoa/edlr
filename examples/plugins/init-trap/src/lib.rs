@@ -22,6 +22,8 @@ impl Guest for InitTrap {
         // Never reached: init() always traps, so the runner never starts an
         // event task for this plugin.
     }
+
+    fn on_message(_driver: String, _topic: String, _payload: Vec<u8>) {}
 }
 
 export!(InitTrap);

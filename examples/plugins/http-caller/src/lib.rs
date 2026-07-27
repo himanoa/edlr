@@ -59,6 +59,8 @@ impl Guest for HttpCaller {
             }
         }
     }
+
+    fn on_message(_driver: String, _topic: String, _payload: Vec<u8>) {}
 }
 
 export!(HttpCaller);

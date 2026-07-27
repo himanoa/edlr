@@ -36,6 +36,13 @@ impl Guest for HelloLogger {
             );
         }
     }
+
+    fn on_message(driver: String, topic: String, _payload: Vec<u8>) {
+        edlr::plugin::host_log::log(
+            edlr::plugin::host_log::Level::Debug,
+            &format!("ignoring bus message from {driver}/{topic}"),
+        );
+    }
 }
 
 export!(HelloLogger);

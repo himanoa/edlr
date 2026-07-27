@@ -30,6 +30,8 @@ impl Guest for MemoryHog {
             hog.push(vec![0xABu8; CHUNK_BYTES]);
         }
     }
+
+    fn on_message(_driver: String, _topic: String, _payload: Vec<u8>) {}
 }
 
 export!(MemoryHog);
