@@ -1,0 +1,11 @@
+id = "state-reader"
+name = "State Reader"
+version = "0.1.0"
+entry = "plugin.wasm"
+events = ["FSDJump"]
+
+[[bus]]
+driver = "ed-state"
+publish = ["set-system"]
+subscribe = ["current-system"]
+reason = "ジャンプ先を ed-state ドライバへ渡し、配り直された現在システムを受け取るため"
