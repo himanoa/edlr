@@ -430,9 +430,14 @@ impl DriverRegistry {
     /// エラー型を揃えるため(`SidecarInfo`/`FilesystemInfo`/`SidecarAction`/
     /// `RegistryError` は既にプラグイン・ドライバ両レイヤーで共有されている
     /// 型 -- タスクブリーフ参照)、`DriverRegistryError` ではなくこちらを
-    /// 使う。未登録の場合は `RegistryError::UnknownPlugin`(variant 名は
-    /// `Plugin` のままだが、プラグイン側の同名メソッドが返すのと同じ variant
-    /// を再利用しているだけで、ドライバ専用の variant を新設していない)。
+    /// 使う。未登録の場合は `RegistryError::UnknownDriver` を返す
+    /// (`RegistryError::UnknownPlugin` ではない -- レビュー指摘: これは
+    /// ドライバの未登録であり、既存の `drivers/set-capabilities` アーム
+    /// (`DriverRegistryError::UnknownDriver` 経由)が既に "unknown driver:
+    /// {id}" という文言を使っている以上、ここも同じ文言に揃える必要がある。
+    /// `UnknownPlugin` を使い回すと、同じ「未登録のドライバ」失敗が
+    /// `drivers/*` アームによって "unknown plugin: ..." と "unknown driver:
+    /// ..." の 2 通りの文言に分かれてしまう)。
     fn find_manifest_for_shared(&self, id: &str) -> Result<DriverManifest, RegistryError> {
         self.entries
             .lock()
@@ -440,7 +445,7 @@ impl DriverRegistry {
             .iter()
             .find(|entry| entry.manifest.id == id)
             .map(|entry| entry.manifest.clone())
-            .ok_or_else(|| RegistryError::UnknownPlugin(id.to_string()))
+            .ok_or_else(|| RegistryError::UnknownDriver(id.to_string()))
     }
 
     /// `id` のドライバが現在 `Disabled` かどうか。
@@ -504,7 +509,7 @@ impl DriverRegistry {
             let entry = guard
                 .iter()
                 .find(|entry| entry.manifest.id == id)
-                .ok_or_else(|| RegistryError::UnknownPlugin(id.to_string()))?;
+                .ok_or_else(|| RegistryError::UnknownDriver(id.to_string()))?;
             (entry.manifest.clone(), entry.filesystem_json.clone())
         };
 
@@ -606,7 +611,7 @@ impl DriverRegistry {
             let entry = guard
                 .iter()
                 .find(|entry| entry.manifest.id == id)
-                .ok_or_else(|| RegistryError::UnknownPlugin(id.to_string()))?;
+                .ok_or_else(|| RegistryError::UnknownDriver(id.to_string()))?;
             (
                 entry.manifest.clone(),
                 entry.sidecars_json.clone(),
@@ -858,6 +863,8 @@ impl DriverRegistry {
 pub(crate) mod tests {
     use super::*;
     use crate::driver::host::DriverHost;
+    use std::thread;
+    use std::time::Duration;
 
     fn manifest_with_topic(id: &str) -> DriverManifest {
         DriverManifest {
@@ -1308,5 +1315,112 @@ pub(crate) mod tests {
             matches!(err, RegistryError::Filesystem(_)),
             "expected RegistryError::Filesystem, got {err:?}"
         );
+    }
+
+    /// Port of
+    /// `crate::plugin::registry::tests::concurrent_control_sidecar_start_and_grant_revoke_never_leaves_an_ungranted_instance_running`
+    /// onto `DriverRegistry`.
+    ///
+    /// The review finding this closes: the plugin-side test only exercises
+    /// `crate::plugin::registry::Registry`'s own `entries` Vec and its own
+    /// `sidecar_runtime_locks` map -- both independently typed/instantiated
+    /// fields on `DriverRegistry`, not shared with the plugin registry in any
+    /// way (no `Arc` is shared between the two; `DriverRegistry::new`
+    /// allocates its own `HashMap::new()`-backed lock maps and its own
+    /// `Vec::new()`-backed `entries`). So the plugin-side stress test proves
+    /// nothing about whether `DriverRegistry::control_sidecar`'s TOCTOU fix
+    /// (taking `sidecar_runtime_lock_for(id)` before reading
+    /// grant/config and holding it through `ensure_started`) is actually
+    /// wired up correctly on this copy -- a regression here (e.g. someone
+    /// "simplifying" `DriverRegistry::control_sidecar` to drop the lock, or
+    /// reordering the read-then-spawn so the lock no longer covers both)
+    /// would not be caught by the plugin suite at all. This test hammers the
+    /// exact same race directly against `DriverRegistry`.
+    #[test]
+    fn concurrent_control_sidecar_start_and_grant_revoke_never_leaves_an_ungranted_instance_running(
+    ) {
+        let (registry, _tmp) = test_registry_with_sidecar_and_filesystem();
+
+        registry
+            .set_sidecar_config(
+                "voice",
+                "engine",
+                &SidecarConfig {
+                    command: "/bin/sh".to_string(),
+                    args: vec!["-c".to_string(), "sleep 30".to_string()],
+                    port: 51500,
+                    replicas: 1,
+                },
+            )
+            .expect("config should persist");
+        registry
+            .set_sidecar_grant("voice", "engine", true)
+            .expect("initial grant should persist");
+
+        const THREADS: usize = 8;
+        const ITERATIONS: usize = 20;
+        let barrier = Arc::new(std::sync::Barrier::new(THREADS + 1));
+
+        let mut handles = Vec::new();
+        for _ in 0..THREADS {
+            let registry = registry.clone();
+            let barrier = barrier.clone();
+            handles.push(thread::spawn(move || {
+                barrier.wait();
+                for _ in 0..ITERATIONS {
+                    let _ = registry.control_sidecar("voice", "engine", SidecarAction::Start);
+                }
+            }));
+        }
+        let revoker = {
+            let registry = registry.clone();
+            let barrier = barrier.clone();
+            thread::spawn(move || {
+                barrier.wait();
+                // Revoke partway through the hammering, then leave the
+                // grant revoked (last write wins on the grants file, and
+                // this is this test's only writer of the grant).
+                std::thread::sleep(Duration::from_millis(5));
+                registry
+                    .set_sidecar_grant("voice", "engine", false)
+                    .expect("revoke should succeed");
+            })
+        };
+
+        for handle in handles {
+            handle.join().expect("worker thread should not panic");
+        }
+        revoker.join().expect("revoker thread should not panic");
+
+        let manifest = registry
+            .manifest_of("voice")
+            .expect("voice driver must still be registered");
+        let settings_manifest = manifest.as_settings_manifest();
+        let disk_granted = registry
+            .grants_store
+            .sidecar_state(&settings_manifest, "engine")
+            .granted;
+        let key = DriverRegistry::sidecar_key("voice", "engine");
+        let running = registry
+            .process_driver
+            .status(
+                &key,
+                &ProcessSpec {
+                    command: PathBuf::from("/bin/sh"),
+                    args: vec!["-c".to_string(), "sleep 30".to_string()],
+                    ports: vec![51500],
+                },
+            )
+            .iter()
+            .any(|i| i.running);
+
+        assert!(
+            disk_granted || !running,
+            "sidecar is running (running={running}) while the on-disk grant is \
+             revoked (granted={disk_granted}) -- a Start must have used a grant \
+             value read before the concurrent revoke took effect"
+        );
+
+        registry.process_driver.stop(&key);
     }
 }

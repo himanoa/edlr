@@ -1198,6 +1198,90 @@ mod tests {
         .unwrap_err();
         assert_eq!(err, "sidecar engine is not granted");
     }
+
+    // Regression coverage for a review finding: the five new `drivers/*`
+    // sidecar/filesystem arms used to surface an unregistered driver id as
+    // `RegistryError::UnknownPlugin` ("unknown plugin: {id}"), while the
+    // pre-existing `drivers/set-capabilities` arm (via
+    // `DriverRegistryError::UnknownDriver`) already says "unknown driver:
+    // {id}" for the identical failure. Nothing exercised the unknown-driver
+    // path for the five new arms, so the inconsistency went uncaught. Each
+    // of the five gets its own test pinning the exact wording, one per arm
+    // (rather than one combined test) so a future regression on any single
+    // arm fails with an unambiguous test name.
+
+    #[test]
+    fn drivers_set_sidecar_config_reports_unknown_driver() {
+        let (drivers, _tmp) = crate::driver::registry::tests::test_registry_with_sidecar_and_filesystem();
+        let err = handle_rpc_with_drivers(
+            None,
+            Some(&drivers),
+            "drivers/set-sidecar-config",
+            &serde_json::json!({
+                "driver": "not-a-driver",
+                "name": "engine",
+                "config": {"command": "/bin/sh", "args": [], "port": 51500, "replicas": 1},
+            }),
+        )
+        .unwrap_err();
+        assert_eq!(err, "unknown driver: not-a-driver");
+    }
+
+    #[test]
+    fn drivers_set_sidecar_grant_reports_unknown_driver() {
+        let (drivers, _tmp) = crate::driver::registry::tests::test_registry_with_sidecar_and_filesystem();
+        let err = handle_rpc_with_drivers(
+            None,
+            Some(&drivers),
+            "drivers/set-sidecar-grant",
+            &serde_json::json!({"driver": "not-a-driver", "name": "engine", "granted": true}),
+        )
+        .unwrap_err();
+        assert_eq!(err, "unknown driver: not-a-driver");
+    }
+
+    #[test]
+    fn drivers_sidecar_control_reports_unknown_driver() {
+        let (drivers, _tmp) = crate::driver::registry::tests::test_registry_with_sidecar_and_filesystem();
+        let err = handle_rpc_with_drivers(
+            None,
+            Some(&drivers),
+            "drivers/sidecar-control",
+            &serde_json::json!({"driver": "not-a-driver", "name": "engine", "action": "start"}),
+        )
+        .unwrap_err();
+        assert_eq!(err, "unknown driver: not-a-driver");
+    }
+
+    #[test]
+    fn drivers_set_filesystem_config_reports_unknown_driver() {
+        let (drivers, _tmp) = crate::driver::registry::tests::test_registry_with_sidecar_and_filesystem();
+        let err = handle_rpc_with_drivers(
+            None,
+            Some(&drivers),
+            "drivers/set-filesystem-config",
+            &serde_json::json!({
+                "driver": "not-a-driver",
+                "name": "cache",
+                "config": {"path": "/tmp"},
+            }),
+        )
+        .unwrap_err();
+        assert_eq!(err, "unknown driver: not-a-driver");
+    }
+
+    #[test]
+    fn drivers_set_filesystem_grant_reports_unknown_driver() {
+        let (drivers, _tmp) = crate::driver::registry::tests::test_registry_with_sidecar_and_filesystem();
+        let err = handle_rpc_with_drivers(
+            None,
+            Some(&drivers),
+            "drivers/set-filesystem-grant",
+            &serde_json::json!({"driver": "not-a-driver", "name": "cache", "granted": true}),
+        )
+        .unwrap_err();
+        assert_eq!(err, "unknown driver: not-a-driver");
+    }
 }
 
 #[cfg(test)]

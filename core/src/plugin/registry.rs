@@ -134,6 +134,17 @@ pub enum RegistryError {
     Filesystem(String),
     /// 指定された `driver` のバス接続要求が manifest に無い。
     UnknownBus(String),
+    /// 指定された `id` のドライバが登録されていない。`UnknownPlugin` とは
+    /// 別の variant にしてある: `crate::driver::registry::DriverRegistry` の
+    /// サイドカー/ファイルアクセス系メソッド(`find_manifest_for_shared` /
+    /// `refresh_sidecar_runtime` / `refresh_filesystem_runtime`)が返す未登録
+    /// エラーは「プラグイン」ではなく「ドライバ」の話であり、
+    /// `drivers/set-capabilities` など既存の `drivers/*` アーム
+    /// (`DriverRegistryError::UnknownDriver` 経由)が既に "unknown driver:
+    /// {id}" という文言を使っている。`UnknownPlugin` を使い回すと同じ失敗が
+    /// アームによって違う文言になってしまう(レビュー指摘)ので、ここで
+    /// 揃える。
+    UnknownDriver(String),
 }
 
 impl fmt::Display for RegistryError {
@@ -149,6 +160,7 @@ impl fmt::Display for RegistryError {
             RegistryError::UnknownFilesystem(name) => write!(f, "unknown filesystem root: {name}"),
             RegistryError::Filesystem(msg) => write!(f, "{msg}"),
             RegistryError::UnknownBus(driver) => write!(f, "unknown bus connection: {driver}"),
+            RegistryError::UnknownDriver(id) => write!(f, "unknown driver: {id}"),
         }
     }
 }
