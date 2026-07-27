@@ -9,8 +9,12 @@
 //!   (`Receiver<Message>`)を、ドライバ専用スレッドがそのまま
 //!   `for message in messages_rx` で回すだけで完結する。
 //! - ドライバは複数プラグインの結節点になりうるため、キュー容量は
-//!   `DRIVER_MESSAGE_QUEUE_CAPACITY`(64)とプラグインの
-//!   `PLUGIN_EVENT_QUEUE_CAPACITY`(32)より大きく取ってある。
+//!   `DRIVER_MESSAGE_QUEUE_CAPACITY`(64)としてある。プラグイン側の
+//!   `PLUGIN_WORK_QUEUE_CAPACITY` も同じ 64 だが(journal イベントとバス
+//!   配信の 2 プロデューサが枠を奪い合うようになったため引き上げた -- 同
+//!   定数のドキュメント参照)、そちらは 1 プラグインあたりの容量であるのに
+//!   対しこちらは複数プラグインが同時に投げ込みうる結節点の容量なので、
+//!   両者が同じ数字であることに深い意味は無い(たまたま揃っただけ)。
 
 use std::path::{Path, PathBuf};
 use std::sync::mpsc as std_mpsc;
@@ -35,9 +39,11 @@ use crate::plugin::sidecar_runtime::{
 /// ドライバ 1 件あたりのメッセージキュー容量。
 ///
 /// ドライバは複数プラグインの結節点で溢れやすく、1 メッセージの処理が
-/// `DriverInstance::CALL_DEADLINE`(30 秒)まで伸びうるため、プラグインの
-/// `PLUGIN_EVENT_QUEUE_CAPACITY`(32)より大きく取る。満杯時は `publish` が
-/// `queue-full` を返す(捨てない)ので、呼び出し側が状況を知れる。
+/// `DriverInstance::CALL_DEADLINE`(30 秒)まで伸びうるため、余裕を持って
+/// 大きめに取ってある(プラグイン側の 1 プラグインあたりの容量である
+/// `PLUGIN_WORK_QUEUE_CAPACITY` とは性質が異なる数字なので、値が近い/同じ
+/// であること自体に意味は無い)。満杯時は `publish` が `queue-full` を
+/// 返す(捨てない)ので、呼び出し側が状況を知れる。
 const DRIVER_MESSAGE_QUEUE_CAPACITY: usize = 64;
 
 /// `drivers_dir` を走査し、各ドライバをロードして専用スレッドで駆動する。

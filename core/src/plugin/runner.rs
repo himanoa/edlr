@@ -29,33 +29,45 @@ use std::path::{Path, PathBuf};
 use std::sync::{mpsc as std_mpsc, Arc, Mutex};
 use std::thread;
 
-/// Capacity of the per-plugin work queue (`work_tx`/`work_rx` below), which
-/// carries both journal events (`PluginWork::Event`) and bus deliveries from
-/// a driver (`PluginWork::Message`) -- the two sources are merged onto this
-/// one bounded channel so that both kinds of wasm calls stay serialized on
-/// the plugin's single dedicated thread (see the module doc comment and
-/// `PluginWork`). It is also reused as the capacity of the per-plugin
-/// `Delivery` channel that `spawn_bus_subscriber` reads from before
-/// re-packing accepted deliveries into `PluginWork::Message` on this queue.
+/// プラグイン専用の作業キュー(下記 `work_tx`/`work_rx`)の容量。journal
+/// イベント(`PluginWork::Event`)とドライバからのバス配信
+/// (`PluginWork::Message`)の両方をこの 1 本の有界チャネルに混ぜることで、
+/// 2 種類の wasm 呼び出しをプラグイン専用の 1 スレッドに直列化する(モジュール
+/// のドキュメントコメントと `PluginWork` を参照)。`spawn_bus_subscriber` が
+/// 読む配信専用の `Delivery` チャネルの容量にも同じ値を使い回している。
 ///
-/// `driver-http.send` can block a plugin's dedicated thread for up to
-/// `host::HTTP_TIMEOUT` per call (a host the plugin author controls can
-/// simply not respond), during which the plugin's own thread is not
-/// draining `work_rx` at all. The channel used to be unbounded
-/// (`std_mpsc::channel`) and carried only journal events, so a stalled
-/// plugin let the router/monitor's broadcast events accumulate in host
-/// memory without limit -- outside anything `StoreLimits` can see, since it
-/// lives on the host side of the boundary, not in the plugin's wasm linear
-/// memory. Bounding it here caps that growth at a fixed, small number of
-/// pending items (events or bus deliveries) per plugin.
+/// `driver-http.send` は 1 呼び出しあたり `host::HTTP_TIMEOUT` までプラグイン
+/// 専用スレッドをブロックしうる(プラグイン作者の管理下にないホストが単に
+/// 応答しないことがある)。その間プラグイン自身のスレッドは `work_rx` を
+/// 全く読まない。このチャネルはかつて無制限(`std_mpsc::channel`)で journal
+/// イベントのみを運んでいたため、詰まったプラグインは router/monitor 側の
+/// broadcast イベントをホストメモリ上に際限なく溜め込ませてしまっていた
+/// -- `StoreLimits` から見えるプラグインの wasm 線形メモリの外側の話なので、
+/// そこでは検知できない。ここで容量を切ることで、プラグイン 1 件あたりの
+/// 積み残し(イベントであれバス配信であれ)を固定の小さい数に抑える。
 ///
-/// Overflow policy: when full, `spawn_event_subscriber` drops the new event
-/// and `spawn_bus_subscriber` drops the new delivery, each logging a
-/// `tracing::warn!` rather than blocking its subscriber task (see their doc
-/// comments) or disabling the plugin outright -- a plugin that's merely slow
-/// (e.g. waiting out its own `driver-http.send` call) should be allowed to
-/// catch up and keep running, not be killed for falling behind.
-const PLUGIN_EVENT_QUEUE_CAPACITY: usize = 32;
+/// 満杯時の方針: `spawn_event_subscriber` は新しいイベントを、
+/// `spawn_bus_subscriber` は新しい配信を、それぞれ `tracing::warn!` を出して
+/// 捨てる(購読タスク自身をブロックする(各ドキュメントコメント参照)のでも
+/// プラグインを無効化するのでもない)。`driver-http.send` を待っているだけの
+/// ような、単に遅いプラグインを、遅れを理由に殺すべきではないため。
+///
+/// **32 → 64 への変更(このタスクでの調整)**: この容量はもともと journal
+/// イベントのみを運んでいた頃に決めた値。今は 2 つの独立したプロデューサ
+/// (router のイベント購読タスクと、バスの配信購読タスク)が同じキューの
+/// 枠を奪い合っており、両者の間には公平性も優先度も無いため、どちらか一方の
+/// バーストがもう一方を飢えさせて捨てさせうる。容量を倍にすることで、
+/// おおよそ元の数が想定していた「1 ストリームあたりの余裕」を両ストリームに
+/// 復元する(ドライバ側 `DRIVER_MESSAGE_QUEUE_CAPACITY` の 64 とも揃う)。
+///
+/// **既知の限界(このタスクでは未解決)**: これは緩和策であって解決策では
+/// ない。2 プロデューサ間の公平性は依然として無く、十分におしゃべりな
+/// ドライバがあれば journal イベント側が捨てられることは今も起こりうる。
+/// この計画で意図的にスコープ外としている次の一手は、破棄をプラグインごとに
+/// 観測可能にすること(`plugins/list` 経由で見えるカウンタなど)-- 実際に
+/// 何か捨てられているかも分からないままこの数値だけをチューニングするのは
+/// 当て推量でしかないため。
+const PLUGIN_WORK_QUEUE_CAPACITY: usize = 64;
 
 use tokio::sync::broadcast;
 
@@ -286,7 +298,7 @@ fn load_and_run_plugin(
 
     // journal イベントとバス配信を混ぜる 1 本の作業キュー(`PluginWork` の
     // ドキュメントコメント参照)。
-    let (work_tx, work_rx) = std_mpsc::sync_channel::<PluginWork>(PLUGIN_EVENT_QUEUE_CAPACITY);
+    let (work_tx, work_rx) = std_mpsc::sync_channel::<PluginWork>(PLUGIN_WORK_QUEUE_CAPACITY);
     let (ready_tx, ready_rx) = std_mpsc::channel::<PluginState>();
 
     thread::spawn({
@@ -352,7 +364,7 @@ fn load_and_run_plugin(
             .collect();
         if !subscribe_topics.is_empty() {
             let (delivery_tx, delivery_rx) =
-                std_mpsc::sync_channel::<Delivery>(PLUGIN_EVENT_QUEUE_CAPACITY);
+                std_mpsc::sync_channel::<Delivery>(PLUGIN_WORK_QUEUE_CAPACITY);
             for (driver_id, topic) in &subscribe_topics {
                 subscribe_with_initial_value(
                     bus,
@@ -456,14 +468,14 @@ enum PluginWork {
 /// `router` を購読し、`manifest.events` にマッチしたイベントだけを
 /// プラグインスレッドへ転送する tokio タスクを起動する。
 ///
-/// `work_tx` は容量固定の `sync_channel`(`PLUGIN_EVENT_QUEUE_CAPACITY`)
+/// `work_tx` は容量固定の `sync_channel`(`PLUGIN_WORK_QUEUE_CAPACITY`)
 /// なので、送信には(ブロックする `send` ではなく)`try_send` を使う。この
 /// tokio タスクは非同期ランタイムのワーカースレッド上で動くため、万一
 /// プラグインスレッドが `driver-http.send` のブロッキング呼び出し中で
 /// `work_rx` を全く読んでいなくても、ここで待たされてはいけない
 /// (ワーカースレッドを塞ぐと router/monitor 全体に波及する)。キューが
 /// 満杯の間に届いたイベントは `tracing::warn!` を出して破棄する
-/// (`PLUGIN_EVENT_QUEUE_CAPACITY` のドキュメント参照)。
+/// (`PLUGIN_WORK_QUEUE_CAPACITY` のドキュメント参照)。
 fn spawn_event_subscriber(
     manifest: Manifest,
     mut rx: broadcast::Receiver<Arc<Event>>,
@@ -481,7 +493,7 @@ fn spawn_event_subscriber(
                         Err(std_mpsc::TrySendError::Full(_)) => {
                             tracing::warn!(
                                 plugin_id = %manifest.id,
-                                "event queue full ({PLUGIN_EVENT_QUEUE_CAPACITY} pending), \
+                                "event queue full ({PLUGIN_WORK_QUEUE_CAPACITY} pending), \
                                  dropping event for a slow/blocked plugin"
                             );
                         }
@@ -590,7 +602,7 @@ fn spawn_bus_subscriber(
                 Err(std_mpsc::TrySendError::Full(_)) => {
                     tracing::warn!(
                         plugin_id = %manifest.id,
-                        "work queue full ({PLUGIN_EVENT_QUEUE_CAPACITY} pending), \
+                        "work queue full ({PLUGIN_WORK_QUEUE_CAPACITY} pending), \
                          dropping a bus delivery for a slow/blocked plugin"
                     );
                 }
@@ -639,7 +651,7 @@ mod tests {
     //! to `host::HTTP_TIMEOUT` inside `driver-http.send`. These tests never
     //! drain `events_rx` (simulating a fully-stalled plugin thread) and
     //! assert that publishing far more events than
-    //! `PLUGIN_EVENT_QUEUE_CAPACITY` neither blocks the publishing task nor
+    //! `PLUGIN_WORK_QUEUE_CAPACITY` neither blocks the publishing task nor
     //! grows the queue past its bound.
     use super::*;
     use std::time::Duration;
@@ -673,7 +685,7 @@ mod tests {
     async fn slow_plugin_channel_stays_bounded_and_publishing_does_not_block() {
         let (broadcast_tx, broadcast_rx) = broadcast::channel::<Arc<Event>>(4096);
         let (work_tx, work_rx) =
-            std_mpsc::sync_channel::<PluginWork>(PLUGIN_EVENT_QUEUE_CAPACITY);
+            std_mpsc::sync_channel::<PluginWork>(PLUGIN_WORK_QUEUE_CAPACITY);
 
         spawn_event_subscriber(test_manifest(), broadcast_rx, work_tx);
 
@@ -684,7 +696,7 @@ mod tests {
         // subscriber would on a shared runtime) would risk deadlocking or
         // at minimum this test would take a long time; with `try_send` it
         // must complete promptly regardless of channel fullness.
-        let published = PLUGIN_EVENT_QUEUE_CAPACITY * 50;
+        let published = PLUGIN_WORK_QUEUE_CAPACITY * 50;
         for i in 0..published {
             broadcast_tx
                 .send(journal_event(&format!("Evt{i}")))
@@ -703,8 +715,8 @@ mod tests {
         }
 
         assert!(
-            queued <= PLUGIN_EVENT_QUEUE_CAPACITY,
-            "queued {queued} events, expected at most {PLUGIN_EVENT_QUEUE_CAPACITY} \
+            queued <= PLUGIN_WORK_QUEUE_CAPACITY,
+            "queued {queued} events, expected at most {PLUGIN_WORK_QUEUE_CAPACITY} \
              (publishing {published} events to a never-drained receiver must not \
              grow the queue past its bound)"
         );
