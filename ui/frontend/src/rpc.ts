@@ -1,3 +1,5 @@
+import type { BusRequest, Capabilities, DriversList } from "./types/plugin";
+
 const DEFAULT_TIMEOUT_MS = 5000;
 
 export type RpcResponse =
@@ -104,6 +106,41 @@ export class RpcClient {
     this.closed = true;
     this.rejectAllPending(new Error("RpcClient closed"));
     this.ws.close();
+  }
+
+  /** インストール済みドライバの一覧(`drivers/list`)を取得する。 */
+  listDrivers(): Promise<DriversList> {
+    return this.call<DriversList>("drivers/list");
+  }
+
+  /** ドライバの設定値を更新する(`drivers/set-settings`)。サーバが返した確定値を返す。 */
+  setDriverSettings(
+    driverId: string,
+    values: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    return this.call<Record<string, unknown>>("drivers/set-settings", {
+      driver: driverId,
+      values,
+    });
+  }
+
+  /** ドライバの外部通信承認を更新する(`drivers/set-capabilities`)。 */
+  setDriverCapabilities(driverId: string, granted: boolean): Promise<Capabilities> {
+    return this.call<Capabilities>("drivers/set-capabilities", { driver: driverId, granted });
+  }
+
+  /**
+   * プラグインとドライバ間の bus 接続承認を更新する(`plugins/set-bus-grant`)。
+   * サーバはそのプラグインの `bus` 配列全体を返すので、呼び出し側は自分の
+   * 更新レスポンスからそのまま一覧を差し替えられる(再度 `plugins/list` を
+   * 呼ぶ必要がない)。
+   */
+  setBusGrant(pluginId: string, driver: string, granted: boolean): Promise<{ bus: BusRequest[] }> {
+    return this.call<{ bus: BusRequest[] }>("plugins/set-bus-grant", {
+      plugin: pluginId,
+      driver,
+      granted,
+    });
   }
 
   private rejectAllPending(reason: unknown): void {

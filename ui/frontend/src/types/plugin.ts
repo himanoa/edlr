@@ -64,6 +64,16 @@ export interface FilesystemRoots {
   roots: FilesystemRoot[];
 }
 
+export interface BusRequest {
+  driver: string;
+  publish: string[];
+  subscribe: string[];
+  reason: string;
+  granted: boolean;
+  staleGrant: boolean;
+  resolved: boolean;
+}
+
 export interface PluginInfo {
   id: string;
   name: string;
@@ -76,9 +86,36 @@ export interface PluginInfo {
   capabilities: Capabilities;
   sidecars: Sidecar[];
   filesystem: FilesystemRoot[];
+  bus: BusRequest[];
 }
 
 export interface PluginsList {
   pluginsDir: string;
   plugins: PluginInfo[];
+}
+
+export interface TopicSpec {
+  name: string;
+  retain: boolean;
+  description: string;
+}
+
+export interface DriverInfo {
+  id: string;
+  name: string;
+  version: string;
+  description: string;
+  topics: TopicSpec[];
+  settings: SettingField[];
+  values: Record<string, unknown>;
+  capabilities: Capabilities;
+  sidecars: Sidecar[];
+  filesystem: FilesystemRoot[];
+  state: "running" | "disabled";
+  reason?: string;
+}
+
+export interface DriversList {
+  driversDir: string;
+  drivers: DriverInfo[];
 }

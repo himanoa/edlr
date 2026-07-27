@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { BusSection } from "../components/BusSection";
 import CapabilitySection from "../components/CapabilitySection";
 import FilesystemSection from "../components/FilesystemSection";
 import PluginForm from "../components/PluginForm";
@@ -164,6 +165,16 @@ export default function Plugins() {
       );
     };
 
+  const handleBusGrant = async (pluginId: string, driver: string, granted: boolean) => {
+    const client = clientRef.current;
+    if (!client) throw new Error("RPC に接続されていません");
+    const updated = await client.setBusGrant(pluginId, driver, granted);
+    if (!mountedRef.current) return;
+    setPlugins((prev) =>
+      prev.map((p) => (p.id === pluginId ? { ...p, bus: updated.bus } : p)),
+    );
+  };
+
   return (
     <section>
       <h1>Plugins</h1>
@@ -197,6 +208,7 @@ export default function Plugins() {
               onConfigChange={handleFilesystemConfig(p.id)}
               onGrantChange={handleFilesystemGrant(p.id)}
             />
+            <BusSection pluginId={p.id} bus={p.bus} onSetGrant={handleBusGrant} />
           </article>
         ))}
     </section>

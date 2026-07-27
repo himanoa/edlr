@@ -21,6 +21,7 @@ function makePlugin(overrides: Partial<PluginInfo> = {}): PluginInfo {
     capabilities: { requests: [], granted: false, staleGrant: false },
     sidecars: [],
     filesystem: [],
+    bus: [],
     ...overrides,
   };
 }

@@ -15,6 +15,11 @@ let setSidecarGrantImpl: (params: unknown) => Promise<{ sidecars: PluginInfo["si
   Promise.resolve({ sidecars: [] });
 let setFilesystemGrantImpl: (params: unknown) => Promise<{ roots: PluginInfo["filesystem"] }> = () =>
   Promise.resolve({ roots: [] });
+let setBusGrantImpl: (
+  pluginId: string,
+  driver: string,
+  granted: boolean,
+) => Promise<{ bus: PluginInfo["bus"] }> = () => Promise.resolve({ bus: [] });
 let instances: Array<{ close: ReturnType<typeof vi.fn> }> = [];
 
 vi.mock("../rpc", () => {
@@ -32,6 +37,10 @@ vi.mock("../rpc", () => {
         if (method === "plugins/set-sidecar-grant") return setSidecarGrantImpl(params);
         if (method === "plugins/set-filesystem-grant") return setFilesystemGrantImpl(params);
         return Promise.reject(new Error(`unexpected method: ${method}`));
+      }
+      setBusGrant(pluginId: string, driver: string, granted: boolean) {
+        calls.push({ method: "plugins/set-bus-grant", params: { plugin: pluginId, driver, granted } });
+        return setBusGrantImpl(pluginId, driver, granted);
       }
     },
   };
@@ -53,6 +62,7 @@ function makePlugin(overrides: Partial<PluginInfo> = {}): PluginInfo {
     capabilities: { requests: [], granted: false, staleGrant: false },
     sidecars: [],
     filesystem: [],
+    bus: [],
     ...overrides,
   };
 }
@@ -86,6 +96,19 @@ function makeFilesystemRoot(
   };
 }
 
+function makeBusEntry(overrides: Partial<PluginInfo["bus"][number]> = {}): PluginInfo["bus"][number] {
+  return {
+    driver: "ed-state",
+    publish: [],
+    subscribe: ["current-system"],
+    reason: "現在システムを購読するため",
+    granted: false,
+    staleGrant: false,
+    resolved: true,
+    ...overrides,
+  };
+}
+
 beforeEach(() => {
   calls.length = 0;
   instances = [];
@@ -94,6 +117,7 @@ beforeEach(() => {
   setCapabilitiesImpl = () => Promise.resolve({ requests: [], granted: false, staleGrant: false });
   setSidecarGrantImpl = () => Promise.resolve({ sidecars: [] });
   setFilesystemGrantImpl = () => Promise.resolve({ roots: [] });
+  setBusGrantImpl = () => Promise.resolve({ bus: [] });
 });
 
 afterEach(() => {
@@ -266,5 +290,40 @@ test("toggling filesystem approval calls plugins/set-filesystem-grant with the r
     expect(call?.params).toEqual({ plugin: "voice-notify", name: "exports", granted: true });
   });
 
+  await waitFor(() => expect(toggle.checked).toBe(true));
+});
+
+test("shows the bus section for a plugin that declares bus connections", async () => {
+  const plugin = makePlugin({ bus: [makeBusEntry()] });
+  listImpl = () => Promise.resolve({ pluginsDir: "/plugins", plugins: [plugin] });
+
+  render(<Plugins />);
+
+  expect(await screen.findByText(/現在システムを購読するため/)).toBeInTheDocument();
+});
+
+test("toggling bus approval calls setBusGrant with the right params and replaces the bus array from its response", async () => {
+  const plugin = makePlugin({ bus: [makeBusEntry()] });
+  listImpl = () => Promise.resolve({ pluginsDir: "/plugins", plugins: [plugin] });
+  setBusGrantImpl = () =>
+    Promise.resolve({
+      bus: [makeBusEntry({ granted: true }), makeBusEntry({ driver: "translator-core" })],
+    });
+
+  render(<Plugins />);
+  const toggle = (await screen.findByRole("checkbox", {
+    name: /このバス接続を承認する/,
+  })) as HTMLInputElement;
+  await userEvent.click(toggle);
+
+  await waitFor(() => {
+    const call = calls.find((c) => c.method === "plugins/set-bus-grant");
+    expect(call?.params).toEqual({ plugin: "voice-notify", driver: "ed-state", granted: true });
+  });
+
+  // The response's full `bus` array must replace the plugin's displayed bus
+  // entries (a second, previously-absent driver appears), not just flip the
+  // toggled entry locally.
+  expect(await screen.findByText("translator-core")).toBeInTheDocument();
   await waitFor(() => expect(toggle.checked).toBe(true));
 });
