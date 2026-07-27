@@ -1501,12 +1501,50 @@ pub(crate) mod tests {
 
     /// `[[bus]]` を 1 件持つプラグインだけを載せた `Registry`。
     /// `DriverRegistry` には何も登録しないので、`bus("translator")` の
-    /// `resolved` は必ず `false` になる(このヘルパを使う唯一のテスト用)。
+    /// `resolved` は必ず `false` になる。
     pub(crate) fn test_registry_with_bus_request() -> Registry {
-        let registry = empty_registry();
-        let manifest = manifest_with_bus("translator");
+        let tmp = tempfile::tempdir().unwrap();
+        test_registry_with_bus_request_using(empty_driver_registry(tmp.path()))
+    }
+
+    /// `test_registry_with_bus_request` と同じ `translator` プラグイン
+    /// (`[[bus]] {driver="ed-state", publish=["ship-status"],
+    /// subscribe=["current-system"]}`)を、呼び出し元が指定した
+    /// `driver_registry` の上に載せた `Registry` を返す。
+    ///
+    /// `bus("translator")[0].resolved` は `Registry` 自身が保持する
+    /// `driver_registry`(コンストラクタで焼き込まれる、他から差し替え不可)
+    /// から計算されるので、resolved を true/false 両方でテストしたい呼び出し
+    /// 元はこの関数に望みの `DriverRegistry` を渡す(`crate::server` の
+    /// `plugins/list` テストがまさにこれ -- `ed-state` を持つ
+    /// `DriverRegistry` を渡せば `resolved: true`、持たないものを渡せば
+    /// `resolved: false` になる)。
+    pub(crate) fn test_registry_with_bus_request_using(driver_registry: DriverRegistry) -> Registry {
+        let host = Arc::new(PluginHost::new().expect("host should start"));
+        let tmp = tempfile::tempdir().unwrap();
+        let settings_store = Arc::new(SettingsStore::new(tmp.path().join("settings")));
+        let grants_store = Arc::new(GrantsStore::new(tmp.path().join("grants")));
+        let sidecar_config_store = Arc::new(SidecarConfigStore::new(tmp.path().join("settings")));
+        let filesystem_config_store = Arc::new(FilesystemConfigStore::new(
+            tmp.path().join("settings"),
+            Vec::new(),
+        ));
+        let process_driver = Arc::new(ProcessDriver::new(
+            Duration::from_millis(200),
+            Duration::from_millis(0),
+        ));
+        let registry = Registry::new(
+            host,
+            settings_store,
+            grants_store,
+            sidecar_config_store,
+            filesystem_config_store,
+            process_driver,
+            driver_registry,
+            tmp.path().join("plugins"),
+        );
         registry.push(PluginEntry {
-            manifest,
+            manifest: manifest_with_bus("translator"),
             state: PluginState::Running,
             settings_json: Arc::new(Mutex::new("{}".to_string())),
             capabilities_json: Arc::new(Mutex::new(crate::plugin::host::capabilities_json_string(
@@ -1571,39 +1609,7 @@ pub(crate) mod tests {
             filesystem_json: Arc::new(Mutex::new("[]".to_string())),
         });
 
-        let host = Arc::new(PluginHost::new().expect("host should start"));
-        let settings_store = Arc::new(SettingsStore::new(tmp.path().join("settings")));
-        let grants_store = Arc::new(GrantsStore::new(tmp.path().join("grants")));
-        let sidecar_config_store = Arc::new(SidecarConfigStore::new(tmp.path().join("settings")));
-        let filesystem_config_store = Arc::new(FilesystemConfigStore::new(
-            tmp.path().join("settings"),
-            Vec::new(),
-        ));
-        let process_driver = Arc::new(ProcessDriver::new(
-            Duration::from_millis(200),
-            Duration::from_millis(0),
-        ));
-        let registry = Registry::new(
-            host,
-            settings_store,
-            grants_store,
-            sidecar_config_store,
-            filesystem_config_store,
-            process_driver,
-            driver_registry,
-            tmp.path().join("plugins"),
-        );
-        registry.push(PluginEntry {
-            manifest: manifest_with_bus("translator"),
-            state: PluginState::Running,
-            settings_json: Arc::new(Mutex::new("{}".to_string())),
-            capabilities_json: Arc::new(Mutex::new(crate::plugin::host::capabilities_json_string(
-                &[],
-            ))),
-            sidecars_json: Arc::new(Mutex::new("[]".to_string())),
-            filesystem_json: Arc::new(Mutex::new("[]".to_string())),
-            bus_json: Arc::new(Mutex::new("[]".to_string())),
-        });
+        let registry = test_registry_with_bus_request_using(driver_registry);
 
         let info = registry.bus("translator").unwrap();
         assert_eq!(info.len(), 1);

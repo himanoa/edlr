@@ -468,6 +468,13 @@ pub(crate) mod tests {
     /// にする)ために要る。`bus` は呼び出し元と共有させたいので引数で受け取る
     /// (`crate::plugin::registry::tests` 側のテストが同じ `Bus` を使う場合に
     /// 備える。今のところ呼び出し元は毎回新しい `Bus::new()` を渡している)。
+    ///
+    /// http capability も 1 件宣言する(`crate::server` の
+    /// `drivers/set-capabilities` テストが「承認が実際に切り替わって永続化
+    /// されること」を確認できるようにするため -- capability を 1 つも宣言
+    /// しない manifest は `Manifest::capabilities_fingerprint` が `None` を
+    /// 返し、`GrantsStore::set` が常に `granted: false` を返してしまい、
+    /// テストが承認の可否ではなく応答の形しか確認できなくなる)。
     pub(crate) fn test_registry(bus: edlr_driver_channel::Bus) -> DriverRegistry {
         let registry = bare_registry(bus);
         let mut manifest = manifest_with_topic("ed-state");
@@ -476,6 +483,12 @@ pub(crate) mod tests {
             retain: false,
             description: String::new(),
         });
+        manifest.capabilities.push(
+            crate::plugin::manifest::CapabilityRequest::Http {
+                hosts: vec!["https://example.com".into()],
+                reason: "test".into(),
+            },
+        );
         registry.push(DriverEntry {
             manifest,
             state: DriverState::Running,
