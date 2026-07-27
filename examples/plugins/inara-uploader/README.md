@@ -4,10 +4,12 @@ Journal イベントを [INARA](https://inara.cz) の API v1 へアップロー�
 **Go (TinyGo) 製**で、`examples/plugins/hello-logger`(Rust)と同じ `world plugin` の
 インターフェースを実装している(ビルド時の対象は WASI を含む `world plugin-guest`。下記参照)。
 
-動作確認済み: 実際の `edlr` デーモンにロードされ、Journal から
+(旧実装で)動作確認済み: 実際の `edlr` デーモンにロードされ、Journal から
 `setCommanderCredits` / `setCommanderRankPilot` / `addCommanderTravelFSDJump` /
 `addCommanderTravelDock` / `setCommanderReputationMajorFaction` /
-`addCommanderCombatDeath` を組み立てて送るところまで。
+`addCommanderCombatDeath` を組み立てて送るところまで。今回のパッケージ再構成では
+`plugin.wasm` の再ビルドと実機確認を行っていない(作業環境に TinyGo と
+`wasm-tools` が無いため)。
 
 ## ビルド
 
@@ -21,9 +23,16 @@ cd examples/plugins/inara-uploader
 ./build.sh              # plugin.wasm を出力
 ```
 
-設定値の解釈は `settings` パッケージ(ホストの import に依存しない純粋な Go)に
-分けてあり、`go test ./settings/` で検証できる。`main` パッケージは
-`//go:wasmimport` を含むためネイティブではリンクできず、テストを書けない。
+判断を持つコードは `main` の外にある。`main` はホスト境界のアダプタ(設定を読む・
+`driver-http` を呼ぶ・結果をログへ整形する)だけを担い、`uploader`(キューと送信
+判断)・`mapping`(Journal → INARA 変換)・`inara`(リクエスト組み立てと応答解釈)・
+`settings`(設定値の解釈)はいずれも `go test ./...` で検証できる。`main` パッケージは
+`//go:wasmimport` を含むためネイティブでリンクできず、テストを書けない。
+
+```
+go test ./...   # ロジック層のテスト
+go vet ./...    # main を含む全パッケージの型チェック
+```
 
 ビルド対象の world は `plugin` ではなく **`plugin-guest`**(= `plugin` に WASI の
 import 一式を足したもの)。Go/TinyGo の標準ライブラリはプラグインが何も呼ばなくても
@@ -65,20 +74,35 @@ wit-bindgen-go generate --world plugin --out gen ../../../core/wit
 | `apiKey` | string | `""` | INARA の API キー。**平文で保存される**(下記 2 番) |
 | `commanderName` | string | `""` | 空なら Journal の `LoadGame` / `Commander` から学習 |
 | `isBeingDeveloped` | boolean | `true` | INARA 側で「開発中クライアント」として扱わせる |
-| `batchSize` | number | `10` | この件数溜まったら送る |
-| `minIntervalSeconds` | number | `60` | 送信の最短間隔。INARA は高頻度の送信を控えるよう求めている |
+| `batchSize` | number | `10` | この件数溜まったら送る(live モードのみ。replay 中は無視される) |
+| `minIntervalSeconds` | number | `60` | 送信の最短間隔。INARA は高頻度の送信を控えるよう求めている(live モードのみ。replay 中は無視される) |
 | `uploadHistorical` | boolean | `true` | デーモン起動より前に既に Journal へ書かれていたイベント(`event.replay = true`)も送る。edlr は Journal の読み取り位置を永続化しており、再起動しても続きから配信するため、既定で送っても重複送信にはならない。**`false` にすると、デーモンが止まっていた間に書かれたイベントは INARA へ送られない**(その分は欠測になる) |
 | `dryRun` | boolean | `false` | 送信せず、組み立てた JSON をログに出す |
 
-送信は「イベントを受け取ったついで」に行い、次のいずれかで実際に飛ぶ:
+送信は「イベントを受け取ったついで」に行う。デーモンが動き出す前に書かれていた
+イベント(`event.replay`)と、動き出した後のイベントでは経路が分かれる。
+
+**replay(バックログを流し切る)**
+
+- キューが 100 件たまるごとに送る
+- `minIntervalSeconds` は適用しない(バックログを流し切ることを優先する)
+- `Shutdown` を受け取っても送信は促さない。過去のゲーム終了ログであって
+  「もうイベントは来ない」ことを意味しないため
+- live のイベントを初めて受け取った時点で、溜まっている端数を送り切る
+
+**live(通常の運用)**
 
 - Journal の `Shutdown` を受け取った(ゲーム終了。以後イベントは来ない)
-- キューが 200 件を超えた(メモリ保護)
-- キューが `batchSize` 以上あり、かつ前回送信から `minIntervalSeconds` 経過
+- キューが `batchSize` 以上あり、かつ前回の送信試行から `minIntervalSeconds` 経過
+
+キューは**直近 200 件だけを保持する**。API キー未設定や capability 未承認で送れない
+状態が続くと、古いものから順に捨てられる(捨てた件数はログに出る)。INARA は
+「現在の状態」を反映するサービスなので、古い履歴を落として最新を残す。
 
 送信に失敗した場合(ネットワーク不通・未承認など)はキューを保持して次の
-イベントで再試行する。INARA が個々のイベントを拒否した場合はログに出すだけで
-再送はしない(同じ内容を送り直しても通らないため)。
+イベントで再試行する。INARA がバッチ全体を拒否した場合(API キー不正など)は
+恒久的な失敗なのでキューを捨てる。個々のイベントが拒否された場合はログに出す
+だけで再送はしない(同じ内容を送り直しても通らないため)。
 
 ## 対応イベント
 
@@ -98,8 +122,9 @@ wit-bindgen-go generate --world plugin --out gen ../../../core/wit
 | `Died` | `addCommanderCombatDeath` | 星系名は直近の移動イベントから補う(`Died` 自体には入っていない) |
 | `Shutdown` | (送信トリガのみ) | 溜まっているぶんを送り切る |
 
-`manifest.toml` の `events` に列挙したイベントしかプラグインへ届かない。
-イベントを増やすときは `mapping.go` と `manifest.toml` の両方を直すこと。
+`manifest.toml` の `events` に列挙したイベントしかプラグインへ届かない。イベントを
+増やすときは `mapping/` のレジストリと `manifest.toml` の両方を直す。片方だけ直すと
+`mapping/manifest_test.go` が落ちる。
 
 ## 不足している実装
 
@@ -113,6 +138,8 @@ wit-bindgen-go generate --world plugin --out gen ../../../core/wit
 - 最後の Journal イベントの後に溜まったぶんは、次のイベントが来るまで送れない
 - ゲームが `Shutdown` を書かずに落ちた場合、その未送信分は失われる
 - デーモンだけを止めた場合も同じ
+- キューはメモリ上にしか無く、デーモンを止めると未送信分は失われる(Journal の
+  読み取り位置は永続化されているので、再起動後に replay で取り直される)
 
 `Shutdown` イベントで最後のフラッシュを行うことで通常のゲーム終了はカバーして
 いるが、これは Journal 頼みの回避策にすぎない。`world plugin` に
