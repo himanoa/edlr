@@ -84,3 +84,29 @@ func TestClearEmptiesTheQueue(t *testing.T) {
 		t.Errorf("expected an empty queue, got %v", q.peek())
 	}
 }
+
+// peek で受け取ったスライスを保持したまま push で上限超過を起こしても、
+// 保持していたスライスの中身が変わらないことを検証する。
+func TestPeekedSliceSurvivesALaterPush(t *testing.T) {
+	q := newQueue(2)
+	q.push(events("a", "b"))
+
+	// peek で得たスライスを保持
+	peeked := q.peek()
+	if got := names(peeked); len(got) != 2 || got[0] != "a" || got[1] != "b" {
+		t.Fatalf("initial peek should be (a b), got %v", got)
+	}
+
+	// 上限を超える push を実行
+	q.push(events("c", "d"))
+
+	// 保持していた peeked スライスの内容が変わっていないことを確認
+	if got := names(peeked); len(got) != 2 || got[0] != "a" || got[1] != "b" {
+		t.Errorf("peeked slice should remain (a b), got %v", got)
+	}
+
+	// 現在のキューの内容は新しいものに更新されている
+	if got := names(q.peek()); len(got) != 2 || got[0] != "c" || got[1] != "d" {
+		t.Errorf("queue should now contain (c d), got %v", got)
+	}
+}

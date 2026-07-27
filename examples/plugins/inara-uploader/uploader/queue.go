@@ -19,7 +19,11 @@ func newQueue(max int) *queue {
 func (q *queue) push(events []inara.Event) {
 	q.items = append(q.items, events...)
 	if overflow := len(q.items) - q.max; overflow > 0 {
-		q.items = append(q.items[:0], q.items[overflow:]...)
+		// peek が返したスライスを書き換えないよう、その場で詰めずに
+		// 新しい配列へ写す。確保が起きるのは上限を超えたときだけ。
+		kept := make([]inara.Event, q.max)
+		copy(kept, q.items[overflow:])
+		q.items = kept
 		q.dropped += overflow
 	}
 }
