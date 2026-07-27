@@ -7,9 +7,12 @@ Journal イベントを [INARA](https://inara.cz) の API v1 へアップロー�
 (旧実装で)動作確認済み: 実際の `edlr` デーモンにロードされ、Journal から
 `setCommanderCredits` / `setCommanderRankPilot` / `addCommanderTravelFSDJump` /
 `addCommanderTravelDock` / `setCommanderReputationMajorFaction` /
-`addCommanderCombatDeath` を組み立てて送るところまで。今回のパッケージ再構成では
-`plugin.wasm` の再ビルドと実機確認を行っていない(作業環境に TinyGo と
-`wasm-tools` が無いため)。
+`addCommanderCombatDeath` を組み立てて送るところまで。
+
+パッケージ再構成後(現在の実装)は、TinyGo 0.41.1 でのビルドと
+`wasm-tools validate` によるコンポーネント検証、および **TinyGo でコンパイルした
+テストを wasm 上で実行**(`tinygo test -target=wasip1 ./...`、4 パッケージとも通過)
+まで確認済み。**デーモンへロードして実際に INARA へ送るところは未確認。**
 
 ## ビルド
 
@@ -33,6 +36,18 @@ cd examples/plugins/inara-uploader
 go test ./...   # ロジック層のテスト
 go vet ./...    # main を含む全パッケージの型チェック
 ```
+
+ネイティブの `go test` に加えて、**TinyGo でコンパイルして wasm 上でも走らせておくと
+よい**(要 wasm ランタイム、下は wasmtime を PATH に置いた場合):
+
+```
+tinygo test -target=wasip1 ./inara/ ./mapping/ ./settings/ ./uploader/
+```
+
+TinyGo の `reflect` は標準ライブラリと差があり、`encoding/json` の挙動が変わりうる。
+特に `mapping` は無名埋め込みによるフィールド昇格(`EngineerProgress` の単体形式)、
+配列ポインタ(`*[3]float64`)、named map type を使っているので、ネイティブで緑でも
+wasm 上で壊れることがありうる。
 
 ビルド対象の world は `plugin` ではなく **`plugin-guest`**(= `plugin` に WASI の
 import 一式を足したもの)。Go/TinyGo の標準ライブラリはプラグインが何も呼ばなくても
