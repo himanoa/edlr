@@ -380,9 +380,32 @@ impl DriverRegistry {
         Ok(state)
     }
 
-    /// `id` のドライバを `Disabled { reason }` にし、そのドライバが持つ全
-    /// サイドカーを停止し、バスからも切り離す(`bus.disable_driver`)。
-    /// 存在しなければ何もしない。
+    /// `manifest` が指すドライバを `Disabled { reason }` にし、そのドライバ
+    /// が持つ全サイドカーを停止し、バスからも切り離す(`bus.disable_driver`)。
+    ///
+    /// **`id` だけでなく `manifest` 全体を引数に取る**(`entries` から
+    /// ルックアップしない)。理由は下の「`entries` に載っているかどうかに
+    /// 関わらず」の節を参照。呼び出し元(`run_driver_thread`)はどのみち
+    /// `manifest` を手元に持っているので、渡すコストは無い。
+    ///
+    /// **`bus.disable_driver` とサイドカー停止は、`entries` に対応する
+    /// `DriverEntry` が載っているかどうかに関わらず必ず実行する。** 一方
+    /// `Disabled` への状態フラグ更新は `entries` に見つかった場合に限る
+    /// (見つからなければ更新すべき状態そのものが無いので当然)。この 2 つを
+    /// 分けているのは意図的なレース対策(最終レビューで見つかった重要な
+    /// 取りこぼし): `load_and_run_driver` は `bus.register_driver` をスレッド
+    /// 起動より前に行うが、`registry.push` はスレッドが `ready_tx.send
+    /// (DriverState::Running)` で `Running` を報告し、メインスレッドの
+    /// `ready_rx.recv()` が戻ってから初めて行う。ところがドライバ専用
+    /// スレッドは `Running` を報告した直後から `messages_rx` を読み始め、
+    /// バスに既に溜まっていたメッセージ(あるいは register 直後に他プラグ
+    /// インが即座に `publish` したメッセージ)に対して `call_on_message` を
+    /// 呼びうる -- それが trap すれば、メインスレッドがまだ `push` して
+    /// いない窓の間にこの関数が呼ばれる。この窓で `entries` を見て何もしな
+    /// いと、実際にはまだ誰もレジストリに載せていないだけで(場合によっては
+    /// ドライバ自身がその `init`/最初のメッセージ処理中に自分で起動した
+    /// サイドカーも含めて)生きているバスのスロット・サイドカープロセスが
+    /// そのまま残り続けてしまう(fail-open)。
     ///
     /// **`bus.disable_driver` を呼ぶのがプラグインの `set_disabled` との
     /// 一番の違い**: ドライバが死ねば、それに接続している全プラグインの
@@ -391,35 +414,23 @@ impl DriverRegistry {
     /// 更新が来ていないだけ」と「もう誰も更新しない」を区別できず、古い
     /// 値を握ったまま動き続けてしまう(fail-open。
     /// `edlr_driver_channel::Bus::disable_driver` のドキュメント参照)。
-    pub fn set_disabled(&self, id: &str, reason: String) {
-        let sidecar_names: Option<Vec<String>> = {
-            let mut guard = self
-                .entries
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            guard
-                .iter_mut()
-                .find(|entry| entry.manifest.id == id)
-                .map(|entry| {
-                    entry.state = DriverState::Disabled { reason };
-                    entry
-                        .manifest
-                        .sidecars
-                        .iter()
-                        .map(|s| s.name.clone())
-                        .collect()
-                })
-        };
+    pub fn set_disabled(&self, manifest: &DriverManifest, reason: String) {
+        self.bus.disable_driver(&manifest.id);
 
-        let Some(names) = sidecar_names else {
-            return;
-        };
-
-        self.bus.disable_driver(id);
-
-        for name in names {
-            let key = Self::sidecar_key(id, &name);
+        for sidecar in &manifest.sidecars {
+            let key = Self::sidecar_key(&manifest.id, &sidecar.name);
             self.process_driver.stop(&key);
+        }
+
+        let mut guard = self
+            .entries
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(entry) = guard
+            .iter_mut()
+            .find(|entry| entry.manifest.id == manifest.id)
+        {
+            entry.state = DriverState::Disabled { reason };
         }
     }
 }
@@ -429,24 +440,66 @@ mod tests {
     use super::*;
     use crate::driver::host::DriverHost;
 
-    #[test]
-    fn disabling_a_driver_marks_it_and_drops_its_retained_values() {
-        let bus = edlr_driver_channel::Bus::new();
-        let (tx, _rx) = std::sync::mpsc::sync_channel(4);
-        bus.register_driver(
-            "ed-state",
-            vec![edlr_driver_channel::TopicSpec {
+    fn manifest_with_topic(id: &str) -> DriverManifest {
+        DriverManifest {
+            id: id.into(),
+            name: id.into(),
+            version: "0.1.0".into(),
+            description: String::new(),
+            entry: "driver.wasm".into(),
+            topics: vec![edlr_driver_channel::TopicSpec {
                 name: "current-system".into(),
                 retain: true,
                 description: String::new(),
             }],
-            tx,
-        );
+            settings: Vec::new(),
+            capabilities: Vec::new(),
+            sidecars: Vec::new(),
+            filesystem: Vec::new(),
+        }
+    }
+
+    fn manifest_with_sidecar(id: &str, port: u16) -> DriverManifest {
+        DriverManifest {
+            id: id.into(),
+            name: id.into(),
+            version: "0.1.0".into(),
+            description: String::new(),
+            entry: "driver.wasm".into(),
+            topics: Vec::new(),
+            settings: Vec::new(),
+            capabilities: Vec::new(),
+            sidecars: vec![crate::plugin::manifest::SidecarRequest {
+                name: "tts".into(),
+                reason: "reason".into(),
+                args: vec!["-c".into(), "sleep 30".into()],
+                port,
+                scalable: false,
+            }],
+            filesystem: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn disabling_a_driver_marks_it_and_drops_its_retained_values() {
+        let manifest = manifest_with_topic("ed-state");
+        let bus = edlr_driver_channel::Bus::new();
+        let (tx, _rx) = std::sync::mpsc::sync_channel(4);
+        bus.register_driver(&manifest.id, manifest.topics.clone(), tx);
         bus.emit("ed-state", "current-system", b"Sol".to_vec())
             .unwrap();
 
-        let registry = test_registry(bus.clone());
-        registry.set_disabled("ed-state", "on-message call failed".to_string());
+        let registry = bare_registry(bus.clone());
+        registry.push(DriverEntry {
+            manifest: manifest.clone(),
+            state: DriverState::Running,
+            settings_json: Arc::new(Mutex::new("{}".to_string())),
+            capabilities_json: Arc::new(Mutex::new(r#"{"hosts":[]}"#.to_string())),
+            sidecars_json: Arc::new(Mutex::new("[]".to_string())),
+            filesystem_json: Arc::new(Mutex::new("[]".to_string())),
+        });
+
+        registry.set_disabled(&manifest, "on-message call failed".to_string());
 
         assert!(matches!(
             registry.list()[0].state,
@@ -455,13 +508,101 @@ mod tests {
         assert_eq!(bus.retained_for("ed-state", "current-system"), None);
     }
 
-    fn test_registry(bus: edlr_driver_channel::Bus) -> DriverRegistry {
-        // `ed-state` を 1 件だけ載せた DriverRegistry を、wasm をロードせずに
-        // 直接組み立てる(`DriverRegistry::push` に `DriverEntry` を渡す)。
-        // `plugin::registry` のテストが `Registry::push` で同じことをしている
-        // のと同じ流儀。
+    /// Regression test for a review finding: the driver's dedicated thread
+    /// starts draining `messages_rx` (and can therefore call `call_on_message`
+    /// and trap, invoking `set_disabled`) the instant it reports `Running`,
+    /// which happens *before* `load_and_run_driver`'s `registry.push` runs on
+    /// the main thread. `set_disabled` used to look the id up in `entries`
+    /// and no-op entirely if not found yet, silently leaving the bus slot
+    /// `available: true` with stale retained values for a driver that is
+    /// already dead in this race window. `set_disabled` must disconnect the
+    /// bus (and stop sidecars) regardless of whether the entry has landed in
+    /// the registry -- only the `Disabled` state-flag update is conditional
+    /// on that (there's genuinely nothing to flip if the entry isn't there).
+    ///
+    /// This simulates the race directly: the driver is registered on the
+    /// `Bus` (as `load_and_run_driver` does before spawning the thread) but
+    /// no `DriverEntry` is ever pushed (as if `set_disabled` fired before the
+    /// main thread's `registry.push`).
+    #[test]
+    fn set_disabled_disconnects_the_bus_slot_even_before_the_entry_is_pushed() {
+        let manifest = manifest_with_topic("ed-state");
+        let bus = edlr_driver_channel::Bus::new();
+        let (tx, _rx) = std::sync::mpsc::sync_channel(4);
+        bus.register_driver(&manifest.id, manifest.topics.clone(), tx);
+        bus.emit("ed-state", "current-system", b"Sol".to_vec())
+            .unwrap();
+
+        let registry = bare_registry(bus.clone());
+        // Deliberately no `registry.push(..)` here: the entry has not
+        // landed yet, simulating the race window.
+        assert!(registry.list().is_empty());
+
+        registry.set_disabled(&manifest, "on-message call failed".to_string());
+
+        assert_eq!(
+            bus.retained_for("ed-state", "current-system"),
+            None,
+            "the bus slot must be disconnected even though no DriverEntry was ever pushed"
+        );
+    }
+
+    /// Regression test mirroring
+    /// `crate::plugin::registry::tests::set_disabled_stops_all_sidecars_of_that_plugin`:
+    /// `set_disabled`'s sidecar-stop half was previously untested (the other
+    /// `set_disabled` test's fixture declares zero sidecars), so a future
+    /// refactor that dropped it would go uncaught.
+    #[test]
+    fn set_disabled_stops_all_sidecars_of_that_driver() {
+        let manifest = manifest_with_sidecar("sc-driver", 50940);
+        let bus = edlr_driver_channel::Bus::new();
+        let (tx, _rx) = std::sync::mpsc::sync_channel(4);
+        bus.register_driver(&manifest.id, manifest.topics.clone(), tx);
+
+        let registry = bare_registry(bus);
+        registry.push(DriverEntry {
+            manifest: manifest.clone(),
+            state: DriverState::Running,
+            settings_json: Arc::new(Mutex::new("{}".to_string())),
+            capabilities_json: Arc::new(Mutex::new(r#"{"hosts":[]}"#.to_string())),
+            sidecars_json: Arc::new(Mutex::new("[]".to_string())),
+            filesystem_json: Arc::new(Mutex::new("[]".to_string())),
+        });
+
+        let key = DriverRegistry::sidecar_key("sc-driver", "tts");
+        let spec = ProcessSpec {
+            command: PathBuf::from("/bin/sh"),
+            args: vec!["-c".into(), "sleep 30".into()],
+            ports: vec![50940],
+        };
+        registry
+            .process_driver
+            .ensure_started(&key, &spec)
+            .expect("start sidecar directly via the driver, bypassing wasm entirely");
+        assert!(
+            registry.process_driver.status(&key, &spec)[0].running,
+            "sidecar should be running before disabling the driver"
+        );
+
+        registry.set_disabled(&manifest, "on-message call failed".to_string());
+
+        assert!(
+            !registry.process_driver.status(&key, &spec)[0].running,
+            "set_disabled must stop the disabled driver's sidecars"
+        );
+        assert!(matches!(
+            registry.list()[0].state,
+            DriverState::Disabled { .. }
+        ));
+    }
+
+    /// Builds an empty `DriverRegistry` (no `DriverEntry` pushed) wired to
+    /// `bus`, without loading any wasm (`DriverRegistry::push` takes a
+    /// hand-built `DriverEntry` directly -- same convention
+    /// `plugin::registry`'s tests use with `Registry::push`).
+    fn bare_registry(bus: edlr_driver_channel::Bus) -> DriverRegistry {
         let tmp = tempfile::tempdir().unwrap();
-        let registry = DriverRegistry::new(
+        DriverRegistry::new(
             Arc::new(DriverHost::new().expect("wasmtime engine builds")),
             Arc::new(SettingsStore::new(tmp.path().join("settings"))),
             Arc::new(GrantsStore::new_for_drivers(tmp.path().join("grants"))),
@@ -472,30 +613,6 @@ mod tests {
             )),
             bus,
             tmp.path().join("drivers"),
-        );
-        registry.push(DriverEntry {
-            manifest: DriverManifest {
-                id: "ed-state".into(),
-                name: "ED State".into(),
-                version: "0.1.0".into(),
-                description: String::new(),
-                entry: "driver.wasm".into(),
-                topics: vec![edlr_driver_channel::TopicSpec {
-                    name: "current-system".into(),
-                    retain: true,
-                    description: String::new(),
-                }],
-                settings: Vec::new(),
-                capabilities: Vec::new(),
-                sidecars: Vec::new(),
-                filesystem: Vec::new(),
-            },
-            state: DriverState::Running,
-            settings_json: Arc::new(Mutex::new("{}".to_string())),
-            capabilities_json: Arc::new(Mutex::new(r#"{"hosts":[]}"#.to_string())),
-            sidecars_json: Arc::new(Mutex::new("[]".to_string())),
-            filesystem_json: Arc::new(Mutex::new("[]".to_string())),
-        });
-        registry
+        )
     }
 }

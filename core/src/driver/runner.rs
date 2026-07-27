@@ -312,7 +312,7 @@ fn run_driver_thread(
                 driver_id = %manifest.id,
                 "on-message call failed, disabling driver: {e}"
             );
-            registry.set_disabled(&manifest.id, format!("on-message call failed: {e}"));
+            registry.set_disabled(&manifest, format!("on-message call failed: {e}"));
             break;
         }
     }
@@ -334,8 +334,41 @@ mod tests {
         std::fs::create_dir(dir.path().join("broken")).unwrap();
         std::fs::write(dir.path().join("broken/driver.toml"), "not toml {{{").unwrap();
 
+        // A second, *manifest-valid* driver dir alongside the broken one.
+        // Its `entry` file is not real wasm, so manifest validation passes
+        // (the file merely needs to exist) but `DriverHost::load` will fail,
+        // landing it `Disabled`. That's still enough to prove the scan
+        // continued past the broken directory -- without this fixture, the
+        // test only proved "the broken driver is skipped", never "the rest
+        // still load" (it would have passed even if one bad `driver.toml`
+        // aborted the whole scan, since the fixture had nothing else to
+        // load).
+        let valid_dir = dir.path().join("ed-state");
+        std::fs::create_dir(&valid_dir).unwrap();
+        std::fs::write(valid_dir.join("driver.wasm"), b"not real wasm").unwrap();
+        std::fs::write(
+            valid_dir.join("driver.toml"),
+            "id = \"ed-state\"\nname = \"ED State\"\nversion = \"0.1.0\"\nentry = \"driver.wasm\"\n",
+        )
+        .unwrap();
+
         let registry = start_drivers_for_test(dir.path());
-        assert!(registry.list().is_empty());
+        let infos = registry.list();
+        assert_eq!(
+            infos.len(),
+            1,
+            "the broken driver dir must be skipped, but the valid one must still load"
+        );
+        assert_eq!(infos[0].manifest.id, "ed-state");
+        assert!(
+            matches!(
+                &infos[0].state,
+                DriverState::Disabled { reason } if reason.contains("failed to load driver component")
+            ),
+            "the entry file isn't real wasm, so the driver must land Disabled \
+             with a load-failure reason, not Running; got {:?}",
+            infos[0].state
+        );
     }
 
     fn start_drivers_for_test(dir: &std::path::Path) -> DriverRegistry {
