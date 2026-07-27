@@ -291,6 +291,8 @@ fn run_plugin_thread(
         capabilities_json,
         sidecars_json,
         filesystem_json,
+        Arc::new(Mutex::new("[]".to_string())),
+        edlr_driver_channel::Bus::new(),
         host.http_driver(),
         host.process_driver(),
         host.fs_driver(),

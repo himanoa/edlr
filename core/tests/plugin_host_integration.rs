@@ -72,6 +72,8 @@ fn ctx_with_capabilities(
             capabilities.clone(),
             Arc::new(Mutex::new("[]".to_string())),
             Arc::new(Mutex::new("[]".to_string())),
+            Arc::new(Mutex::new("[]".to_string())),
+            edlr_driver_channel::Bus::new(),
             test_http_driver(),
             Arc::new(edlr_driver_process::ProcessDriver::new(
                 std::time::Duration::from_secs(3),

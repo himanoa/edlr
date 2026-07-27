@@ -100,6 +100,8 @@ fn ctx_with_driver(driver: Arc<HttpDriver>, hosts: &[&str]) -> HostCtx {
         Arc::new(Mutex::new(capabilities_json)),
         Arc::new(Mutex::new("[]".to_string())),
         Arc::new(Mutex::new("[]".to_string())),
+        Arc::new(Mutex::new("[]".to_string())),
+        edlr_driver_channel::Bus::new(),
         driver,
         Arc::new(edlr_driver_process::ProcessDriver::new(
             Duration::from_secs(3),

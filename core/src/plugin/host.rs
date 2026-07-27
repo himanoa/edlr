@@ -19,6 +19,8 @@ mod bindings {
     });
 }
 
+use bindings::edlr::plugin::bus::Host as BusHost;
+use bindings::edlr::plugin::bus_types::BusError as WitBusError;
 use bindings::edlr::plugin::driver_fs::{
     DriverError as WitFsError, Entry as WitFsEntry, Host as DriverFsHost,
 };
@@ -177,6 +179,20 @@ pub struct HostCtx {
     /// `fs_runtime::filesystem_json_string` を参照。`sidecars_json` と同じく
     /// `Registry` が承認・設定変更のたびに上書きする。
     pub filesystem_json: Arc<Mutex<String>>,
+    /// バスの承認状態と宣言済みトピックの共有バッファ。形は
+    /// `bus_runtime::bus_json_string` を参照。`filesystem_json` と同じく
+    /// `Registry` が承認・設定変更のたびに上書きする。
+    ///
+    /// `bus.publish` / `bus.get` の許否は **このバッファだけ** から判定する
+    /// -- プラグインは自分の ID も承認状態も引数として渡さないため、他
+    /// プラグインの接続を騙ることも、宣言していないトピックへ触ることも
+    /// できない(`capabilities_json` のドキュメントコメントと同じ理屈)。
+    pub bus_json: Arc<Mutex<String>>,
+    /// プラグイン間バスの実体。全プラグインインスタンスで共有される
+    /// (`http_driver`/`process_driver`/`fs_driver` と同様)。誰が誰に
+    /// 送れるかは `bus` 自身は知らず、`check_bus` を通った呼び出しだけが
+    /// ここに届く。
+    bus: edlr_driver_channel::Bus,
     /// The HTTP client used by `driver-http.send` once a call has passed
     /// the permission check above. Shared (via `Arc`) across every plugin
     /// instance the owning `PluginHost` loads -- see `PluginHost::new`,
@@ -214,6 +230,8 @@ impl HostCtx {
         capabilities_json: Arc<Mutex<String>>,
         sidecars_json: Arc<Mutex<String>>,
         filesystem_json: Arc<Mutex<String>>,
+        bus_json: Arc<Mutex<String>>,
+        bus: edlr_driver_channel::Bus,
         http_driver: Arc<edlr_driver_http::HttpDriver>,
         process_driver: Arc<edlr_driver_process::ProcessDriver>,
         fs_driver: Arc<edlr_driver_fs::FsDriver>,
@@ -224,6 +242,8 @@ impl HostCtx {
             capabilities_json,
             sidecars_json,
             filesystem_json,
+            bus_json,
+            bus,
             http_driver,
             process_driver,
             fs_driver,
@@ -360,6 +380,92 @@ impl DriverHttpHost for HostCtx {
                 }
                 edlr_driver_http::HttpError::Transport(msg) => WitDriverError::Transport(msg),
             })
+    }
+}
+
+/// `bus-error` を関数を持たない型だけの interface(`bus-types`)に切り出した
+/// 都合で、`bindgen!` は関数のない `bus_types::Host` トレイトも生成する。
+/// 中身は空(関数が無い)ので、空の impl でよい。
+impl bindings::edlr::plugin::bus_types::Host for HostCtx {}
+
+impl BusHost for HostCtx {
+    /// `publish` は `check_bus` で「宣言済みの `publish` トピックか」を
+    /// 確認してから `self.bus` へ渡す。判定材料は `bus_json` だけで、
+    /// ゲストが渡すのはドライバ名・トピック名・ペイロードだけ
+    /// (`bus_json` フィールドのドキュメントコメント参照)。
+    fn publish(
+        &mut self,
+        driver: String,
+        topic: String,
+        payload: Vec<u8>,
+    ) -> Result<(), WitBusError> {
+        self.check_bus(&driver, &topic, BusDirection::Publish)?;
+        self.bus
+            .publish(&self.plugin_id, &driver, &topic, payload)
+            .map_err(bus_error_to_wit)
+    }
+
+    /// `get` は `check_bus` で「宣言済みの `subscribe` トピックか」を確認
+    /// してから `self.bus` へ渡す。`publish` にしか宣言していないトピック
+    /// は読めない(逆も同様)。
+    fn get(&mut self, driver: String, topic: String) -> Result<Option<Vec<u8>>, WitBusError> {
+        self.check_bus(&driver, &topic, BusDirection::Subscribe)?;
+        self.bus.get(&driver, &topic).map_err(bus_error_to_wit)
+    }
+}
+
+enum BusDirection {
+    Publish,
+    Subscribe,
+}
+
+impl HostCtx {
+    /// 承認と宣言済みトピックの照合。プラグインは自分の ID も承認状態も
+    /// 引数で渡さない -- `bus_json` は `Registry` だけが書き込む共有バッファで、
+    /// 未承認のエントリはトピック一覧を持たないため、他プラグインの接続を
+    /// 騙ることも、宣言していないトピックへ触ることもできない。
+    fn check_bus(
+        &self,
+        driver: &str,
+        topic: &str,
+        direction: BusDirection,
+    ) -> Result<(), WitBusError> {
+        let raw = self
+            .bus_json
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        let entries = crate::plugin::bus_runtime::parse_bus(&raw);
+        let entry = entries
+            .get(driver)
+            .filter(|e| e.granted)
+            .ok_or_else(|| {
+                WitBusError::PermissionDenied(format!("bus access to {driver} is not granted"))
+            })?;
+        let topics = match direction {
+            BusDirection::Publish => &entry.publish,
+            BusDirection::Subscribe => &entry.subscribe,
+        };
+        if !topics.iter().any(|t| t == topic) {
+            return Err(WitBusError::PermissionDenied(format!(
+                "{driver}/{topic} is not in this plugin's granted bus topics"
+            )));
+        }
+        Ok(())
+    }
+}
+
+/// `edlr_driver_channel::BusError` を WIT の `bus-error` variant へ 1:1 で
+/// 写像する。`permission-denied` はここでは作らない -- それは `check_bus`
+/// (core 側の承認チェック)だけが返す。
+fn bus_error_to_wit(error: edlr_driver_channel::BusError) -> WitBusError {
+    use edlr_driver_channel::BusError;
+    match error {
+        BusError::UnknownDriver(m) => WitBusError::UnknownDriver(m),
+        BusError::UnknownTopic(m) => WitBusError::UnknownTopic(m),
+        BusError::DriverUnavailable(m) => WitBusError::DriverUnavailable(m),
+        BusError::QueueFull(m) => WitBusError::QueueFull(m),
+        BusError::TooLarge(m) => WitBusError::TooLarge(m),
     }
 }
 
@@ -781,6 +887,19 @@ impl PluginInstance {
             .call_on_event(&mut self.store, &event)
             .map_err(|e| anyhow::anyhow!("plugin on-event() call failed or timed out: {e}"))
     }
+
+    pub fn call_on_message(
+        &mut self,
+        driver: &str,
+        topic: &str,
+        payload: &[u8],
+    ) -> anyhow::Result<()> {
+        self.store
+            .set_epoch_deadline(deadline_ticks(Self::CALL_DEADLINE));
+        self.bindings
+            .call_on_message(&mut self.store, driver, topic, payload)
+            .map_err(|e| anyhow::anyhow!("plugin on-message() call failed or timed out: {e}"))
+    }
 }
 
 #[cfg(test)]
@@ -814,6 +933,8 @@ mod tests {
             Arc::new(Mutex::new(capabilities_json.to_string())),
             Arc::new(Mutex::new("[]".to_string())),
             Arc::new(Mutex::new("[]".to_string())),
+            Arc::new(Mutex::new("[]".to_string())),
+            edlr_driver_channel::Bus::new(),
             test_http_driver(),
             Arc::new(edlr_driver_process::ProcessDriver::new(
                 SIDECAR_SHUTDOWN_GRACE,
@@ -896,6 +1017,8 @@ mod tests {
             Arc::new(Mutex::new(capabilities_json_string(&[]))),
             Arc::new(Mutex::new(sidecars_json.to_string())),
             Arc::new(Mutex::new("[]".to_string())),
+            Arc::new(Mutex::new("[]".to_string())),
+            edlr_driver_channel::Bus::new(),
             test_http_driver(),
             Arc::new(edlr_driver_process::ProcessDriver::new(
                 Duration::from_millis(200),
@@ -912,6 +1035,8 @@ mod tests {
             Arc::new(Mutex::new(capabilities_json_string(&[]))),
             Arc::new(Mutex::new("[]".to_string())),
             Arc::new(Mutex::new(filesystem_json.to_string())),
+            Arc::new(Mutex::new("[]".to_string())),
+            edlr_driver_channel::Bus::new(),
             test_http_driver(),
             Arc::new(edlr_driver_process::ProcessDriver::new(
                 Duration::from_millis(200),
@@ -1118,6 +1243,8 @@ mod tests {
             Arc::new(Mutex::new(capabilities_json_string(&[]))),
             Arc::new(Mutex::new(sidecars_json)),
             Arc::new(Mutex::new("[]".to_string())),
+            Arc::new(Mutex::new("[]".to_string())),
+            edlr_driver_channel::Bus::new(),
             test_http_driver(),
             // A grace period long enough that waiting it out synchronously
             // would trivially blow past both the assertion below and
@@ -1140,5 +1267,136 @@ mod tests {
             "guest-facing stop() must not wait out the sidecar's shutdown \
              grace period; took {elapsed:?}"
         );
+    }
+
+    fn entry_granted() -> crate::plugin::bus_runtime::BusRuntimeEntry {
+        crate::plugin::bus_runtime::BusRuntimeEntry {
+            driver: "ed-state".into(),
+            granted: true,
+            publish: vec!["ship-status".into()],
+            subscribe: vec!["current-system".into()],
+        }
+    }
+
+    fn entry_ungranted() -> crate::plugin::bus_runtime::BusRuntimeEntry {
+        let mut e = entry_granted();
+        e.granted = false;
+        e
+    }
+
+    fn test_ctx_with_bus(
+        bus: edlr_driver_channel::Bus,
+        entries: &[crate::plugin::bus_runtime::BusRuntimeEntry],
+    ) -> HostCtx {
+        use crate::plugin::bus_runtime::bus_json_string;
+        HostCtx::new(
+            "translator".to_string(),
+            Arc::new(Mutex::new("{}".to_string())),
+            Arc::new(Mutex::new(capabilities_json_string(&[]))),
+            Arc::new(Mutex::new("[]".to_string())),
+            Arc::new(Mutex::new("[]".to_string())),
+            Arc::new(Mutex::new(bus_json_string(entries))),
+            bus,
+            Arc::new(
+                edlr_driver_http::HttpDriver::new(HTTP_TIMEOUT, HTTP_MAX_BODY)
+                    .expect("http driver builds"),
+            ),
+            Arc::new(edlr_driver_process::ProcessDriver::new(
+                SIDECAR_SHUTDOWN_GRACE,
+                SIDECAR_SPAWN_MIN_INTERVAL,
+            )),
+            Arc::new(edlr_driver_fs::FsDriver::new(FS_READ_LIMIT, FS_LIST_LIMIT)),
+        )
+    }
+
+    #[test]
+    fn publish_without_a_grant_is_denied() {
+        let bus = edlr_driver_channel::Bus::new();
+        let (tx, _rx) = std::sync::mpsc::sync_channel(4);
+        bus.register_driver(
+            "ed-state",
+            vec![edlr_driver_channel::TopicSpec {
+                name: "ship-status".into(),
+                retain: false,
+                description: String::new(),
+            }],
+            tx,
+        );
+        let mut ctx = test_ctx_with_bus(bus, &[entry_ungranted()]);
+        let result = ctx.publish("ed-state".into(), "ship-status".into(), vec![1]);
+        assert!(matches!(result, Err(WitBusError::PermissionDenied(_))));
+    }
+
+    #[test]
+    fn publish_with_a_grant_reaches_the_driver_queue() {
+        let bus = edlr_driver_channel::Bus::new();
+        let (tx, rx) = std::sync::mpsc::sync_channel(4);
+        bus.register_driver(
+            "ed-state",
+            vec![edlr_driver_channel::TopicSpec {
+                name: "ship-status".into(),
+                retain: false,
+                description: String::new(),
+            }],
+            tx,
+        );
+        let mut ctx = test_ctx_with_bus(bus, &[entry_granted()]);
+        ctx.publish("ed-state".into(), "ship-status".into(), vec![1])
+            .unwrap();
+        assert_eq!(rx.try_recv().unwrap().from, "translator");
+    }
+
+    #[test]
+    fn publishing_to_a_topic_outside_the_grant_is_denied() {
+        let bus = edlr_driver_channel::Bus::new();
+        let (tx, _rx) = std::sync::mpsc::sync_channel(4);
+        bus.register_driver(
+            "ed-state",
+            vec![edlr_driver_channel::TopicSpec {
+                name: "secret".into(),
+                retain: false,
+                description: String::new(),
+            }],
+            tx,
+        );
+        let mut ctx = test_ctx_with_bus(bus, &[entry_granted()]);
+        let result = ctx.publish("ed-state".into(), "secret".into(), vec![1]);
+        assert!(matches!(result, Err(WitBusError::PermissionDenied(_))));
+    }
+
+    #[test]
+    fn get_is_limited_to_subscribed_topics() {
+        let bus = edlr_driver_channel::Bus::new();
+        let (tx, _rx) = std::sync::mpsc::sync_channel(4);
+        bus.register_driver(
+            "ed-state",
+            vec![
+                edlr_driver_channel::TopicSpec {
+                    name: "current-system".into(),
+                    retain: true,
+                    description: String::new(),
+                },
+                edlr_driver_channel::TopicSpec {
+                    name: "ship-status".into(),
+                    retain: true,
+                    description: String::new(),
+                },
+            ],
+            tx,
+        );
+        bus.emit("ed-state", "current-system", b"Sol".to_vec())
+            .unwrap();
+        bus.emit("ed-state", "ship-status", b"x".to_vec()).unwrap();
+
+        let mut ctx = test_ctx_with_bus(bus, &[entry_granted()]);
+        assert_eq!(
+            ctx.get("ed-state".into(), "current-system".into()).unwrap(),
+            Some(b"Sol".to_vec())
+        );
+        // publish にしか宣言していないトピックは読めない。
+        assert!(matches!(
+            ctx.get("ed-state".into(), "ship-status".into()),
+            Err(WitBusError::PermissionDenied(_))
+        ));
     }
 }
