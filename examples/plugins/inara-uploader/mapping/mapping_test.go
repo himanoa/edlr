@@ -2,6 +2,7 @@ package mapping
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -23,7 +24,7 @@ func TestBrokenPayloadIsReportedWithTheEventName(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected an error for a broken payload")
 	}
-	if got := err.Error(); got[:7] != "FSDJump" {
+	if got := err.Error(); !strings.HasPrefix(got, "FSDJump:") {
 		t.Errorf("the error must name the event, got %q", got)
 	}
 }
