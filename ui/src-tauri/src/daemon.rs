@@ -22,22 +22,31 @@ pub const DAEMON_ADDR: &str = "127.0.0.1:8137";
 /// デーモンを道連れに殺してしまい、サイドカーが孤児として残っていた)。
 ///
 /// `STOP_GRACE` はデーモン側の最悪ケース(`SIDECAR_SHUTDOWN_GRACE_SECS` ×
-/// `SIDECAR_SHUTDOWN_WORST_CASE_INSTANCES`、両方 `edlr_config` の共有定数)を
-/// **厳密に超える**必要がある。この関係は下のコンパイル時アサーションで
-/// 固定してある: どちらかの定数だけが将来変更されても、この関係が崩れれば
-/// ビルドが失敗する。デーモンが早く終了した場合、`stop_child_gracefully` は
-/// `try_wait` のポーリングで即座に戻る(この猶予いっぱい待つのは、デーモンが
-/// 本当にハングしている最悪ケースのみ)。
-pub const STOP_GRACE: Duration = Duration::from_secs(65);
+/// `SIDECAR_SHUTDOWN_WORST_CASE_INSTANCES`、両方 `edlr_config` の共有定数)に、
+/// さらに `DRIVER_CALL_DEADLINE_SECS`(同じく `edlr_config` の共有定数)を
+/// 加えた値を**厳密に超える**必要がある。ドライバはメッセージ 1 件の処理中に
+/// HTTP 呼び出し等でブロックしうり、その間は SIGTERM で送られる停止要求
+/// (`stop_all_sidecars` 経由でデーモンが要求する後始末)にも応答できない --
+/// ドライバ専用スレッドはメッセージループを直列に回しているため、ブロック中の
+/// 呼び出しが `DriverInstance::CALL_DEADLINE`(= `DRIVER_CALL_DEADLINE_SECS`)
+/// に達して戻るまで、次のシャットダウン処理へ進めない。したがってデーモン
+/// 全体の後始末にかかる最悪時間は「サイドカーの逐次後始末」だけでなく、この
+/// ドライバの呼び出し期限 1 回分も上乗せして見積もる必要がある。この関係は
+/// 下のコンパイル時アサーションで固定してある: いずれかの定数だけが将来
+/// 変更されても、この関係が崩れればビルドが失敗する。デーモンが早く終了した
+/// 場合、`stop_child_gracefully` は `try_wait` のポーリングで即座に戻る
+/// (この猶予いっぱい待つのは、デーモンが本当にハングしている最悪ケースのみ)。
+pub const STOP_GRACE: Duration = Duration::from_secs(95);
 
 const _: () = assert!(
     STOP_GRACE.as_secs()
         > edlr_config::SIDECAR_SHUTDOWN_GRACE_SECS
-            * edlr_config::SIDECAR_SHUTDOWN_WORST_CASE_INSTANCES,
+            * edlr_config::SIDECAR_SHUTDOWN_WORST_CASE_INSTANCES
+            + edlr_config::DRIVER_CALL_DEADLINE_SECS,
     "STOP_GRACE must strictly exceed the daemon's worst-case sequential sidecar \
-     shutdown time (SIDECAR_SHUTDOWN_GRACE_SECS * SIDECAR_SHUTDOWN_WORST_CASE_INSTANCES, \
-     both in edlr_config) -- see STOP_GRACE's doc comment. If this fails after changing \
-     either constant, raise STOP_GRACE's literal value to restore the margin."
+     shutdown time plus one driver call deadline (a driver blocked in an HTTP call \
+     cannot answer a stop request until its deadline elapses) -- see STOP_GRACE's \
+     doc comment."
 );
 
 /// 子プロセスを SIGTERM で止め、`grace` 待って死ななければ SIGKILL に
@@ -141,14 +150,17 @@ mod tests {
     #[test]
     fn stop_grace_exceeds_the_daemons_worst_case_sequential_shutdown_time() {
         let daemon_worst_case_secs = edlr_config::SIDECAR_SHUTDOWN_GRACE_SECS
-            * edlr_config::SIDECAR_SHUTDOWN_WORST_CASE_INSTANCES;
+            * edlr_config::SIDECAR_SHUTDOWN_WORST_CASE_INSTANCES
+            + edlr_config::DRIVER_CALL_DEADLINE_SECS;
         assert!(
             STOP_GRACE.as_secs() > daemon_worst_case_secs,
             "STOP_GRACE ({STOP_GRACE:?}) must strictly exceed the daemon's worst-case \
-             sequential sidecar shutdown time ({daemon_worst_case_secs}s = \
-             SIDECAR_SHUTDOWN_GRACE_SECS * SIDECAR_SHUTDOWN_WORST_CASE_INSTANCES); \
+             sequential sidecar shutdown time plus one driver call deadline \
+             ({daemon_worst_case_secs}s = SIDECAR_SHUTDOWN_GRACE_SECS * \
+             SIDECAR_SHUTDOWN_WORST_CASE_INSTANCES + DRIVER_CALL_DEADLINE_SECS); \
              otherwise Tauri can SIGKILL the daemon before it has finished stopping \
-             every sidecar, orphaning any that ignore SIGTERM"
+             every sidecar (or before a driver blocked in a call can respond), \
+             orphaning any that ignore SIGTERM"
         );
     }
 

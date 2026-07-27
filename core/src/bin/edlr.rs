@@ -45,6 +45,12 @@ struct Args {
     #[arg(long)]
     grants_dir: Option<PathBuf>,
 
+    /// ドライバディレクトリ(未指定時は $XDG_CONFIG_HOME/edlr/drivers、
+    /// 未設定なら ~/.config/edlr/drivers)。存在しなくてもエラーには
+    /// ならない(ドライバ 0 件として起動する)
+    #[arg(long)]
+    drivers_dir: Option<PathBuf>,
+
     /// Journal 読み取り位置の保存先ディレクトリ(未指定時は
     /// $XDG_STATE_HOME/edlr、未設定なら ~/.local/state/edlr)
     #[arg(long)]
@@ -86,6 +92,9 @@ async fn main() {
     let grants_dir = args.grants_dir.clone().unwrap_or_else(|| {
         config::config_subdir(xdg_config_home.as_deref(), home.as_deref(), "grants")
     });
+    let drivers_dir = args.drivers_dir.clone().unwrap_or_else(|| {
+        config::config_subdir(xdg_config_home.as_deref(), home.as_deref(), "drivers")
+    });
     let state_dir = args.state_dir.clone().unwrap_or_else(|| {
         let xdg_state_home = std::env::var_os("XDG_STATE_HOME").map(PathBuf::from);
         config::state_base(xdg_state_home.as_deref(), home.as_deref())
@@ -123,42 +132,47 @@ async fn main() {
     let router_for_plugins = router.clone();
     let registry = match (PluginHost::new(), DriverHost::new()) {
         (Ok(host), Ok(driver_host)) => {
-            tracing::info!(plugins_dir = %plugins_dir.display(), "starting plugins");
+            tracing::info!(
+                plugins_dir = %plugins_dir.display(),
+                drivers_dir = %drivers_dir.display(),
+                "starting plugins"
+            );
             let settings_store = SettingsStore::new(settings_dir.clone());
             let grants_store = GrantsStore::new(grants_dir.clone());
             let sidecar_config_store = SidecarConfigStore::new(settings_dir.clone());
             // edlr 自身の状態ディレクトリを承認先に選ばせない。ここでは
             // 既定値ではなく、CLI(`--settings-dir` など)で上書きされた
             // 実際のパスを渡す — そうしないと、既定と違う場所を使っている
-            // デーモンでその実際の場所が無防備になる。
+            // デーモンでその実際の場所が無防備になる。ドライバのディレクトリ
+            // もプラグイン同様に「掴ませない」対象に加える -- そうしないと
+            // プラグインがファイルシステムルートとしてドライバディレクトリ
+            // 自体を要求でき、他のドライバの設定/データを覗ける。
             let filesystem_config_store = FilesystemConfigStore::new(
                 settings_dir.clone(),
-                vec![grants_dir.clone(), plugins_dir.clone()],
+                vec![grants_dir.clone(), plugins_dir.clone(), drivers_dir.clone()],
             );
             let plugins_dir_for_blocking = plugins_dir.clone();
 
-            // TODO(drivers): ドライバディレクトリの CLI 引数配線はこの
-            // タスクのスコープ外なので、ここでは実在しないディレクトリを
-            // `start_drivers` に渡し、ドライバ 0 件の `DriverRegistry` を
-            // 得るに留める。`start_plugins` より先に呼ぶのは変わらず必須
-            // (ドライバの登録が完了する前にプラグインが起動すると、`init`
-            // 中の最初の `bus.get` 呼び出しが `unknown-driver` を見てしまう
-            // -- `start_plugins` のドキュメントコメント参照)。
-            let drivers_dir_placeholder = PathBuf::from("/nonexistent/edlr-drivers");
-            let driver_settings_store = SettingsStore::new(settings_dir.join("driver-settings"));
-            let driver_grants_store =
-                GrantsStore::new_for_drivers(grants_dir.join("driver-grants"));
+            // ドライバ用のストアはプラグインとは別の名前空間に置く
+            // (`settings_dir/drivers`、`grants_dir/drivers`)。プラグイン id
+            // とドライバ id は互いに衝突しうる(共有する名前空間ではない)
+            // ため、同じディレクトリを共用してはならない。
+            let driver_settings_store = SettingsStore::new(settings_dir.join("drivers"));
+            let driver_grants_store = GrantsStore::new_for_drivers(grants_dir.clone());
             let driver_sidecar_config_store =
-                SidecarConfigStore::new(settings_dir.join("driver-settings"));
+                SidecarConfigStore::new(settings_dir.join("drivers"));
+            // ドライバにも、プラグインのディレクトリ・自身のドライバ
+            // ディレクトリをファイルシステムルートとして掴ませない。
             let driver_filesystem_config_store = FilesystemConfigStore::new(
-                settings_dir.join("driver-settings"),
-                vec![grants_dir.clone(), plugins_dir.clone()],
+                settings_dir.join("drivers"),
+                vec![grants_dir.clone(), plugins_dir.clone(), drivers_dir.clone()],
             );
 
             let bus = edlr_driver_channel::Bus::new();
+            let drivers_dir_for_blocking = drivers_dir.clone();
             match tokio::task::spawn_blocking(move || {
                 let drivers = start_drivers(
-                    &drivers_dir_placeholder,
+                    &drivers_dir_for_blocking,
                     driver_settings_store,
                     driver_sidecar_config_store,
                     driver_filesystem_config_store,
