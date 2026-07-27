@@ -130,7 +130,7 @@ async fn main() {
     // プラグインの購読を確立できるよう、`monitor::run` の起動より先に完了
     // させる。
     let router_for_plugins = router.clone();
-    let registry = match (PluginHost::new(), DriverHost::new()) {
+    let registry_and_drivers = match (PluginHost::new(), DriverHost::new()) {
         (Ok(host), Ok(driver_host)) => {
             tracing::info!(
                 plugins_dir = %plugins_dir.display(),
@@ -180,7 +180,7 @@ async fn main() {
                     bus.clone(),
                     driver_host,
                 );
-                start_plugins(
+                let registry = start_plugins(
                     &plugins_dir_for_blocking,
                     settings_store,
                     sidecar_config_store,
@@ -188,13 +188,14 @@ async fn main() {
                     grants_store,
                     &router_for_plugins,
                     bus,
-                    drivers,
+                    drivers.clone(),
                     host,
-                )
+                );
+                (registry, drivers)
             })
             .await
             {
-                Ok(registry) => Some(registry),
+                Ok((registry, drivers)) => Some((registry, drivers)),
                 Err(e) => {
                     tracing::warn!("plugin startup task panicked, continuing without plugins: {e}");
                     None
@@ -211,7 +212,16 @@ async fn main() {
         }
     };
 
-    let state = server::ServerState::new(&router, registry.clone());
+    // `DriverRegistry` は `Clone`(内部は `Arc` 共有)で安価に持ち回れるため、
+    // プラグイン側に配線したのと同じインスタンスをそのまま `ServerState` にも
+    // 渡す(`server::bus_result_json` のドキュメント参照: 本番ではこの 2 つが
+    // 同じ `DriverRegistry` を指すことを前提にしている)。
+    let (registry, drivers) = match registry_and_drivers {
+        Some((registry, drivers)) => (Some(registry), Some(drivers)),
+        None => (None, None),
+    };
+
+    let state = server::ServerState::new(&router, registry.clone(), drivers);
     tokio::spawn(server::serve(listener, state, args.ui_dir.clone()));
 
     let mut rx = router.subscribe();

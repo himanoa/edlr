@@ -436,7 +436,7 @@ impl DriverRegistry {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::driver::host::DriverHost;
 
@@ -457,6 +457,41 @@ mod tests {
             sidecars: Vec::new(),
             filesystem: Vec::new(),
         }
+    }
+
+    /// `ed-state` を 1 件だけ載せた `DriverRegistry`。`current-system`
+    /// (retain 付き)と `ship-status` の 2 トピックを宣言する -- 前者は
+    /// `crate::server` の `drivers/list` テストが `topics[0]` として見るもの、
+    /// 後者は `crate::plugin::registry::tests::test_registry_with_bus_request`
+    /// が宣言する `[[bus]]` 要求(`publish = ["ship-status"]`、
+    /// `subscribe = ["current-system"]`)を両方とも解決させる(`resolved: true`
+    /// にする)ために要る。`bus` は呼び出し元と共有させたいので引数で受け取る
+    /// (`crate::plugin::registry::tests` 側のテストが同じ `Bus` を使う場合に
+    /// 備える。今のところ呼び出し元は毎回新しい `Bus::new()` を渡している)。
+    pub(crate) fn test_registry(bus: edlr_driver_channel::Bus) -> DriverRegistry {
+        let registry = bare_registry(bus);
+        let mut manifest = manifest_with_topic("ed-state");
+        manifest.topics.push(edlr_driver_channel::TopicSpec {
+            name: "ship-status".into(),
+            retain: false,
+            description: String::new(),
+        });
+        registry.push(DriverEntry {
+            manifest,
+            state: DriverState::Running,
+            settings_json: Arc::new(Mutex::new("{}".to_string())),
+            capabilities_json: Arc::new(Mutex::new(r#"{"hosts":[]}"#.to_string())),
+            sidecars_json: Arc::new(Mutex::new("[]".to_string())),
+            filesystem_json: Arc::new(Mutex::new("[]".to_string())),
+        });
+        registry
+    }
+
+    /// ドライバを 1 件もロードしていない `DriverRegistry`。`test_registry` の
+    /// 対極(「ドライバが無ければ unresolved」を示す `crate::server` のテスト
+    /// 用フィクスチャ)。
+    pub(crate) fn test_registry_without_ed_state(bus: edlr_driver_channel::Bus) -> DriverRegistry {
+        bare_registry(bus)
     }
 
     fn manifest_with_sidecar(id: &str, port: u16) -> DriverManifest {

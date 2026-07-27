@@ -1376,7 +1376,7 @@ impl Registry {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::thread;
     use std::time::Duration;
@@ -1502,7 +1502,7 @@ mod tests {
     /// `[[bus]]` を 1 件持つプラグインだけを載せた `Registry`。
     /// `DriverRegistry` には何も登録しないので、`bus("translator")` の
     /// `resolved` は必ず `false` になる(このヘルパを使う唯一のテスト用)。
-    fn test_registry_with_bus_request() -> Registry {
+    pub(crate) fn test_registry_with_bus_request() -> Registry {
         let registry = empty_registry();
         let manifest = manifest_with_bus("translator");
         registry.push(PluginEntry {

@@ -1,3 +1,4 @@
+use crate::driver::{DriverRegistry, DriverState};
 use crate::event::Event;
 use crate::plugin::Registry;
 use crate::router::Router;
@@ -44,6 +45,7 @@ pub fn event_to_ws_json(event: &Event) -> String {
 pub struct ServerState {
     inner: Arc<Mutex<ReplayBuffer>>,
     registry: Option<Registry>,
+    drivers: Option<DriverRegistry>,
 }
 
 struct ReplayBuffer {
@@ -52,7 +54,7 @@ struct ReplayBuffer {
 }
 
 impl ServerState {
-    pub fn new(router: &Router, registry: Option<Registry>) -> Self {
+    pub fn new(router: &Router, registry: Option<Registry>, drivers: Option<DriverRegistry>) -> Self {
         let (tx, _) = broadcast::channel(256);
         let state = Self {
             inner: Arc::new(Mutex::new(ReplayBuffer {
@@ -60,6 +62,7 @@ impl ServerState {
                 tx,
             })),
             registry,
+            drivers,
         };
         let mut rx = router.subscribe();
         let feeder = state.clone();
@@ -94,15 +97,36 @@ impl ServerState {
 }
 
 /// `plugins/*` RPC メソッドを処理する純関数。テスト容易性のため公開。
-///
-/// `registry` が `None` の場合(プラグインホスト起動失敗などで
-/// `ServerState` に `Registry` が渡されなかった場合)はどのメソッドも
-/// `Err("plugins unavailable")` を返す。
+/// `drivers = None` で [`handle_rpc_with_drivers`] に委譲する薄いラッパ
+/// (既存の呼び出し元・テストを壊さないため)。
 pub fn handle_rpc(
     registry: Option<&Registry>,
     method: &str,
     params: &serde_json::Value,
 ) -> Result<serde_json::Value, String> {
+    handle_rpc_with_drivers(registry, None, method, params)
+}
+
+/// `plugins/*` / `drivers/*` RPC メソッドを処理する純関数。テスト容易性の
+/// ため公開。
+///
+/// `registry` が `None` の場合(プラグインホスト起動失敗などで
+/// `ServerState` に `Registry` が渡されなかった場合)は `plugins/*` のどの
+/// メソッドも `Err("plugins unavailable")` を返す。同様に `drivers` が
+/// `None` の場合は `drivers/*` のどのメソッドも `Err("drivers unavailable")`
+/// を返す(ドライバホスト起動失敗などで `ServerState` に `DriverRegistry` が
+/// 渡されなかった場合)。
+pub fn handle_rpc_with_drivers(
+    registry: Option<&Registry>,
+    drivers: Option<&DriverRegistry>,
+    method: &str,
+    params: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    if let Some(method) = method.strip_prefix("drivers/") {
+        let drivers = drivers.ok_or_else(|| "drivers unavailable".to_string())?;
+        return handle_drivers_rpc(drivers, method, params);
+    }
+
     let registry = registry.ok_or_else(|| "plugins unavailable".to_string())?;
     match method {
         "plugins/list" => {
@@ -124,6 +148,8 @@ pub fn handle_rpc(
                     });
                     value["sidecars"] = sidecars_result_json(&info.sidecars)["sidecars"].clone();
                     value["filesystem"] = filesystem_result_json(&info.filesystem)["roots"].clone();
+                    let bus = registry.bus(&info.manifest.id).unwrap_or_default();
+                    value["bus"] = serde_json::Value::Array(bus_result_json(&bus, drivers));
                     match info.state {
                         crate::plugin::PluginState::Running => {
                             value["state"] = serde_json::json!("running");
@@ -139,6 +165,21 @@ pub fn handle_rpc(
             Ok(serde_json::json!({
                 "pluginsDir": registry.plugins_dir().to_string_lossy(),
                 "plugins": plugins,
+            }))
+        }
+        "plugins/set-bus-grant" => {
+            let plugin = param_str(params, "plugin")?;
+            let driver = param_str(params, "driver")?;
+            let granted = params
+                .get("granted")
+                .and_then(|v| v.as_bool())
+                .ok_or_else(|| "params.granted must be a bool".to_string())?;
+            let state = registry
+                .set_bus_grant(plugin, driver, granted)
+                .map_err(|e| e.to_string())?;
+            Ok(serde_json::json!({
+                "granted": state.granted,
+                "staleGrant": state.stale,
             }))
         }
         "plugins/get-settings" => {
@@ -269,6 +310,69 @@ pub fn handle_rpc(
     }
 }
 
+/// `drivers/*` RPC メソッドを処理する。呼び出し元([`handle_rpc_with_drivers`])
+/// が `drivers/` プレフィックスを剥がして渡す(`method` はプレフィックス無し)。
+/// `crate::plugin::registry::Registry` の `plugins/*` 系(`get-settings`/
+/// `set-settings`/`set-capabilities`)と同じ形の応答を返す。`DriverInfo` は
+/// `PluginInfo` と違い `capability_requests` を持たない(manifest の
+/// `capabilities` をそのまま使う設計 -- `DriverInfo` のドキュメント参照)ため、
+/// `capabilities_result_json` には `manifest.capabilities` を渡す。
+fn handle_drivers_rpc(
+    drivers: &DriverRegistry,
+    method: &str,
+    params: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    match method {
+        "list" => Ok(serde_json::json!({
+            "driversDir": drivers.drivers_dir().to_string_lossy(),
+            "drivers": drivers.list().into_iter().map(|info| serde_json::json!({
+                "id": info.manifest.id,
+                "name": info.manifest.name,
+                "version": info.manifest.version,
+                "description": info.manifest.description,
+                "topics": info.manifest.topics,
+                "settings": info.manifest.settings,
+                "values": info.values,
+                "capabilities": capabilities_result_json(&info.manifest.capabilities, &info.grant_state),
+                "sidecars": sidecars_result_json(&info.sidecars)["sidecars"],
+                "filesystem": filesystem_result_json(&info.filesystem)["roots"],
+                "state": match info.state { DriverState::Running => "running", _ => "disabled" },
+            })).collect::<Vec<_>>(),
+        })),
+        "get-settings" => {
+            let driver = param_str(params, "driver")?;
+            let values = drivers.values(driver).map_err(|e| e.to_string())?;
+            Ok(serde_json::Value::Object(values))
+        }
+        "set-settings" => {
+            let driver = param_str(params, "driver")?;
+            let values = params
+                .get("values")
+                .and_then(|v| v.as_object())
+                .ok_or_else(|| "params.values must be an object".to_string())?;
+            let updated = drivers
+                .set_values(driver, values)
+                .map_err(|e| e.to_string())?;
+            Ok(serde_json::Value::Object(updated))
+        }
+        "set-capabilities" => {
+            let driver = param_str(params, "driver")?;
+            let granted = params
+                .get("granted")
+                .and_then(|v| v.as_bool())
+                .ok_or_else(|| "params.granted must be a bool".to_string())?;
+            let grant_state = drivers
+                .set_capabilities(driver, granted)
+                .map_err(|e| e.to_string())?;
+            let manifest = drivers
+                .manifest_of(driver)
+                .ok_or_else(|| format!("unknown driver: {driver}"))?;
+            Ok(capabilities_result_json(&manifest.capabilities, &grant_state))
+        }
+        other => Err(format!("unknown method: drivers/{other}")),
+    }
+}
+
 /// `get-capabilities`/`set-capabilities` の result と `plugins/list` の各要素の
 /// `capabilities` フィールドに使う共通の JSON 形: `{ requests, granted, staleGrant }`。
 fn capabilities_result_json(
@@ -280,6 +384,43 @@ fn capabilities_result_json(
         "granted": grant_state.granted,
         "staleGrant": grant_state.stale,
     })
+}
+
+/// `plugins/list` の各要素の `bus` フィールドに使う JSON 配列。
+///
+/// `resolved` は `crate::plugin::registry::BusInfo::resolved`(`Registry` が
+/// 自前で保持する `DriverRegistry` から計算したもの)をそのまま使わず、この
+/// RPC 呼び出しに渡された `drivers`(`ServerState` が保持する
+/// `DriverRegistry`)から**都度計算し直す**。本番では両者は同じ
+/// `DriverRegistry` を指す(`edlr.rs` が `drivers.clone()` を両方に配る)ので
+/// 挙動は変わらないが、こうしておくことで `drivers` が `None`(ドライバホスト
+/// 起動失敗)の場合にも「解決先が見えない以上 unresolved」を素直に返せる。
+fn bus_result_json(
+    bus: &[crate::plugin::registry::BusInfo],
+    drivers: Option<&DriverRegistry>,
+) -> Vec<serde_json::Value> {
+    bus.iter()
+        .map(|info| {
+            let resolved = drivers
+                .and_then(|drivers| drivers.manifest_of(&info.request.driver))
+                .is_some_and(|driver_manifest| {
+                    info.request
+                        .publish
+                        .iter()
+                        .chain(info.request.subscribe.iter())
+                        .all(|topic| driver_manifest.topic(topic).is_some())
+                });
+            serde_json::json!({
+                "driver": info.request.driver,
+                "publish": info.request.publish,
+                "subscribe": info.request.subscribe,
+                "reason": info.request.reason,
+                "granted": info.grant.granted,
+                "stale": info.grant.stale,
+                "resolved": resolved,
+            })
+        })
+        .collect()
 }
 
 /// `params` から `key` の文字列値を取り出す。無い・文字列でない場合は
@@ -467,9 +608,12 @@ async fn handle_client_message(state: &ServerState, text: &str) -> Option<String
         .cloned()
         .unwrap_or(serde_json::json!({}));
     let registry = state.registry.clone();
+    let drivers = state.drivers.clone();
 
-    let result =
-        tokio::task::spawn_blocking(move || handle_rpc(registry.as_ref(), &method, &params)).await;
+    let result = tokio::task::spawn_blocking(move || {
+        handle_rpc_with_drivers(registry.as_ref(), drivers.as_ref(), &method, &params)
+    })
+    .await;
 
     let response = match result {
         Ok(Ok(result)) => serde_json::json!({"type": "rpc-result", "id": id, "result": result}),
@@ -506,6 +650,198 @@ mod tests {
             None,
             "status is a snapshot of the present; it has no replay notion"
         );
+    }
+
+    #[test]
+    fn drivers_list_returns_the_dir_and_the_topics() {
+        let (registry, drivers) = test_registries();
+        let result = handle_rpc_with_drivers(
+            Some(&registry),
+            Some(&drivers),
+            "drivers/list",
+            &serde_json::json!({}),
+        )
+        .unwrap();
+        assert!(result["driversDir"].is_string());
+        assert_eq!(result["drivers"][0]["id"], "ed-state");
+        assert_eq!(result["drivers"][0]["topics"][0]["name"], "current-system");
+        assert_eq!(result["drivers"][0]["topics"][0]["retain"], true);
+    }
+
+    #[test]
+    fn drivers_rpc_without_a_driver_registry_reports_unavailable() {
+        let (registry, _drivers) = test_registries();
+        let err = handle_rpc_with_drivers(
+            Some(&registry),
+            None,
+            "drivers/list",
+            &serde_json::json!({}),
+        )
+        .unwrap_err();
+        assert_eq!(err, "drivers unavailable");
+    }
+
+    #[test]
+    fn plugins_rpc_without_a_registry_reports_unavailable_even_with_drivers_present() {
+        // 逆方向のガード: `plugins/*` は `registry` の有無だけを見る必要が
+        // あり、`drivers` が `Some` であることに引きずられて誤って通しては
+        // ならない。
+        let (_registry, drivers) = test_registries();
+        let err = handle_rpc_with_drivers(
+            None,
+            Some(&drivers),
+            "plugins/list",
+            &serde_json::json!({}),
+        )
+        .unwrap_err();
+        assert_eq!(err, "plugins unavailable");
+    }
+
+    #[test]
+    fn plugins_list_includes_bus_requests_with_their_resolution() {
+        let (registry, drivers) = test_registries();
+        let result = handle_rpc_with_drivers(
+            Some(&registry),
+            Some(&drivers),
+            "plugins/list",
+            &serde_json::json!({}),
+        )
+        .unwrap();
+        let bus = &result["plugins"][0]["bus"][0];
+        assert_eq!(bus["driver"], "ed-state");
+        assert_eq!(bus["publish"][0], "ship-status");
+        assert_eq!(bus["subscribe"][0], "current-system");
+        assert_eq!(bus["granted"], false);
+        assert_eq!(bus["resolved"], true);
+    }
+
+    /// 上のテストの裏付け: `drivers` に一致するドライバが無ければ、同じ
+    /// `registry` のまま `resolved` は `false` に落ちる。`resolved` の計算
+    /// (`bus_result_json`)自体が効いていることを、true/false 両方を異なる
+    /// フィクスチャで示すことで確認する(常に `true` を返す実装でも通って
+    /// しまう単一ケースを避ける)。
+    #[test]
+    fn plugins_list_reports_unresolved_when_the_driver_is_not_installed() {
+        let (registry, _drivers) = test_registries();
+        let empty_drivers = crate::driver::registry::tests::test_registry_without_ed_state(
+            edlr_driver_channel::Bus::new(),
+        );
+        let result = handle_rpc_with_drivers(
+            Some(&registry),
+            Some(&empty_drivers),
+            "plugins/list",
+            &serde_json::json!({}),
+        )
+        .unwrap();
+        let bus = &result["plugins"][0]["bus"][0];
+        assert_eq!(bus["driver"], "ed-state");
+        assert_eq!(bus["resolved"], false);
+    }
+
+    /// もう一つの unresolved フィクスチャ: `drivers` そのものが無ければ
+    /// (ドライバホスト起動失敗など)`resolved` は `false` に落ちる。
+    #[test]
+    fn plugins_list_reports_unresolved_when_no_driver_registry_is_available() {
+        let (registry, _drivers) = test_registries();
+        let result = handle_rpc_with_drivers(
+            Some(&registry),
+            None,
+            "plugins/list",
+            &serde_json::json!({}),
+        )
+        .unwrap();
+        let bus = &result["plugins"][0]["bus"][0];
+        assert_eq!(bus["resolved"], false);
+    }
+
+    /// `translator`(`[[bus]]` を 1 件持つ)と `ed-state`(`current-system` を
+    /// retain 付きで宣言)をそれぞれ 1 件だけ載せたレジストリの組。プラグイン
+    /// 側は Task 10 の `test_registry_with_bus_request` を、ドライバ側は
+    /// Task 9 の `test_registry` を再利用する(どちらも wasm をロードせず
+    /// `push` で組み立てる)。
+    fn test_registries() -> (Registry, DriverRegistry) {
+        (
+            crate::plugin::registry::tests::test_registry_with_bus_request(),
+            crate::driver::registry::tests::test_registry(edlr_driver_channel::Bus::new()),
+        )
+    }
+
+    #[test]
+    fn set_bus_grant_requires_a_plugin_and_a_driver() {
+        let (registry, drivers) = test_registries();
+        assert!(handle_rpc_with_drivers(
+            Some(&registry),
+            Some(&drivers),
+            "plugins/set-bus-grant",
+            &serde_json::json!({"plugin": "translator"})
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn set_bus_grant_persists_and_is_reflected_in_plugins_list() {
+        let (registry, drivers) = test_registries();
+        let granted = handle_rpc_with_drivers(
+            Some(&registry),
+            Some(&drivers),
+            "plugins/set-bus-grant",
+            &serde_json::json!({"plugin": "translator", "driver": "ed-state", "granted": true}),
+        )
+        .unwrap();
+        assert_eq!(granted["granted"], true);
+
+        let result = handle_rpc_with_drivers(
+            Some(&registry),
+            Some(&drivers),
+            "plugins/list",
+            &serde_json::json!({}),
+        )
+        .unwrap();
+        assert_eq!(result["plugins"][0]["bus"][0]["granted"], true);
+    }
+
+    #[test]
+    fn drivers_get_and_set_settings_round_trip() {
+        let (_registry, drivers) = test_registries();
+        let updated = handle_rpc_with_drivers(
+            None,
+            Some(&drivers),
+            "drivers/set-settings",
+            &serde_json::json!({"driver": "ed-state", "values": {}}),
+        )
+        .unwrap();
+        assert!(updated.is_object());
+
+        let fetched = handle_rpc_with_drivers(
+            None,
+            Some(&drivers),
+            "drivers/get-settings",
+            &serde_json::json!({"driver": "ed-state"}),
+        )
+        .unwrap();
+        assert!(fetched.is_object());
+    }
+
+    /// `ed-state` の fixture は capability を宣言していないため、`granted`
+    /// は要求しても常に `false`(`GrantsStore::set` の
+    /// `capabilities_fingerprint` が `None` を返す = 要求が無いので承認する
+    /// 対象が無い)。ここでは値そのものより、`DriverInfo` に
+    /// `capability_requests` フィールドが無い前提どおり
+    /// `capabilities_result_json(&manifest.capabilities, ...)` から組み立てた
+    /// `{requests, granted, staleGrant}` の形が返ることを確認する。
+    #[test]
+    fn drivers_set_capabilities_returns_the_capabilities_shape() {
+        let (_registry, drivers) = test_registries();
+        let result = handle_rpc_with_drivers(
+            None,
+            Some(&drivers),
+            "drivers/set-capabilities",
+            &serde_json::json!({"driver": "ed-state", "granted": true}),
+        )
+        .unwrap();
+        assert_eq!(result["granted"], false);
+        assert!(result["requests"].is_array());
+        assert!(result["staleGrant"].is_boolean());
     }
 }
 
