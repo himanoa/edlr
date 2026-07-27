@@ -1,3 +1,5 @@
+use edlr_core::driver::host::DriverHost;
+use edlr_core::driver::{start_drivers, DriverRegistry};
 use edlr_core::event::Event;
 use edlr_core::plugin::filesystem::FilesystemConfigStore;
 use edlr_core::plugin::grants::GrantsStore;
@@ -11,6 +13,21 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
+
+/// ドライバを 1 件もロードしていない `DriverRegistry`(存在しないディレクトリ
+/// を走査させることで空のまま作る)。このファイルのテストはバス機能を主眼に
+/// しないので、これで十分。
+fn empty_driver_registry(tmp_path: &Path) -> DriverRegistry {
+    start_drivers(
+        &tmp_path.join("drivers"),
+        SettingsStore::new(tmp_path.join("driver-settings")),
+        SidecarConfigStore::new(tmp_path.join("driver-settings")),
+        FilesystemConfigStore::new(tmp_path.join("driver-settings"), Vec::new()),
+        GrantsStore::new_for_drivers(tmp_path.join("driver-grants")),
+        edlr_driver_channel::Bus::new(),
+        DriverHost::new().expect("driver host should build"),
+    )
+}
 
 /// Builds the fixture plugin crate at `crate_dir` for wasm32-wasip2 (release)
 /// and returns the path to the resulting component. Cargo no-ops if the
@@ -128,6 +145,7 @@ async fn hello_logger_stays_running_and_busy_loop_gets_disabled_after_publish() 
         grants_store,
         &router,
         edlr_driver_channel::Bus::new(),
+        empty_driver_registry(tmp.path()),
         host,
     );
 
@@ -209,6 +227,7 @@ async fn broken_manifest_directory_is_skipped_but_others_still_load() {
         grants_store,
         &router,
         edlr_driver_channel::Bus::new(),
+        empty_driver_registry(tmp.path()),
         host,
     );
 
@@ -243,6 +262,7 @@ async fn nonexistent_plugins_dir_yields_empty_registry() {
         grants_store,
         &router,
         edlr_driver_channel::Bus::new(),
+        empty_driver_registry(tmp.path()),
         host,
     );
 
@@ -278,6 +298,7 @@ async fn init_failure_registers_disabled_and_starts_no_event_task() {
         grants_store,
         &router,
         edlr_driver_channel::Bus::new(),
+        empty_driver_registry(tmp.path()),
         host,
     );
 
@@ -357,6 +378,7 @@ async fn list_returns_plugin_info_with_effective_values_matching_manifest_defaul
         grants_store,
         &router,
         edlr_driver_channel::Bus::new(),
+        empty_driver_registry(tmp.path()),
         host,
     );
 
@@ -405,6 +427,7 @@ async fn set_values_persists_validates_and_updates_shared_settings_json() {
         grants_store,
         &router,
         edlr_driver_channel::Bus::new(),
+        empty_driver_registry(tmp.path()),
         host,
     );
 
@@ -466,6 +489,7 @@ async fn set_values_with_unknown_key_returns_err_and_leaves_values_unchanged() {
         grants_store,
         &router,
         edlr_driver_channel::Bus::new(),
+        empty_driver_registry(tmp.path()),
         host,
     );
 

@@ -1,4 +1,6 @@
 use clap::Parser;
+use edlr_core::driver::host::DriverHost;
+use edlr_core::driver::start_drivers;
 use edlr_core::plugin::filesystem::FilesystemConfigStore;
 use edlr_core::plugin::host::PluginHost;
 use edlr_core::plugin::sidecar::SidecarConfigStore;
@@ -119,8 +121,8 @@ async fn main() {
     // プラグインの購読を確立できるよう、`monitor::run` の起動より先に完了
     // させる。
     let router_for_plugins = router.clone();
-    let registry = match PluginHost::new() {
-        Ok(host) => {
+    let registry = match (PluginHost::new(), DriverHost::new()) {
+        (Ok(host), Ok(driver_host)) => {
             tracing::info!(plugins_dir = %plugins_dir.display(), "starting plugins");
             let settings_store = SettingsStore::new(settings_dir.clone());
             let grants_store = GrantsStore::new(grants_dir.clone());
@@ -129,18 +131,41 @@ async fn main() {
             // 既定値ではなく、CLI(`--settings-dir` など)で上書きされた
             // 実際のパスを渡す — そうしないと、既定と違う場所を使っている
             // デーモンでその実際の場所が無防備になる。
-            let filesystem_config_store =
-                FilesystemConfigStore::new(settings_dir, vec![grants_dir, plugins_dir.clone()]);
+            let filesystem_config_store = FilesystemConfigStore::new(
+                settings_dir.clone(),
+                vec![grants_dir.clone(), plugins_dir.clone()],
+            );
             let plugins_dir_for_blocking = plugins_dir.clone();
-            // TODO(drivers): 実際にはユーザーが設置したドライバを
-            // `edlr_core::driver::start_drivers` でロードし、その戻り値の
-            // `Bus` をここへ渡す(drivers を先に起動しないと、この直後に
-            // 起動するプラグインの `init` 中の `bus.get` が
-            // `unknown-driver` を見てしまう -- `start_plugins` のドキュメント
-            // コメント参照)。ドライバディレクトリの CLI 引数配線はこの
-            // タスクのスコープ外なので、ここでは空の `Bus` を渡すに留める。
+
+            // TODO(drivers): ドライバディレクトリの CLI 引数配線はこの
+            // タスクのスコープ外なので、ここでは実在しないディレクトリを
+            // `start_drivers` に渡し、ドライバ 0 件の `DriverRegistry` を
+            // 得るに留める。`start_plugins` より先に呼ぶのは変わらず必須
+            // (ドライバの登録が完了する前にプラグインが起動すると、`init`
+            // 中の最初の `bus.get` 呼び出しが `unknown-driver` を見てしまう
+            // -- `start_plugins` のドキュメントコメント参照)。
+            let drivers_dir_placeholder = PathBuf::from("/nonexistent/edlr-drivers");
+            let driver_settings_store = SettingsStore::new(settings_dir.join("driver-settings"));
+            let driver_grants_store =
+                GrantsStore::new_for_drivers(grants_dir.join("driver-grants"));
+            let driver_sidecar_config_store =
+                SidecarConfigStore::new(settings_dir.join("driver-settings"));
+            let driver_filesystem_config_store = FilesystemConfigStore::new(
+                settings_dir.join("driver-settings"),
+                vec![grants_dir.clone(), plugins_dir.clone()],
+            );
+
             let bus = edlr_driver_channel::Bus::new();
             match tokio::task::spawn_blocking(move || {
+                let drivers = start_drivers(
+                    &drivers_dir_placeholder,
+                    driver_settings_store,
+                    driver_sidecar_config_store,
+                    driver_filesystem_config_store,
+                    driver_grants_store,
+                    bus.clone(),
+                    driver_host,
+                );
                 start_plugins(
                     &plugins_dir_for_blocking,
                     settings_store,
@@ -149,6 +174,7 @@ async fn main() {
                     grants_store,
                     &router_for_plugins,
                     bus,
+                    drivers,
                     host,
                 )
             })
@@ -161,8 +187,12 @@ async fn main() {
                 }
             }
         }
-        Err(e) => {
+        (Err(e), _) => {
             tracing::warn!("failed to initialize plugin host, continuing without plugins: {e}");
+            None
+        }
+        (_, Err(e)) => {
+            tracing::warn!("failed to initialize driver host, continuing without plugins: {e}");
             None
         }
     };

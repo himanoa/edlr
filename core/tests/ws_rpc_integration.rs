@@ -87,6 +87,7 @@ fn hello_logger_registry() -> (tempfile::TempDir, Registry) {
         grants_store,
         &router,
         edlr_driver_channel::Bus::new(),
+        support::empty_driver_registry(tmp.path()),
         host,
     );
     (tmp, registry)
@@ -156,6 +157,7 @@ fn http_caller_registry() -> (tempfile::TempDir, Registry) {
         grants_store,
         &router,
         edlr_driver_channel::Bus::new(),
+        support::empty_driver_registry(tmp.path()),
         host,
     );
     (tmp, registry)

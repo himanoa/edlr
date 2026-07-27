@@ -19,9 +19,27 @@ use std::process::Command;
 #[allow(unused_imports)]
 use std::sync::Arc;
 
+use edlr_core::driver::host::DriverHost;
+use edlr_core::driver::{start_drivers, DriverRegistry};
 use edlr_core::plugin::filesystem::FilesystemConfigStore;
 use edlr_core::plugin::{GrantsStore, PluginHost, Registry, SettingsStore, SidecarConfigStore};
 use edlr_core::router::Router;
+
+/// ドライバを 1 件もロードしていない `DriverRegistry`(存在しないディレクトリ
+/// を走査させることで空のまま作る)。バス機能を主眼にしないテストの
+/// `start_plugins` 呼び出しはこれを渡しておけば十分。
+#[allow(dead_code)]
+pub fn empty_driver_registry(tmp_path: &Path) -> DriverRegistry {
+    start_drivers(
+        &tmp_path.join("drivers"),
+        SettingsStore::new(tmp_path.join("driver-settings")),
+        SidecarConfigStore::new(tmp_path.join("driver-settings")),
+        FilesystemConfigStore::new(tmp_path.join("driver-settings"), Vec::new()),
+        GrantsStore::new_for_drivers(tmp_path.join("driver-grants")),
+        edlr_driver_channel::Bus::new(),
+        DriverHost::new().expect("driver host should build"),
+    )
+}
 
 pub struct Env {
     #[allow(dead_code)]
@@ -81,6 +99,7 @@ pub fn sidecar_env(name: &str, port: u16, scalable: bool) -> Env {
         GrantsStore::new(tmp.path().join("grants")),
         &router,
         edlr_driver_channel::Bus::new(),
+        empty_driver_registry(tmp.path()),
         PluginHost::new().expect("plugin host"),
     );
 
@@ -119,6 +138,7 @@ pub fn two_plugin_sidecar_env(sidecar_name: &str, port_a: u16, port_b: u16) -> E
         GrantsStore::new(tmp.path().join("grants")),
         &router,
         edlr_driver_channel::Bus::new(),
+        empty_driver_registry(tmp.path()),
         PluginHost::new().expect("plugin host"),
     );
 
@@ -169,6 +189,7 @@ pub fn filesystem_env(name: &str, mode: &str) -> Env {
         GrantsStore::new(tmp.path().join("grants")),
         &router,
         edlr_driver_channel::Bus::new(),
+        empty_driver_registry(tmp.path()),
         PluginHost::new().expect("plugin host"),
     );
 
