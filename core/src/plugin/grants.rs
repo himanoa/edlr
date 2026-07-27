@@ -946,16 +946,50 @@ mod tests {
         assert!(state.stale);
     }
 
+    /// `manifest_with_bus()` に加えて、既存(バス導入前)フォーマットの
+    /// grant ファイルが持つはずのサイドカー要求も 1 件持つマニフェスト。
+    fn manifest_with_bus_and_sidecar() -> Manifest {
+        let mut manifest = manifest_with_bus();
+        manifest.sidecars = vec![crate::plugin::manifest::SidecarRequest {
+            name: "tts".into(),
+            reason: "reason".into(),
+            args: vec!["--port".into(), "{port}".into()],
+            port: 50021,
+            scalable: true,
+        }];
+        manifest
+    }
+
     #[test]
     fn existing_grant_files_without_a_bus_key_still_load() {
         let dir = tempfile::tempdir().unwrap();
+        let manifest = manifest_with_bus_and_sidecar();
+        let sidecar_fingerprint = manifest
+            .sidecar_fingerprint("tts")
+            .expect("manifest declares a tts sidecar");
+
+        // A pre-bus-era grant file: no "bus" key at all, but a real, populated
+        // "sidecars" entry that this version still has to honour. If parsing
+        // this whole file failed (e.g. because `#[serde(default)]` were missing
+        // from `SavedGrant.bus`), `read_saved` would swallow the error into
+        // `None` and this sidecar grant would silently vanish too -- so
+        // asserting the sidecar grant survives is what actually distinguishes
+        // "parsed, bus defaulted to empty" from "parse failed, degraded to
+        // no-saved-grant", which asserting only on `bus_state` cannot.
         std::fs::write(
             dir.path().join("bus-plugin.json"),
-            r#"{"capabilities":{"granted":false}}"#,
+            format!(
+                r#"{{"granted":false,"fingerprint":"","sidecars":{{"tts":{{"granted":true,"fingerprint":"{sidecar_fingerprint}"}}}},"filesystem":{{}}}}"#
+            ),
         )
         .unwrap();
+
         let store = GrantsStore::new(dir.path().to_path_buf());
-        assert!(!store.bus_state(&manifest_with_bus(), "ed-state").granted);
+        assert!(
+            store.sidecar_state(&manifest, "tts").granted,
+            "the pre-existing sidecar grant must still parse and be honoured"
+        );
+        assert!(!store.bus_state(&manifest, "ed-state").granted);
     }
 
     #[test]
