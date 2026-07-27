@@ -323,6 +323,7 @@ mod tests {
             }],
             sidecars: vec![],
             filesystem: vec![],
+            bus: vec![],
         }
     }
 
@@ -338,6 +339,7 @@ mod tests {
             capabilities: vec![],
             sidecars: vec![],
             filesystem: vec![],
+            bus: vec![],
         }
     }
 
@@ -560,6 +562,7 @@ mod tests {
                 scalable: true,
             }],
             filesystem: vec![],
+            bus: vec![],
         }
     }
 
@@ -726,6 +729,7 @@ mod tests {
                 reason: "reason".into(),
                 mode,
             }],
+            bus: vec![],
         }
     }
 

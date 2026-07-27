@@ -27,6 +27,7 @@ sha2 = "0.10"
 edlr-driver-http = { path = "../drivers/http" }
 edlr-driver-process = { path = "../drivers/process" }
 edlr-driver-fs = { path = "../drivers/fs" }
+edlr-driver-channel = { path = "../drivers/channel" }
 
 [dev-dependencies]
 tempfile = "3"

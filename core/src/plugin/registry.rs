@@ -1272,6 +1272,7 @@ mod tests {
                 reason: "reason".into(),
                 mode: crate::plugin::manifest::FilesystemMode::ReadWrite,
             }],
+            bus: vec![],
         }
     }
 
@@ -1391,6 +1392,7 @@ mod tests {
                 scalable: false,
             }],
             filesystem: vec![],
+            bus: vec![],
         }
     }
 
@@ -1720,6 +1722,7 @@ mod tests {
             }],
             sidecars: vec![],
             filesystem: vec![],
+            bus: vec![],
         }
     }
 

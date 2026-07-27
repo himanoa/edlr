@@ -15,8 +15,8 @@ pub use fs_runtime::{filesystem_json_string, parse_filesystem, FsRuntimeEntry};
 pub use grants::{GrantState, GrantsError, GrantsStore};
 pub use host::PluginHost;
 pub use manifest::{
-    load_manifest, matches_event, CapabilityRequest, FilesystemMode, FilesystemRequest, Manifest,
-    ManifestError, SettingField, SidecarRequest,
+    load_manifest, matches_event, BusRequest, CapabilityRequest, FilesystemMode, FilesystemRequest,
+    Manifest, ManifestError, SettingField, SidecarRequest,
 };
 pub use registry::{
     FilesystemInfo, PluginEntry, PluginInfo, PluginState, Registry, RegistryError, SidecarAction,
