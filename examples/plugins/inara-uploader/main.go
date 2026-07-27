@@ -132,6 +132,15 @@ func report(out uploader.Outcome) {
 		logf(hostlog.LevelWarn, "inara rejected event %d: %d %s",
 			rejected.Index, rejected.Status, rejected.StatusText)
 	}
+	if out.Warning != "" {
+		// ヘッダの eventStatus が 200 以外の 2xx(202/204)。形式上は成功
+		// なので Fatal ではないが、内容は把握できるよう WARN で残す。
+		logf(hostlog.LevelWarn, "inara returned a warning for the batch: %s", out.Warning)
+	}
+	for _, warned := range out.Warned {
+		logf(hostlog.LevelWarn, "inara returned a warning for event %d: %d %s",
+			warned.Index, warned.Status, warned.StatusText)
+	}
 	if out.Err != nil {
 		level := hostlog.LevelWarn
 		if out.Fatal {

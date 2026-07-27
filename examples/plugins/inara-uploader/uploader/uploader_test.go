@@ -367,6 +367,50 @@ func TestBatchRejectionDropsTheQueue(t *testing.T) {
 	}
 }
 
+// 恒久失敗(バッチ拒否)の経路では backoff が解除されてはならない。解除される
+// と、replay 中に API キー不正のような恒久エラーが起きても shouldFlush が
+// intervalElapsed を見ずに次の ReplayBatchSize 件で即座にまた送信してしまい、
+// minIntervalSeconds を無視して INARA を連打することになる。
+func TestReplayBacksOffAfterABatchRejection(t *testing.T) {
+	sender := &stubSender{status: 200, body: `{"header":{"eventStatus":400,"eventStatusText":"bad key"},"events":[]}`}
+	c := newClock()
+	u := New(c.now, sender)
+	cfg := testSettings()
+
+	// ReplayBatchSize の 2.5 倍ほど流す。時計は一切進めない
+	// (minIntervalSeconds は 60 秒)。
+	feed(u, cfg, ReplayBatchSize*2+ReplayBatchSize/2, true)
+
+	if len(sender.calls) != 1 {
+		t.Fatalf("expected backoff to prevent further attempts before the interval elapses, got %d calls", len(sender.calls))
+	}
+}
+
+// ヘッダの eventStatus 204 は INARA API v1 では「形式上は成功」('Soft'
+// error)。Fatal を立てて送信済みのキューを捨てる(静かなデータ損失)のは
+// 誤りで、送信は成功扱いのままキューを捨てる(=再送しない)のが正しい。
+func TestHeaderSoftErrorIsTreatedAsSuccess(t *testing.T) {
+	sender := &stubSender{status: 200, body: `{"header":{"eventStatus":204,"eventStatusText":"no results"},"events":[]}`}
+	u := New(newClock().now, sender)
+	cfg := testSettings()
+
+	u.Handle(cfg, jump("Sol", false))
+	out := u.Handle(cfg, Event{Kind: "journal", Name: "Shutdown", Payload: `{}`})
+
+	if out.Fatal {
+		t.Errorf("a 204 header must not be fatal, got %+v", out)
+	}
+	if out.Sent != 1 {
+		t.Errorf("a 204 header is a formal success, expected it counted as sent, got %+v", out)
+	}
+	if out.Pending != 0 {
+		t.Errorf("the queue must be discarded after a formally successful send, got %+v", out)
+	}
+	if out.Warning == "" {
+		t.Errorf("expected the 204 to be reported as a warning, got %+v", out)
+	}
+}
+
 func TestIndividualRejectionsAreReported(t *testing.T) {
 	sender := &stubSender{
 		status: 200,

@@ -59,8 +59,14 @@ type Outcome struct {
 	Held string
 	// DryRun は dryRun のときに組み立てた JSON
 	DryRun []byte
-	// Rejected は INARA が個別に拒否したイベント
+	// Rejected は INARA が個別に拒否した(400 以上)イベント
 	Rejected []inara.Rejection
+	// Warned は個別イベントの eventStatus が 200 以外の 2xx だったもの。
+	// 拒否ではないので再送しないが、警告として報告できるようにしておく。
+	Warned []inara.Rejection
+	// Warning はヘッダの eventStatus が 200 以外の 2xx だったことを表す。
+	// 空なら警告なし。バッチとしては成功しておりキューは捨てている。
+	Warning string
 	// Err は変換または送信の失敗
 	Err error
 	// Fatal は Err が恒久的で、キューを捨てたことを表す
@@ -220,7 +226,11 @@ func (u *Uploader) flush(cfg settings.Settings, out *Outcome) {
 	}, batch)
 	if err != nil {
 		// 組み立てに失敗したバッチは捨てる(残しても次回同じ失敗をする)。
-		out.Err = err
+		// これは恒久的な失敗なので backoff は立てたままにする。ここで
+		// backoff を解除すると、replay 中に API キー不正のような恒久エラーが
+		// 起きても shouldFlush が intervalElapsed を見ずに次の
+		// ReplayBatchSize 件で即座にまた送信してしまう。
+		setErr(out, err)
 		out.Fatal = true
 		out.Dropped += len(batch)
 		u.discard()
@@ -230,6 +240,7 @@ func (u *Uploader) flush(cfg settings.Settings, out *Outcome) {
 	if cfg.DryRun {
 		out.DryRun = body
 		out.Sent = len(batch)
+		u.backoff = false
 		u.discard()
 		return
 	}
@@ -237,8 +248,9 @@ func (u *Uploader) flush(cfg settings.Settings, out *Outcome) {
 	status, respBody, err := u.sender.Send(body)
 	if err != nil {
 		// 送信そのものの失敗(ネットワーク・タイムアウト・未承認)。
-		// キューは残して次のイベントで再試行する。
-		out.Err = err
+		// キューは残して次のイベントで再試行する。backoff は関数の先頭で
+		// 立てたままにする(送れていないため)。
+		setErr(out, err)
 		return
 	}
 
@@ -246,21 +258,38 @@ func (u *Uploader) flush(cfg settings.Settings, out *Outcome) {
 	if err != nil {
 		var rejected *inara.BatchError
 		if errors.As(err, &rejected) {
+			// バッチ拒否も恒久的な失敗。backoff は立てたままキューだけ捨てる
+			// (上の Encode 失敗と同じ理由)。
 			out.Fatal = true
 			out.Dropped += len(batch)
 			u.discard()
 		}
-		out.Err = err
+		setErr(out, err)
 		return
 	}
 
+	// ここまで来れば送信は成功している(202/204 のような警告つきの成功も
+	// 含む)。backoff はここでだけ解除する。
 	out.Sent = len(batch)
 	out.Rejected = result.Rejected
+	out.Warned = result.Warned
+	out.Warning = result.Warning
+	u.backoff = false
 	u.discard()
 }
 
-// discard はキューを空にし、backoff を解除する。
+// setErr は out.Err が未設定のときだけ書き込む。mapping.Convert の変換
+// エラーを Handle が先に out.Err へ入れている場合があり、ここで無条件に
+// 上書きすると変換失敗のログが消えてしまう(変換失敗とフラッシュ失敗が
+// 同じイベントで重なるとき)。先に起きた変換エラーを優先する。
+func setErr(out *Outcome, err error) {
+	if out.Err == nil {
+		out.Err = err
+	}
+}
+
+// discard はキューを空にする。backoff の扱いは呼び出し側(flush)が
+// 状況に応じて決める。
 func (u *Uploader) discard() {
 	u.queue.clear()
-	u.backoff = false
 }
