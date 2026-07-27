@@ -370,6 +370,74 @@ fn handle_drivers_rpc(
                 .ok_or_else(|| format!("unknown driver: {driver}"))?;
             Ok(capabilities_result_json(&manifest.capabilities, &grant_state))
         }
+        "set-sidecar-config" => {
+            let driver = param_str(params, "driver")?;
+            let name = param_str(params, "name")?;
+            let config: crate::plugin::SidecarConfig = serde_json::from_value(
+                params
+                    .get("config")
+                    .cloned()
+                    .ok_or_else(|| "params.config must be an object".to_string())?,
+            )
+            .map_err(|e| format!("params.config is invalid: {e}"))?;
+            let sidecars = drivers
+                .set_sidecar_config(driver, name, &config)
+                .map_err(|e| e.to_string())?;
+            Ok(sidecars_result_json(&sidecars))
+        }
+        "set-sidecar-grant" => {
+            let driver = param_str(params, "driver")?;
+            let name = param_str(params, "name")?;
+            let granted = params
+                .get("granted")
+                .and_then(|v| v.as_bool())
+                .ok_or_else(|| "params.granted must be a bool".to_string())?;
+            let sidecars = drivers
+                .set_sidecar_grant(driver, name, granted)
+                .map_err(|e| e.to_string())?;
+            Ok(sidecars_result_json(&sidecars))
+        }
+        "sidecar-control" => {
+            let driver = param_str(params, "driver")?;
+            let name = param_str(params, "name")?;
+            let action = match param_str(params, "action")? {
+                "start" => crate::plugin::SidecarAction::Start,
+                "stop" => crate::plugin::SidecarAction::Stop,
+                "restart" => crate::plugin::SidecarAction::Restart,
+                other => return Err(format!("unknown action: {other}")),
+            };
+            let sidecars = drivers
+                .control_sidecar(driver, name, action)
+                .map_err(|e| e.to_string())?;
+            Ok(sidecars_result_json(&sidecars))
+        }
+        "set-filesystem-config" => {
+            let driver = param_str(params, "driver")?;
+            let name = param_str(params, "name")?;
+            let config: crate::plugin::FilesystemConfig = serde_json::from_value(
+                params
+                    .get("config")
+                    .cloned()
+                    .ok_or_else(|| "params.config must be an object".to_string())?,
+            )
+            .map_err(|e| format!("params.config is invalid: {e}"))?;
+            let roots = drivers
+                .set_filesystem_config(driver, name, &config)
+                .map_err(|e| e.to_string())?;
+            Ok(filesystem_result_json(&roots))
+        }
+        "set-filesystem-grant" => {
+            let driver = param_str(params, "driver")?;
+            let name = param_str(params, "name")?;
+            let granted = params
+                .get("granted")
+                .and_then(|v| v.as_bool())
+                .ok_or_else(|| "params.granted must be a bool".to_string())?;
+            let roots = drivers
+                .set_filesystem_grant(driver, name, granted)
+                .map_err(|e| e.to_string())?;
+            Ok(filesystem_result_json(&roots))
+        }
         other => Err(format!("unknown method: drivers/{other}")),
     }
 }
@@ -869,6 +937,266 @@ mod tests {
         )
         .unwrap();
         assert_eq!(listed_again["drivers"][0]["capabilities"]["granted"], false);
+    }
+
+    /// `drivers/set-sidecar-config` requires `driver`, `name`, and `config`
+    /// (matching `plugins/set-sidecar-config`'s param names exactly, with
+    /// `driver` in place of `plugin`). Missing any one of them must fail
+    /// with the exact same wording `param_str`/the inline `config` check
+    /// produce for the plugin arm.
+    #[test]
+    fn drivers_set_sidecar_config_requires_driver_name_and_config() {
+        let (drivers, _tmp) = crate::driver::registry::tests::test_registry_with_sidecar_and_filesystem();
+
+        let err = handle_rpc_with_drivers(
+            None,
+            Some(&drivers),
+            "drivers/set-sidecar-config",
+            &serde_json::json!({"name": "engine", "config": {"command": "/bin/sh"}}),
+        )
+        .unwrap_err();
+        assert_eq!(err, "params.driver must be a string");
+
+        let err = handle_rpc_with_drivers(
+            None,
+            Some(&drivers),
+            "drivers/set-sidecar-config",
+            &serde_json::json!({"driver": "voice", "config": {"command": "/bin/sh"}}),
+        )
+        .unwrap_err();
+        assert_eq!(err, "params.name must be a string");
+
+        let err = handle_rpc_with_drivers(
+            None,
+            Some(&drivers),
+            "drivers/set-sidecar-config",
+            &serde_json::json!({"driver": "voice", "name": "engine"}),
+        )
+        .unwrap_err();
+        assert_eq!(err, "params.config must be an object");
+    }
+
+    #[test]
+    fn drivers_set_sidecar_grant_requires_driver_name_and_granted() {
+        let (drivers, _tmp) = crate::driver::registry::tests::test_registry_with_sidecar_and_filesystem();
+
+        let err = handle_rpc_with_drivers(
+            None,
+            Some(&drivers),
+            "drivers/set-sidecar-grant",
+            &serde_json::json!({"name": "engine", "granted": true}),
+        )
+        .unwrap_err();
+        assert_eq!(err, "params.driver must be a string");
+
+        let err = handle_rpc_with_drivers(
+            None,
+            Some(&drivers),
+            "drivers/set-sidecar-grant",
+            &serde_json::json!({"driver": "voice", "granted": true}),
+        )
+        .unwrap_err();
+        assert_eq!(err, "params.name must be a string");
+
+        let err = handle_rpc_with_drivers(
+            None,
+            Some(&drivers),
+            "drivers/set-sidecar-grant",
+            &serde_json::json!({"driver": "voice", "name": "engine"}),
+        )
+        .unwrap_err();
+        assert_eq!(err, "params.granted must be a bool");
+    }
+
+    #[test]
+    fn drivers_sidecar_control_requires_driver_name_and_action() {
+        let (drivers, _tmp) = crate::driver::registry::tests::test_registry_with_sidecar_and_filesystem();
+
+        let err = handle_rpc_with_drivers(
+            None,
+            Some(&drivers),
+            "drivers/sidecar-control",
+            &serde_json::json!({"name": "engine", "action": "stop"}),
+        )
+        .unwrap_err();
+        assert_eq!(err, "params.driver must be a string");
+
+        let err = handle_rpc_with_drivers(
+            None,
+            Some(&drivers),
+            "drivers/sidecar-control",
+            &serde_json::json!({"driver": "voice", "action": "stop"}),
+        )
+        .unwrap_err();
+        assert_eq!(err, "params.name must be a string");
+
+        let err = handle_rpc_with_drivers(
+            None,
+            Some(&drivers),
+            "drivers/sidecar-control",
+            &serde_json::json!({"driver": "voice", "name": "engine"}),
+        )
+        .unwrap_err();
+        assert_eq!(err, "params.action must be a string");
+
+        let err = handle_rpc_with_drivers(
+            None,
+            Some(&drivers),
+            "drivers/sidecar-control",
+            &serde_json::json!({"driver": "voice", "name": "engine", "action": "jump"}),
+        )
+        .unwrap_err();
+        assert_eq!(err, "unknown action: jump");
+    }
+
+    #[test]
+    fn drivers_set_filesystem_config_requires_driver_name_and_config() {
+        let (drivers, _tmp) = crate::driver::registry::tests::test_registry_with_sidecar_and_filesystem();
+
+        let err = handle_rpc_with_drivers(
+            None,
+            Some(&drivers),
+            "drivers/set-filesystem-config",
+            &serde_json::json!({"name": "cache", "config": {"path": "/tmp"}}),
+        )
+        .unwrap_err();
+        assert_eq!(err, "params.driver must be a string");
+
+        let err = handle_rpc_with_drivers(
+            None,
+            Some(&drivers),
+            "drivers/set-filesystem-config",
+            &serde_json::json!({"driver": "voice", "config": {"path": "/tmp"}}),
+        )
+        .unwrap_err();
+        assert_eq!(err, "params.name must be a string");
+
+        let err = handle_rpc_with_drivers(
+            None,
+            Some(&drivers),
+            "drivers/set-filesystem-config",
+            &serde_json::json!({"driver": "voice", "name": "cache"}),
+        )
+        .unwrap_err();
+        assert_eq!(err, "params.config must be an object");
+    }
+
+    #[test]
+    fn drivers_set_filesystem_grant_requires_driver_name_and_granted() {
+        let (drivers, _tmp) = crate::driver::registry::tests::test_registry_with_sidecar_and_filesystem();
+
+        let err = handle_rpc_with_drivers(
+            None,
+            Some(&drivers),
+            "drivers/set-filesystem-grant",
+            &serde_json::json!({"name": "cache", "granted": true}),
+        )
+        .unwrap_err();
+        assert_eq!(err, "params.driver must be a string");
+
+        let err = handle_rpc_with_drivers(
+            None,
+            Some(&drivers),
+            "drivers/set-filesystem-grant",
+            &serde_json::json!({"driver": "voice", "granted": true}),
+        )
+        .unwrap_err();
+        assert_eq!(err, "params.name must be a string");
+
+        let err = handle_rpc_with_drivers(
+            None,
+            Some(&drivers),
+            "drivers/set-filesystem-grant",
+            &serde_json::json!({"driver": "voice", "name": "cache"}),
+        )
+        .unwrap_err();
+        assert_eq!(err, "params.granted must be a bool");
+    }
+
+    /// `drivers/set-sidecar-grant` must actually flip the approval and
+    /// return it in the refreshed sidecar array (not just accept the call).
+    /// Configures a real executable first (`drivers/set-sidecar-config`, the
+    /// same round-trip the UI performs), then grants and checks the
+    /// response array directly -- this is the RPC-level counterpart to
+    /// `crate::driver::registry::tests::set_sidecar_config_and_grant_update_the_shared_sidecars_buffer`,
+    /// which checks the underlying shared buffer.
+    #[test]
+    fn drivers_set_sidecar_grant_persists_and_returns_the_full_sidecar_array() {
+        let (drivers, _tmp) = crate::driver::registry::tests::test_registry_with_sidecar_and_filesystem();
+
+        handle_rpc_with_drivers(
+            None,
+            Some(&drivers),
+            "drivers/set-sidecar-config",
+            &serde_json::json!({
+                "driver": "voice",
+                "name": "engine",
+                "config": {"command": "/bin/sh", "args": ["-c", "sleep 30"], "port": 51500, "replicas": 1},
+            }),
+        )
+        .unwrap();
+
+        let result = handle_rpc_with_drivers(
+            None,
+            Some(&drivers),
+            "drivers/set-sidecar-grant",
+            &serde_json::json!({"driver": "voice", "name": "engine", "granted": true}),
+        )
+        .unwrap();
+        assert_eq!(result["sidecars"][0]["name"], "engine");
+        assert_eq!(result["sidecars"][0]["granted"], true);
+        assert_eq!(result["sidecars"][0]["config"]["command"], "/bin/sh");
+    }
+
+    /// `drivers/set-filesystem-grant` must refuse to approve a root that has
+    /// no directory configured, with the exact error the registry produces
+    /// (`RegistryError::Filesystem`'s message) -- this is the negative-test
+    /// the task brief singles out: pin the specific wording so the test
+    /// cannot pass merely because some unrelated validation (e.g. an
+    /// undeclared root) rejected the call first.
+    #[test]
+    fn drivers_set_filesystem_grant_rejects_granting_without_a_configured_path() {
+        let (drivers, _tmp) = crate::driver::registry::tests::test_registry_with_sidecar_and_filesystem();
+
+        let err = handle_rpc_with_drivers(
+            None,
+            Some(&drivers),
+            "drivers/set-filesystem-grant",
+            &serde_json::json!({"driver": "voice", "name": "cache", "granted": true}),
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            "filesystem root cache has no directory configured; cannot grant"
+        );
+    }
+
+    /// `drivers/sidecar-control` `start` must refuse to launch a sidecar
+    /// that has never been granted, even once a `command` is configured.
+    #[test]
+    fn drivers_sidecar_control_rejects_starting_an_ungranted_sidecar() {
+        let (drivers, _tmp) = crate::driver::registry::tests::test_registry_with_sidecar_and_filesystem();
+
+        handle_rpc_with_drivers(
+            None,
+            Some(&drivers),
+            "drivers/set-sidecar-config",
+            &serde_json::json!({
+                "driver": "voice",
+                "name": "engine",
+                "config": {"command": "/bin/sh", "args": ["-c", "sleep 30"], "port": 51500, "replicas": 1},
+            }),
+        )
+        .unwrap();
+
+        let err = handle_rpc_with_drivers(
+            None,
+            Some(&drivers),
+            "drivers/sidecar-control",
+            &serde_json::json!({"driver": "voice", "name": "engine", "action": "start"}),
+        )
+        .unwrap_err();
+        assert_eq!(err, "sidecar engine is not granted");
     }
 }
 
