@@ -60,8 +60,14 @@ WIT パッケージは `edlr:plugin@0.2.0` から **`edlr:plugin@0.3.0`** に上
 import と export が増えるため、**`@0.2.0` でビルド済みの既存プラグインは新しいホストへの
 ロードに失敗する**。全プラグインの再ビルドが必要(`@0.1.0` → `@0.2.0` のときと同じ扱い)。
 
+`bus-error` は関数を持たない `bus-types` interface に切り出す。`bus` や `bus-host` のように
+関数を持つ interface から `use` で型だけを借りると WIT の `use` 意味論上その interface 全体への
+依存になり、`bus-host` だけを import したいはずの `world driver` に `bus` ごと引き込まれて
+ドライバから `bus.publish` を呼べてしまう。それを避けるため、型だけの `bus-types` を両者が
+`use` する形にする。
+
 ```wit
-interface bus {
+interface bus-types {
   variant bus-error {
     permission-denied(string),
     unknown-driver(string),
@@ -70,12 +76,18 @@ interface bus {
     queue-full(string),
     too-large(string),
   }
+}
+
+interface bus {
+  use bus-types.{bus-error};
 
   publish: func(driver: string, topic: string, payload: list<u8>) -> result<_, bus-error>;
   get:     func(driver: string, topic: string) -> result<option<list<u8>>, bus-error>;
 }
 
 interface bus-host {
+  use bus-types.{bus-error};
+
   emit: func(topic: string, payload: list<u8>) -> result<_, bus-error>;
 }
 
