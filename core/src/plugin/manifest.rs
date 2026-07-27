@@ -361,7 +361,7 @@ impl fmt::Display for ManifestError {
 
 impl std::error::Error for ManifestError {}
 
-fn is_valid_id(id: &str) -> bool {
+pub(crate) fn is_valid_id(id: &str) -> bool {
     !id.is_empty()
         && id
             .chars()
@@ -436,7 +436,9 @@ fn reject_invisible_chars(field: &str, s: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn validate_capabilities(capabilities: &mut [CapabilityRequest]) -> Result<(), ManifestError> {
+pub(crate) fn validate_capabilities(
+    capabilities: &mut [CapabilityRequest],
+) -> Result<(), ManifestError> {
     for capability in capabilities.iter_mut() {
         match capability {
             CapabilityRequest::Http { hosts, reason } => {
@@ -471,7 +473,7 @@ fn validate_capabilities(capabilities: &mut [CapabilityRequest]) -> Result<(), M
 /// `[[sidecar]]` を検証・正規化する。`reason` は `capabilities` と同じく
 /// trim して不可視文字を拒否する(承認画面に出る文字列とフィンガープリントの
 /// 元になる文字列を byte 単位で一致させるため)。
-fn validate_sidecars(sidecars: &mut [SidecarRequest]) -> Result<(), ManifestError> {
+pub(crate) fn validate_sidecars(sidecars: &mut [SidecarRequest]) -> Result<(), ManifestError> {
     let mut seen = HashSet::new();
     for sidecar in sidecars.iter_mut() {
         if !is_valid_id(&sidecar.name) {
@@ -508,7 +510,7 @@ fn validate_sidecars(sidecars: &mut [SidecarRequest]) -> Result<(), ManifestErro
     Ok(())
 }
 
-fn validate_filesystem(requests: &mut [FilesystemRequest]) -> Result<(), ManifestError> {
+pub(crate) fn validate_filesystem(requests: &mut [FilesystemRequest]) -> Result<(), ManifestError> {
     let mut seen = HashSet::new();
     for request in requests.iter_mut() {
         if !is_valid_id(&request.name) {
