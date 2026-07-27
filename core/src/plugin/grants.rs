@@ -62,6 +62,10 @@ struct SavedGrant {
     /// 空マップになる。
     #[serde(default)]
     filesystem: std::collections::BTreeMap<String, SavedSidecarGrant>,
+    /// バス接続先のドライバ ID → その 1 件の承認状態。既存(バス導入前)の
+    /// grant ファイルにはこのキーが無いため `default` で空マップになる。
+    #[serde(default)]
+    bus: std::collections::BTreeMap<String, SavedSidecarGrant>,
 }
 
 /// サイドカー 1 件分の保存済み承認状態。
@@ -300,6 +304,80 @@ impl GrantsStore {
         self.write_saved(manifest, &saved)?;
 
         Ok(self.filesystem_state_locked(manifest, name))
+    }
+
+    /// バス接続先のドライバ 1 件の承認状態。判定規則は `state()` と同じ
+    /// (未保存 → 未承認 / fingerprint 不一致 → stale / 一致 → 保存値)。
+    pub fn bus_state(&self, manifest: &Manifest, driver: &str) -> GrantState {
+        let _guard = self.lock.lock().unwrap_or_else(|p| p.into_inner());
+        self.bus_state_locked(manifest, driver)
+    }
+
+    fn bus_state_locked(&self, manifest: &Manifest, driver: &str) -> GrantState {
+        let Some(current) = manifest.bus_fingerprint(driver) else {
+            return GrantState {
+                granted: false,
+                stale: false,
+            };
+        };
+        let Some(saved) = self.read_saved(manifest) else {
+            return GrantState {
+                granted: false,
+                stale: false,
+            };
+        };
+        let Some(entry) = saved.bus.get(driver) else {
+            return GrantState {
+                granted: false,
+                stale: false,
+            };
+        };
+        if entry.fingerprint != current {
+            return GrantState {
+                granted: false,
+                stale: true,
+            };
+        }
+        GrantState {
+            granted: entry.granted,
+            stale: false,
+        }
+    }
+
+    /// バス接続先のドライバ 1 件の承認/取消を保存する。manifest にない
+    /// `driver` は no-op。
+    pub fn set_bus(
+        &self,
+        manifest: &Manifest,
+        driver: &str,
+        granted: bool,
+    ) -> Result<GrantState, GrantsError> {
+        let _guard = self.lock.lock().unwrap_or_else(|p| p.into_inner());
+
+        let Some(current) = manifest.bus_fingerprint(driver) else {
+            return Ok(GrantState {
+                granted: false,
+                stale: false,
+            });
+        };
+
+        let mut saved = self.read_saved(manifest).unwrap_or_default();
+        saved.bus.insert(
+            driver.to_string(),
+            SavedSidecarGrant {
+                granted,
+                fingerprint: current,
+            },
+        );
+        self.write_saved(manifest, &saved)?;
+
+        Ok(self.bus_state_locked(manifest, driver))
+    }
+
+    /// ドライバ用の grants ストア。ID 空間がプラグインと別なので、
+    /// 保存先も `<grants-dir>/drivers/` に分ける。
+    pub fn new_for_drivers(dir: PathBuf) -> GrantsStore {
+        GrantsStore::new(dir.join("drivers"))
     }
 }
 
@@ -817,6 +895,102 @@ mod tests {
                 stale: false
             }
         );
+    }
+
+    fn manifest_with_bus() -> Manifest {
+        Manifest {
+            id: "bus-plugin".into(),
+            name: "Bus Plugin".into(),
+            version: "0.1.0".into(),
+            description: String::new(),
+            entry: "plugin.wasm".into(),
+            events: vec![],
+            settings: vec![],
+            capabilities: vec![],
+            sidecars: vec![],
+            filesystem: vec![],
+            bus: vec![crate::plugin::manifest::BusRequest {
+                driver: "ed-state".into(),
+                publish: vec!["ship-status".into()],
+                subscribe: vec!["current-system".into()],
+                reason: "r".into(),
+            }],
+        }
+    }
+
+    #[test]
+    fn bus_grants_start_ungranted_and_survive_a_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = GrantsStore::new(dir.path().to_path_buf());
+        let manifest = manifest_with_bus();
+
+        assert!(!store.bus_state(&manifest, "ed-state").granted);
+        store.set_bus(&manifest, "ed-state", true).unwrap();
+
+        let reopened = GrantsStore::new(dir.path().to_path_buf());
+        assert!(reopened.bus_state(&manifest, "ed-state").granted);
+    }
+
+    #[test]
+    fn bus_grants_go_stale_when_the_request_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = GrantsStore::new(dir.path().to_path_buf());
+        let manifest = manifest_with_bus();
+        store.set_bus(&manifest, "ed-state", true).unwrap();
+
+        let mut widened = manifest.clone();
+        widened.bus[0].publish.push("another-topic".to_string());
+
+        let state = store.bus_state(&widened, "ed-state");
+        assert!(!state.granted);
+        assert!(state.stale);
+    }
+
+    #[test]
+    fn existing_grant_files_without_a_bus_key_still_load() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("bus-plugin.json"),
+            r#"{"capabilities":{"granted":false}}"#,
+        )
+        .unwrap();
+        let store = GrantsStore::new(dir.path().to_path_buf());
+        assert!(!store.bus_state(&manifest_with_bus(), "ed-state").granted);
+    }
+
+    #[test]
+    fn unknown_bus_driver_is_never_granted() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = GrantsStore::new(tmp.path().join("grants"));
+        let manifest = manifest_with_bus();
+
+        assert_eq!(
+            store.bus_state(&manifest, "nope"),
+            GrantState {
+                granted: false,
+                stale: false
+            }
+        );
+        assert_eq!(
+            store.set_bus(&manifest, "nope", true).unwrap(),
+            GrantState {
+                granted: false,
+                stale: false
+            }
+        );
+    }
+
+    #[test]
+    fn new_for_drivers_uses_a_drivers_subdirectory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = GrantsStore::new_for_drivers(tmp.path().to_path_buf());
+        let manifest = manifest_with_bus();
+
+        // The driver's own manifest id does not matter for this test; what
+        // matters is the file lands under drivers/, not directly under dir.
+        store.set_bus(&manifest, "ed-state", true).unwrap();
+        assert!(tmp.path().join("drivers").join("bus-plugin.json").is_file());
+        assert!(!tmp.path().join("bus-plugin.json").exists());
     }
 
     #[test]
