@@ -24,6 +24,9 @@ manifest and individually approved by the user through the UI.
   by the plugin
 - **Inter-plugin bus** — driver components mediate plugin-to-plugin
   communication through declared, user-approved topics
+- **Scheduling** — plugins declare `[[schedule]]` entries (`interval-seconds`
+  or a 5-field `cron` expression) and get called back through `on-schedule`;
+  `on-stop` gives them a best-effort chance to flush on graceful shutdown
 - **GUI client** — React SPA (Logs / Plugins / Dashboard / Settings) served in
   the browser or wrapped as a Tauri 2 desktop app, talking to the daemon over
   WebSocket
@@ -96,7 +99,7 @@ Documentation under `docs/` is currently written in Japanese.
 ## Status
 
 edlr is under active development and has no stable release yet. The plugin ABI
-(WIT package `edlr:plugin`, currently `@0.3.0`) is still evolving and breaks
+(WIT package `edlr:plugin`, currently `@0.4.0`) is still evolving and breaks
 between versions — plugins must be rebuilt against the current `core/wit` when
 the version bumps.
 
