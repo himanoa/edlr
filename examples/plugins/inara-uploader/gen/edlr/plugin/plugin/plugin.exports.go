@@ -2,7 +2,11 @@
 
 package plugin
 
-// Exports represents the caller-defined exports from "edlr:plugin/plugin@0.2.0".
+import (
+	"go.bytecodealliance.org/cm"
+)
+
+// Exports represents the caller-defined exports from "edlr:plugin/plugin@0.3.0".
 var Exports struct {
 	// Init represents the caller-defined, exported function "init".
 	//
@@ -13,4 +17,9 @@ var Exports struct {
 	//
 	//	on-event: func(ev: event)
 	OnEvent func(ev Event)
+
+	// OnMessage represents the caller-defined, exported function "on-message".
+	//
+	//	on-message: func(driver: string, topic: string, payload: list<u8>)
+	OnMessage func(driver string, topic string, payload cm.List[uint8])
 }

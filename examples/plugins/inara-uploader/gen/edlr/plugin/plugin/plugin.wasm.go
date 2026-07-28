@@ -2,7 +2,11 @@
 
 package plugin
 
-// This file contains wasmimport and wasmexport declarations for "edlr:plugin@0.2.0".
+import (
+	"go.bytecodealliance.org/cm"
+)
+
+// This file contains wasmimport and wasmexport declarations for "edlr:plugin@0.3.0".
 
 //go:wasmexport init
 //export init
@@ -16,5 +20,15 @@ func wasmexport_Init() {
 func wasmexport_OnEvent(ev0 *uint8, ev1 uint32, ev2 uint32, ev3 *uint8, ev4 uint32, ev5 uint32, ev6 *uint8, ev7 uint32, ev8 *uint8, ev9 uint32, ev10 uint32) {
 	ev := lift_Event((*uint8)(ev0), (uint32)(ev1), (uint32)(ev2), (*uint8)(ev3), (uint32)(ev4), (uint32)(ev5), (*uint8)(ev6), (uint32)(ev7), (*uint8)(ev8), (uint32)(ev9), (uint32)(ev10))
 	Exports.OnEvent(ev)
+	return
+}
+
+//go:wasmexport on-message
+//export on-message
+func wasmexport_OnMessage(driver0 *uint8, driver1 uint32, topic0 *uint8, topic1 uint32, payload0 *uint8, payload1 uint32) {
+	driver := cm.LiftString[string]((*uint8)(driver0), (uint32)(driver1))
+	topic := cm.LiftString[string]((*uint8)(topic0), (uint32)(topic1))
+	payload := cm.LiftList[cm.List[uint8]]((*uint8)(payload0), (uint32)(payload1))
+	Exports.OnMessage(driver, topic, payload)
 	return
 }
