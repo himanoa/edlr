@@ -569,6 +569,26 @@ fn validate_bus(requests: &mut [BusRequest]) -> Result<(), ManifestError> {
         for topic in request.publish.iter().chain(request.subscribe.iter()) {
             edlr_driver_channel::topic::validate_name(topic).map_err(ManifestError::BadBus)?;
         }
+        // `[[topics]]`(`crate::driver::manifest::validate_topics`)と同じ
+        // 規律: `publish`/`subscribe` それぞれの中で同じトピック名が重複して
+        // 宣言されているのを許すと、`subscribe = ["a", "a"]` が実際には 2 件の
+        // 購読を作ってしまい、`emit` のたびに `on-event` が 2 回呼ばれ、
+        // プラグインの作業キューを無駄に 2 スロット消費する(Minor: 最終
+        // レビューで見つかった取りこぼし)。
+        for (field, topics) in [
+            ("publish", &request.publish),
+            ("subscribe", &request.subscribe),
+        ] {
+            let mut seen_topics = HashSet::new();
+            for topic in topics {
+                if !seen_topics.insert(topic.as_str()) {
+                    return Err(ManifestError::BadBus(format!(
+                        "duplicate {field} topic for driver {}: {topic}",
+                        request.driver
+                    )));
+                }
+            }
+        }
 
         let trimmed = request.reason.trim().to_string();
         if trimmed.is_empty() {
@@ -1749,6 +1769,57 @@ reason = "two"
         )
         .unwrap();
         assert!(load_manifest(dir.path()).is_err());
+    }
+
+    /// Regression test for a Minor review finding: `validate_bus` rejected
+    /// duplicate `[[bus]]` blocks for the same driver, but not duplicate
+    /// topic names *within* one block's `publish`/`subscribe` list.
+    /// `subscribe = ["a", "a"]` used to be accepted and created two separate
+    /// subscriptions (`crate::driver::manifest::validate_topics` already
+    /// dedupes `[[topics]]` the same way; this brings `[[bus]]` in line).
+    #[test]
+    fn rejects_duplicate_topics_within_one_bus_blocks_publish_or_subscribe() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("manifest.toml"),
+            r#"
+id = "translator"
+name = "Translator"
+version = "0.1.0"
+entry = "plugin.wasm"
+
+[[bus]]
+driver = "ed-state"
+subscribe = ["current-system", "current-system"]
+reason = "duplicate subscribe topic"
+"#,
+        )
+        .unwrap();
+        assert!(
+            load_manifest(dir.path()).is_err(),
+            "a duplicated subscribe topic within one [[bus]] block must be rejected"
+        );
+
+        let dir2 = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir2.path().join("manifest.toml"),
+            r#"
+id = "translator"
+name = "Translator"
+version = "0.1.0"
+entry = "plugin.wasm"
+
+[[bus]]
+driver = "ed-state"
+publish = ["set-system", "set-system"]
+reason = "duplicate publish topic"
+"#,
+        )
+        .unwrap();
+        assert!(
+            load_manifest(dir2.path()).is_err(),
+            "a duplicated publish topic within one [[bus]] block must be rejected"
+        );
     }
 
     #[test]

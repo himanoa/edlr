@@ -221,7 +221,10 @@ async fn main() {
         None => (None, None),
     };
 
-    let state = server::ServerState::new(&router, registry.clone(), drivers);
+    // `drivers` は `ServerState` にも渡すが、shutdown シーケンス(下記)でも
+    // `stop_all_sidecars` を呼ぶために手元に残しておく必要があるので、渡す
+    // のは複製(`DriverRegistry` も `Clone` = 内部は `Arc` 共有で安価)。
+    let state = server::ServerState::new(&router, registry.clone(), drivers.clone());
     tokio::spawn(server::serve(listener, state, args.ui_dir.clone()));
 
     let mut rx = router.subscribe();
@@ -302,5 +305,30 @@ async fn main() {
     if let Some(registry) = registry {
         registry.shutdown_bus_subscribers();
         let _ = tokio::task::spawn_blocking(move || registry.stop_all_sidecars()).await;
+    }
+
+    // **Critical: 最終レビューで見つかった取りこぼし。** 上のプラグイン側
+    // `stop_all_sidecars` だけでは、ドライバのサイドカー(設計書の動機である
+    // VOICEVOX のような合成エンジンそのもの)が孤児として残る -- `registry`
+    // (プラグイン)と `drivers`(`DriverRegistry`)はそれぞれ別の `ProcessDriver`
+    // インスタンス(`PluginHost`/`DriverHost` がそれぞれ own する)を持つ、
+    // 独立したサイドカー集合だからである。デーモンを終了するたびに VOICEVOX
+    // が 1 プロセスずつ増え、次回起動時にポートを取り合って新しいインスタンス
+    // が bind に失敗する、という形で実害が出る(`core/tests/
+    // daemon_signal_shutdown_integration.rs` の
+    // `sigterm_to_daemon_stops_running_driver_sidecars` がこの回帰を防ぐ)。
+    //
+    // ドライバ専用スレッド(`crate::driver::runner::run_driver_thread`)自体を
+    // 明示的に止める必要は無い: プラグインの `spawn_bus_subscriber` と違い、
+    // これは(`tokio::task::spawn_blocking` ではなく)素の `std::thread::spawn`
+    // で動いており、`Runtime::drop` はこのスレッドの完了を待たない。つまり
+    // `for message in messages_rx` で無期限にブロックしたままでもプロセス終了
+    // 自体は妨げない(このスレッドが `Bus::DriverSlot` に居座る送信側のせいで
+    // 自然終了しないのは事実だが、それは shutdown を妨げる要因ではなく、単に
+    // `DriverHost` の `Arc` が最後まで drop されず、その `Drop`(最後の砦の
+    // `stop_all`)が発火しないというだけ -- だからこそ、ここで
+    // `DriverRegistry::stop_all_sidecars` を明示的に呼ぶ必要がある)。
+    if let Some(drivers) = drivers {
+        let _ = tokio::task::spawn_blocking(move || drivers.stop_all_sidecars()).await;
     }
 }

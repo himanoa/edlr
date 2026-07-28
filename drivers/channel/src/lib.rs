@@ -231,6 +231,20 @@ impl Bus {
                     // なら捨てる(publish 方向と非対称。設計書参照)。
                     // 呼び出し側(core)が warn ログを出せるよう、ここでは
                     // 黙って捨てる。
+                    //
+                    // **捨てるのは「今まさに送ろうとしている最新の 1 件」で
+                    // あって、キューに既に並んでいる古い方ではない**
+                    // (Important: 最終レビューで見つかった、README・設計書の
+                    // 記述違い)。`std::sync::mpsc::SyncSender::try_send` は
+                    // `Full` のとき送信しようとした値をそのまま呼び出し元に
+                    // 返すだけで、キューの中身を覗いて古い要素を追い出す API
+                    // ではない -- 実装できるドロップ方向は「送ろうとした値を
+                    // 捨てる(＝最新を捨てる)」の一択で、これはそのまま最も
+                    // 単純な実装になっている。`retain = false` のトピックは
+                    // `get` に読み出しのフォールバックが無いため、詰まった
+                    // 購読プラグインはこの間の更新を(古いものだけでなく)
+                    // 一切受け取れない。詳細は README「キュー方針の非対称」
+                    // 節を参照。
                 }
                 Err(TrySendError::Disconnected(_)) => {
                     stale_indices.push(index);
@@ -375,8 +389,17 @@ mod tests {
         assert_eq!(bus.get("ed-state", "ship-status").unwrap(), None);
     }
 
+    /// **旧名 `emit_drops_the_oldest_delivery_when_a_subscriber_is_full` は
+    /// このテストが実際に確認していることと逆だった**(Important: 最終
+    /// レビューで見つかった README・設計書との記述違い、テスト名も同じ誤りを
+    /// 引きずっていた)。`emit` は `SyncSender::try_send` を使っており、
+    /// `Full` のとき捨てられるのは常に「今まさに送ろうとしている値」
+    /// (= 最新)である -- `try_send` にはキューの中身を覗いて既に並んでいる
+    /// 古い要素を追い出す手段が無い。このテストはそれを実際に確認する:
+    /// 容量 1 のキューに "a" を先に届け、キューが満杯のまま "b" を送ると、
+    /// 受信側に残るのは古い方の "a" であって、新しい "b" ではない。
     #[test]
-    fn emit_drops_the_oldest_delivery_when_a_subscriber_is_full() {
+    fn emit_drops_the_newest_delivery_when_a_subscriber_is_full() {
         let (bus, _rx) = bus_with_driver(4);
         let (tx, drx) = sync_channel::<Delivery>(1);
         bus.subscribe("slow", "ed-state", "current-system", tx);
@@ -386,8 +409,14 @@ mod tests {
         bus.emit("ed-state", "current-system", b"b".to_vec()).unwrap();
 
         assert_eq!(bus.get("ed-state", "current-system").unwrap(), Some(b"b".to_vec()));
-        // 受信側には 1 通しか残っていない(古い方が残るか新しい方かは問わない)。
-        assert!(drx.try_recv().is_ok());
+        // 受信側のキューには、先に届いた古い方の "a" だけが残る -- 満杯時に
+        // 捨てられるのは後から送ろうとした新しい方の "b" である。
+        let delivery = drx.try_recv().expect("the already-queued older delivery must survive");
+        assert_eq!(
+            delivery.payload, b"a".to_vec(),
+            "emit must drop the newest delivery (the one being sent) on a full queue, \
+             not the oldest (the one already queued)"
+        );
         assert!(drx.try_recv().is_err());
     }
 

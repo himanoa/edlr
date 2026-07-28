@@ -45,14 +45,21 @@ function BusEntryCard({
         {/*
           `FilesystemSection` / `SidecarSection` と同じ規律: `checked` は
           サーバから返った `entry.granted` のみで駆動する(楽観的更新をしない)。
-          未解決(`resolved === false`)のときは承認しても意味がないため
-          トグルを無効化する。
+          未解決(`resolved === false`)のときは承認 ON にしても意味がないため
+          トグルを無効化する -- ただし無効化するのは ON にする方向だけ。
+          `resolved` はドライバ全体・トピック全体が揃っているかの all-or-
+          nothing 判定だが、実際の enforcement はトピック単位で行われるため、
+          既に承認済みの接続はドライバ更新で 1 トピックだけ欠けても他の
+          トピックへの publish/subscribe が生き続ける。ここで取消(OFF)まで
+          無効化すると、そのユーザーには「未解決」バッジは見えるのに取消の
+          手段が無くなってしまう(Important: 最終レビューで見つかった
+          取りこぼし)。取消は常に可能にする。
         */}
         <input
           type="checkbox"
           aria-label="このバス接続を承認する"
           checked={entry.granted}
-          disabled={!entry.resolved || saving}
+          disabled={saving || (!entry.granted && !entry.resolved)}
           onChange={(e) => handleGrant(e.target.checked)}
         />
         {saving && (

@@ -301,9 +301,21 @@ fn run_driver_thread(
     };
 
     if let Err(e) = instance.call_init() {
-        let _ = ready_tx.send(DriverState::Disabled {
-            reason: format!("init() failed: {e}"),
-        });
+        let reason = format!("init() failed: {e}");
+        // Minor: 最終レビューで見つかった取りこぼし。`init()` はドライバの
+        // 唯一のセットアップフックであり、ここで trap する前に(ホスト関数
+        // 経由で)サイドカーを起動していた場合、`ready_tx.send` するだけで
+        // 素通りすると誰もそれを止めない -- このスレッドはここで終了し、
+        // `messages_rx` を読むループにも到達しないので、`Disabled` になった
+        // 後にメッセージが来て `set_disabled` が呼ばれる経路も無い。
+        // `registry.set_disabled` はまだ `registry.push` されていない
+        // (`load_and_run_driver` はこのスレッドが `ready_tx.send` で結果を
+        // 返してから `push` する)エントリに対しても、`manifest` 経由で
+        // バス切断・サイドカー停止を必ず行う設計になっている
+        // (`DriverRegistry::set_disabled` のドキュメント参照)ので、ここで
+        // 呼んでも安全かつ十分。
+        registry.set_disabled(&manifest, reason.clone());
+        let _ = ready_tx.send(DriverState::Disabled { reason });
         return;
     }
 

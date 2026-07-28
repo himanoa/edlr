@@ -838,24 +838,67 @@ impl DriverRegistry {
     /// 更新が来ていないだけ」と「もう誰も更新しない」を区別できず、古い
     /// 値を握ったまま動き続けてしまう(fail-open。
     /// `edlr_driver_channel::Bus::disable_driver` のドキュメント参照)。
+    ///
+    /// **状態を `Disabled` にするのを、サイドカーを止めるより先に行う**
+    /// (`crate::plugin::registry::Registry::set_disabled` と同じ順序・同じ
+    /// ロック規律。以前はここが「サイドカーを止める → 最後に `Disabled` を
+    /// 立てる」の順で、しかも `sidecar_runtime_lock_for(id)` を一切取って
+    /// いなかった -- Important: 最終レビューで見つかった取りこぼし)。この順序
+    /// だと、`control_sidecar` の `Start`/`Restart` 分岐(こちらも
+    /// `sidecar_runtime_lock_for(id)` を取ってから `is_disabled` を読む)が
+    /// ちょうど「サイドカー停止が終わった直後・`Disabled` が立つ直前」の窓に
+    /// 割り込むと、まだ `Running` に見える状態を信じてサイドカーを再起動して
+    /// しまい、そのドライバはもう死んでいるので誰にも止められない
+    /// (エンジンプロセスが孤児化する)。`Disabled` を先に立ててから
+    /// `sidecar_runtime_lock_for(id)` を取ってサイドカーを止める(`entries`
+    /// ロック → id 別ロックという既存の取得順序のまま)ことで、
+    /// `control_sidecar` とは常に排他になる: この関数がロックを取った時点で
+    /// 状態は既に `Disabled` に確定しているので、ロック取得後に
+    /// `control_sidecar` が読む状態と競合しない。
     pub fn set_disabled(&self, manifest: &DriverManifest, reason: String) {
         self.bus.disable_driver(&manifest.id);
 
+        {
+            let mut guard = self
+                .entries
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if let Some(entry) = guard
+                .iter_mut()
+                .find(|entry| entry.manifest.id == manifest.id)
+            {
+                entry.state = DriverState::Disabled { reason };
+            }
+        }
+
+        let runtime_lock = self.sidecar_runtime_lock_for(&manifest.id);
+        let _runtime_guard = runtime_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         for sidecar in &manifest.sidecars {
             let key = Self::sidecar_key(&manifest.id, &sidecar.name);
             self.process_driver.stop(&key);
         }
+    }
 
-        let mut guard = self
-            .entries
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if let Some(entry) = guard
-            .iter_mut()
-            .find(|entry| entry.manifest.id == manifest.id)
-        {
-            entry.state = DriverState::Disabled { reason };
-        }
+    /// 全ドライバの全サイドカーインスタンスを停止する(デーモン shutdown 用)。
+    /// `crate::plugin::registry::Registry::stop_all_sidecars` と同じ流儀
+    /// (`ProcessDriver::stop_all` をそのまま呼ぶ薄い入口)。
+    ///
+    /// **Critical: 最終レビューで見つかった取りこぼし**。デーモンの shutdown
+    /// シーケンス(`core/src/bin/edlr.rs`)は、これが追加されるまでプラグイン
+    /// 側の `Registry::stop_all_sidecars` しか呼んでいなかった -- `registry`
+    /// と `drivers` は別々の `Arc` で、`DriverRegistry` は独自の `ProcessDriver`
+    /// (`DriverHost::new` 経由)を持つため、プラグインの停止呼び出しは
+    /// ドライバのサイドカーには一切効かない。`DriverHost` は `Drop` で
+    /// `stop_all` を最後の砦として呼ぶが、`_host: Arc<DriverHost>` は
+    /// `DriverRegistry` 自身と各ドライバ専用スレッドの両方が握っており、後者
+    /// は `for message in messages_rx` でブロックし続けて(`Bus::DriverSlot`
+    /// が `SyncSender<Message>` を送信側として保持し続ける限り自然終了しない)
+    /// 決して drop されないので、その `Drop` は実質発火しない。だからこそ
+    /// ここで明示的に呼ぶ必要がある。
+    pub fn stop_all_sidecars(&self) {
+        self.process_driver.stop_all();
     }
 }
 
@@ -1068,6 +1111,251 @@ pub(crate) mod tests {
             registry.list()[0].state,
             DriverState::Disabled { .. }
         ));
+    }
+
+    /// Regression test for Minor finding 10: `run_driver_thread` used to
+    /// return on a `call_init()` error without calling `registry.set_disabled`
+    /// at all, so a driver whose `init()` starts a sidecar and then traps
+    /// left that sidecar running forever (nothing else would ever call
+    /// `set_disabled` for it, since the thread exits before reaching the
+    /// `messages_rx` loop that's the only other place that calls it).
+    ///
+    /// This test exercises the exact race window `run_driver_thread`'s fix
+    /// relies on directly at the `DriverRegistry` level (without going
+    /// through real wasm): a sidecar is started for a manifest whose
+    /// `DriverEntry` has **not** been pushed yet (mirroring "trapped during
+    /// `init`, before `load_and_run_driver`'s `registry.push`"), and
+    /// `set_disabled` must still stop it -- this is the same guarantee
+    /// `set_disabled_disconnects_the_bus_slot_even_before_the_entry_is_pushed`
+    /// pins for the bus slot, combined with the sidecar-stop assertion from
+    /// `set_disabled_stops_all_sidecars_of_that_driver` above, which that
+    /// other test's zero-sidecar fixture couldn't exercise together.
+    #[test]
+    fn set_disabled_stops_a_sidecar_started_during_init_before_the_entry_is_ever_pushed() {
+        let manifest = manifest_with_sidecar("init-trap-driver", 50943);
+        let bus = edlr_driver_channel::Bus::new();
+        let (tx, _rx) = std::sync::mpsc::sync_channel(4);
+        bus.register_driver(&manifest.id, manifest.topics.clone(), tx);
+
+        let registry = bare_registry(bus);
+        // Deliberately no `registry.push(..)`: as in `run_driver_thread`,
+        // `call_init` traps before the entry ever lands in the registry.
+
+        let key = DriverRegistry::sidecar_key("init-trap-driver", "tts");
+        let spec = ProcessSpec {
+            command: PathBuf::from("/bin/sh"),
+            args: vec!["-c".into(), "sleep 30".into()],
+            ports: vec![50943],
+        };
+        registry
+            .process_driver
+            .ensure_started(&key, &spec)
+            .expect("simulate init() starting a sidecar directly via the driver, bypassing wasm");
+        assert!(
+            registry.process_driver.status(&key, &spec)[0].running,
+            "sidecar should be running before the simulated init() failure"
+        );
+
+        registry.set_disabled(&manifest, "init() failed: boom".to_string());
+
+        assert!(
+            !registry.process_driver.status(&key, &spec)[0].running,
+            "set_disabled must stop a sidecar started during init(), even though the \
+             DriverEntry was never pushed (the trap-before-push race)"
+        );
+    }
+
+    /// Regression test mirroring
+    /// `crate::plugin::registry::tests::control_sidecar_rejects_start_and_restart_once_the_plugin_is_disabled_but_allows_stop`.
+    /// `control_sidecar` already checks `is_disabled`, so this passed before
+    /// the `set_disabled` ordering fix too -- it pins the sequential
+    /// (non-racing) case as a baseline alongside the concurrent regression
+    /// test below.
+    #[test]
+    fn control_sidecar_rejects_start_and_restart_once_the_driver_is_disabled_but_allows_stop() {
+        let manifest = manifest_with_sidecar("sc-driver2", 50941);
+        let bus = edlr_driver_channel::Bus::new();
+        let (tx, _rx) = std::sync::mpsc::sync_channel(4);
+        bus.register_driver(&manifest.id, manifest.topics.clone(), tx);
+
+        let registry = bare_registry(bus);
+        registry.push(DriverEntry {
+            manifest: manifest.clone(),
+            state: DriverState::Running,
+            settings_json: Arc::new(Mutex::new("{}".to_string())),
+            capabilities_json: Arc::new(Mutex::new(r#"{"hosts":[]}"#.to_string())),
+            sidecars_json: Arc::new(Mutex::new("[]".to_string())),
+            filesystem_json: Arc::new(Mutex::new("[]".to_string())),
+        });
+        let settings_manifest = manifest.as_settings_manifest();
+        registry
+            .grants_store
+            .set_sidecar(&settings_manifest, "tts", true)
+            .expect("grant should persist");
+        registry
+            .sidecar_config_store
+            .update_and_effective(
+                &settings_manifest,
+                "tts",
+                &SidecarConfig {
+                    command: "/bin/sh".to_string(),
+                    args: vec!["-c".to_string(), "sleep 30".to_string()],
+                    port: 50941,
+                    replicas: 1,
+                },
+            )
+            .expect("config should persist");
+
+        registry.set_disabled(&manifest, "on-message call failed".to_string());
+
+        match registry.control_sidecar("sc-driver2", "tts", SidecarAction::Start) {
+            Err(RegistryError::Sidecar(_)) => {}
+            Err(other) => panic!(
+                "Start on a disabled driver's sidecar must be rejected as RegistryError::Sidecar, got {other}"
+            ),
+            Ok(_) => panic!(
+                "Start on a disabled driver's sidecar must be rejected as RegistryError::Sidecar"
+            ),
+        }
+        match registry.control_sidecar("sc-driver2", "tts", SidecarAction::Restart) {
+            Err(RegistryError::Sidecar(_)) => {}
+            Err(other) => panic!(
+                "Restart on a disabled driver's sidecar must be rejected as RegistryError::Sidecar, got {other}"
+            ),
+            Ok(_) => panic!(
+                "Restart on a disabled driver's sidecar must be rejected as RegistryError::Sidecar"
+            ),
+        }
+
+        let key = DriverRegistry::sidecar_key("sc-driver2", "tts");
+        let spec = ProcessSpec {
+            command: PathBuf::from("/bin/sh"),
+            args: vec!["-c".to_string(), "sleep 30".to_string()],
+            ports: vec![50941],
+        };
+        assert!(
+            !registry.process_driver.status(&key, &spec)[0].running,
+            "rejected Start/Restart must not have spawned anything"
+        );
+
+        registry
+            .control_sidecar("sc-driver2", "tts", SidecarAction::Stop)
+            .expect("Stop must never be blocked by the driver's disabled state");
+    }
+
+    /// **Regression test for Important finding 2 from the final review**:
+    /// `DriverRegistry::set_disabled` used to stop sidecars *before* marking
+    /// the driver `Disabled`, and never took `sidecar_runtime_lock_for(id)` at
+    /// all -- unlike `control_sidecar`'s `Start`/`Restart` branch, which takes
+    /// that per-id lock and then reads `is_disabled`. That left a window: a
+    /// trapping driver's `set_disabled` could finish stopping the sidecar,
+    /// and *before* it flipped the state to `Disabled`, a concurrent
+    /// `control_sidecar(Start)` could read `is_disabled() == false`, see a
+    /// live grant, and spawn the sidecar right back -- with nothing left
+    /// alive to ever stop it again, since the driver is dead.
+    ///
+    /// This hammers that exact race: many threads call `control_sidecar`
+    /// `Start` in a tight loop while another thread calls `set_disabled`
+    /// once, partway through. The invariant that must hold once everything
+    /// settles: if the driver ends up `Disabled`, its sidecar must not be
+    /// left running. On the pre-fix code (stop-then-mark, no lock) this is
+    /// reliably violated within a handful of iterations; on the fixed code
+    /// (mark-then-lock-then-stop, same order/locking as the plugin registry)
+    /// the two operations can no longer interleave.
+    #[test]
+    fn concurrent_set_disabled_and_control_sidecar_start_never_leaves_a_disabled_driver_with_a_running_sidecar(
+    ) {
+        let manifest = manifest_with_sidecar("race-driver", 50942);
+        let bus = edlr_driver_channel::Bus::new();
+        let (tx, _rx) = std::sync::mpsc::sync_channel(4);
+        bus.register_driver(&manifest.id, manifest.topics.clone(), tx);
+
+        let registry = bare_registry(bus);
+        registry.push(DriverEntry {
+            manifest: manifest.clone(),
+            state: DriverState::Running,
+            settings_json: Arc::new(Mutex::new("{}".to_string())),
+            capabilities_json: Arc::new(Mutex::new(r#"{"hosts":[]}"#.to_string())),
+            sidecars_json: Arc::new(Mutex::new("[]".to_string())),
+            filesystem_json: Arc::new(Mutex::new("[]".to_string())),
+        });
+        let settings_manifest = manifest.as_settings_manifest();
+        registry
+            .grants_store
+            .set_sidecar(&settings_manifest, "tts", true)
+            .expect("grant should persist");
+        registry
+            .sidecar_config_store
+            .update_and_effective(
+                &settings_manifest,
+                "tts",
+                &SidecarConfig {
+                    command: "/bin/sh".to_string(),
+                    args: vec!["-c".to_string(), "sleep 30".to_string()],
+                    port: 50942,
+                    replicas: 1,
+                },
+            )
+            .expect("config should persist");
+
+        const THREADS: usize = 48;
+        const ITERATIONS: usize = 1500;
+        let barrier = Arc::new(std::sync::Barrier::new(THREADS + 1));
+
+        let mut handles = Vec::new();
+        for _ in 0..THREADS {
+            let registry = registry.clone();
+            let barrier = barrier.clone();
+            handles.push(thread::spawn(move || {
+                barrier.wait();
+                for _ in 0..ITERATIONS {
+                    let _ = registry.control_sidecar("race-driver", "tts", SidecarAction::Start);
+                }
+            }));
+        }
+        let disabler = {
+            let registry = registry.clone();
+            let manifest = manifest.clone();
+            let barrier = barrier.clone();
+            thread::spawn(move || {
+                // Deliberately no delay: releasing at the same barrier as the
+                // hammering threads maximizes overlap between `set_disabled`
+                // and the very first burst of concurrent `ensure_started`
+                // spawns, which is where the pre-fix race is easiest to hit
+                // (a `Start` that reads `is_disabled() == false` and only
+                // finishes spawning *after* `set_disabled`'s one-shot `stop`
+                // call has already run and found nothing to stop).
+                barrier.wait();
+                registry.set_disabled(&manifest, "on-message call failed".to_string());
+            })
+        };
+
+        for handle in handles {
+            handle.join().expect("worker thread should not panic");
+        }
+        disabler.join().expect("disabler thread should not panic");
+
+        let key = DriverRegistry::sidecar_key("race-driver", "tts");
+        let spec = ProcessSpec {
+            command: PathBuf::from("/bin/sh"),
+            args: vec!["-c".to_string(), "sleep 30".to_string()],
+            ports: vec![50942],
+        };
+        let running = registry
+            .process_driver
+            .status(&key, &spec)
+            .iter()
+            .any(|i| i.running);
+        let disabled = matches!(registry.list()[0].state, DriverState::Disabled { .. });
+
+        assert!(disabled, "set_disabled must have completed by the time all threads joined");
+        assert!(
+            !running,
+            "a driver left Disabled must not have a sidecar running behind it -- \
+             a concurrent Start read a not-yet-disabled state and spawned it back"
+        );
+
+        registry.process_driver.stop(&key);
     }
 
     /// Builds an empty `DriverRegistry` (no `DriverEntry` pushed) wired to

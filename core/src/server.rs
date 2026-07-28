@@ -326,19 +326,36 @@ fn handle_drivers_rpc(
     match method {
         "list" => Ok(serde_json::json!({
             "driversDir": drivers.drivers_dir().to_string_lossy(),
-            "drivers": drivers.list().into_iter().map(|info| serde_json::json!({
-                "id": info.manifest.id,
-                "name": info.manifest.name,
-                "version": info.manifest.version,
-                "description": info.manifest.description,
-                "topics": info.manifest.topics,
-                "settings": info.manifest.settings,
-                "values": info.values,
-                "capabilities": capabilities_result_json(&info.manifest.capabilities, &info.grant_state),
-                "sidecars": sidecars_result_json(&info.sidecars)["sidecars"],
-                "filesystem": filesystem_result_json(&info.filesystem)["roots"],
-                "state": match info.state { DriverState::Running => "running", _ => "disabled" },
-            })).collect::<Vec<_>>(),
+            "drivers": drivers.list().into_iter().map(|info| {
+                let mut value = serde_json::json!({
+                    "id": info.manifest.id,
+                    "name": info.manifest.name,
+                    "version": info.manifest.version,
+                    "description": info.manifest.description,
+                    "topics": info.manifest.topics,
+                    "settings": info.manifest.settings,
+                    "values": info.values,
+                    "capabilities": capabilities_result_json(&info.manifest.capabilities, &info.grant_state),
+                    "sidecars": sidecars_result_json(&info.sidecars)["sidecars"],
+                    "filesystem": filesystem_result_json(&info.filesystem)["roots"],
+                });
+                // `plugins/list` と同じ流儀: `reason` は `Disabled` のときだけ
+                // 載せる(`ui/frontend/src/types/plugin.ts` の `reason?: string`、
+                // `Drivers.tsx` の「無効: {driver.reason}」表示が診断情報を
+                // 拾えるように -- 最終レビューで見つかった Minor な取りこぼし。
+                // 以前はここで `state` を文字列に潰すだけで `reason` を運んで
+                // いなかった)。
+                match info.state {
+                    DriverState::Running => {
+                        value["state"] = serde_json::json!("running");
+                    }
+                    DriverState::Disabled { reason } => {
+                        value["state"] = serde_json::json!("disabled");
+                        value["reason"] = serde_json::json!(reason);
+                    }
+                }
+                value
+            }).collect::<Vec<_>>(),
         })),
         "get-settings" => {
             let driver = param_str(params, "driver")?;
@@ -727,6 +744,51 @@ mod tests {
         assert_eq!(result["drivers"][0]["id"], "ed-state");
         assert_eq!(result["drivers"][0]["topics"][0]["name"], "current-system");
         assert_eq!(result["drivers"][0]["topics"][0]["retain"], true);
+    }
+
+    /// Regression test for a Minor review finding: `drivers/list` used to
+    /// collapse `DriverState::Disabled { reason }` down to the bare string
+    /// `"disabled"`, dropping `reason` entirely -- unlike `plugins/list`,
+    /// which has always carried it. `ui/frontend/src/types/plugin.ts`
+    /// declares `reason?: string` and `Drivers.tsx` renders
+    /// `無効: {driver.reason}`, so a driver that failed to load showed a bare
+    /// "無効" with no diagnostic. `drivers/list` must now carry `reason` too,
+    /// mirroring `plugins/list`.
+    #[test]
+    fn drivers_list_carries_the_disabled_reason() {
+        let bus = edlr_driver_channel::Bus::new();
+        let drivers = crate::driver::registry::tests::test_registry_without_ed_state(bus);
+        drivers.push(crate::driver::registry::DriverEntry {
+            manifest: crate::driver::manifest::DriverManifest {
+                id: "broken-driver".into(),
+                name: "Broken Driver".into(),
+                version: "0.1.0".into(),
+                description: String::new(),
+                entry: "driver.wasm".into(),
+                topics: Vec::new(),
+                settings: Vec::new(),
+                capabilities: Vec::new(),
+                sidecars: Vec::new(),
+                filesystem: Vec::new(),
+            },
+            state: crate::driver::DriverState::Disabled {
+                reason: "init() failed: boom".to_string(),
+            },
+            settings_json: std::sync::Arc::new(std::sync::Mutex::new("{}".to_string())),
+            capabilities_json: std::sync::Arc::new(std::sync::Mutex::new(
+                r#"{"hosts":[]}"#.to_string(),
+            )),
+            sidecars_json: std::sync::Arc::new(std::sync::Mutex::new("[]".to_string())),
+            filesystem_json: std::sync::Arc::new(std::sync::Mutex::new("[]".to_string())),
+        });
+
+        let result = handle_drivers_rpc(&drivers, "list", &serde_json::json!({})).unwrap();
+        let entry = &result["drivers"][0];
+        assert_eq!(entry["state"], "disabled");
+        assert_eq!(
+            entry["reason"], "init() failed: boom",
+            "drivers/list must carry the disabled reason like plugins/list does"
+        );
     }
 
     #[test]

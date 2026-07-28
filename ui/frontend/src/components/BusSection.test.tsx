@@ -56,4 +56,38 @@ describe("BusSection", () => {
     await userEvent.click(screen.getByRole("checkbox"));
     expect(onSetGrant).toHaveBeenCalledWith("translator", "ed-state", true);
   });
+
+  it("disables the toggle for an unresolved, ungranted entry (cannot turn it on)", () => {
+    render(
+      <BusSection
+        pluginId="translator"
+        bus={[{ ...base, resolved: false, granted: false }]}
+        onSetGrant={vi.fn()}
+      />,
+    );
+    expect(screen.getByRole("checkbox")).toBeDisabled();
+  });
+
+  // Regression test for an Important review finding: `resolved` is an
+  // all-or-nothing flag (false if the driver is missing OR any one
+  // declared topic is absent), but enforcement is per-topic -- a granted
+  // plugin keeps publishing/subscribing on the topics that still exist. A
+  // driver upgrade that drops one topic used to leave the user with the
+  // "未解決" badge and no way to revoke, because the checkbox was disabled
+  // whenever `!entry.resolved`, with no exception for turning it off. The
+  // toggle must stay enabled for revocation even when unresolved.
+  it("keeps the toggle enabled to revoke an already-granted entry even when it becomes unresolved", async () => {
+    const onSetGrant = vi.fn();
+    render(
+      <BusSection
+        pluginId="translator"
+        bus={[{ ...base, resolved: false, granted: true }]}
+        onSetGrant={onSetGrant}
+      />,
+    );
+    const checkbox = screen.getByRole("checkbox");
+    expect(checkbox).not.toBeDisabled();
+    await userEvent.click(checkbox);
+    expect(onSetGrant).toHaveBeenCalledWith("translator", "ed-state", false);
+  });
 });
