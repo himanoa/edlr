@@ -189,6 +189,38 @@ func (u *Uploader) shouldFlush(cfg settings.Settings, flushLive, backlogTransiti
 	return u.queue.len() >= batch && u.intervalElapsed(cfg)
 }
 
+// HandleSchedule は manifest の `[[schedule]]` (name = "flush") から呼ばれる。
+// minIntervalSeconds を尊重するので、直近のイベントで送り切れなかった端数を
+// 定期的に拾い上げる役割になる。
+func (u *Uploader) HandleSchedule(cfg settings.Settings) Outcome {
+	if !cfg.Enabled {
+		return Outcome{}
+	}
+
+	var out Outcome
+	if u.queue.len() > 0 && u.intervalElapsed(cfg) {
+		u.flush(cfg, &out)
+	}
+	out.Pending = u.queue.len()
+	return out
+}
+
+// HandleStop はデーモンの graceful shutdown (`on-stop`) から呼ばれる。次の
+// イベントはもう来ないので、minIntervalSeconds を無視して最後の機会として
+// 無条件にフラッシュする。
+func (u *Uploader) HandleStop(cfg settings.Settings) Outcome {
+	if !cfg.Enabled {
+		return Outcome{}
+	}
+
+	var out Outcome
+	if u.queue.len() > 0 {
+		u.flush(cfg, &out)
+	}
+	out.Pending = u.queue.len()
+	return out
+}
+
 // intervalElapsed は前回のフラッシュ試行から minIntervalSeconds 経ったか。
 // INARA は高頻度の送信を控えるよう求めている。
 func (u *Uploader) intervalElapsed(cfg settings.Settings) bool {

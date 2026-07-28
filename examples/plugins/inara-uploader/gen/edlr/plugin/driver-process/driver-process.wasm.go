@@ -6,16 +6,16 @@ import (
 	"go.bytecodealliance.org/cm"
 )
 
-// This file contains wasmimport and wasmexport declarations for "edlr:plugin@0.3.0".
+// This file contains wasmimport and wasmexport declarations for "edlr:plugin@0.4.0".
 
-//go:wasmimport edlr:plugin/driver-process@0.3.0 ensure-started
+//go:wasmimport edlr:plugin/driver-process@0.4.0 ensure-started
 //go:noescape
 func wasmimport_EnsureStarted(name0 *uint8, name1 uint32, result *cm.Result[DriverErrorShape, cm.List[Instance], DriverError])
 
-//go:wasmimport edlr:plugin/driver-process@0.3.0 stop
+//go:wasmimport edlr:plugin/driver-process@0.4.0 stop
 //go:noescape
 func wasmimport_Stop(name0 *uint8, name1 uint32, result *cm.Result[DriverError, struct{}, DriverError])
 
-//go:wasmimport edlr:plugin/driver-process@0.3.0 status
+//go:wasmimport edlr:plugin/driver-process@0.4.0 status
 //go:noescape
 func wasmimport_Status(name0 *uint8, name1 uint32, result *cm.Result[DriverErrorShape, cm.List[Instance], DriverError])
