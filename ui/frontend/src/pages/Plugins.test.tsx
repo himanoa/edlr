@@ -391,18 +391,12 @@ test("toggling dashboard approval calls setDashboardGrant and replaces the dashb
 });
 
 test("shows the schedules section with name, spec, and next time for a plugin that declares schedules", async () => {
-  // `next` を表示側と同じロジック(`Date` のローカル時刻)で `HH:MM` に整形して
-  // 期待値を作る -- テスト実行環境のタイムゾーンに依存させないため
-  // (`next` 自体はサーバがローカル時刻で返す ISO8601 文字列)。
+  // `next` の整形そのもの(相対表記・日付の併記・フォールバック)は
+  // `ScheduleSection.test.tsx` の単体テストの担当。ここは Plugins ページが
+  // スケジュール一覧を配線しているかだけを見るので、実行時刻に依存しない
+  // 名前と spec を確認する。
   const flushNext = "2026-07-28T09:00:00+09:00";
   const dailyNext = "2026-07-29T21:30:00+09:00";
-  const formatHHMM = (iso: string) => {
-    const date = new Date(iso);
-    return `${date.getHours().toString().padStart(2, "0")}:${date
-      .getMinutes()
-      .toString()
-      .padStart(2, "0")}`;
-  };
   const plugin = makePlugin({
     schedules: [
       makeSchedule({ name: "flush", spec: "every 60s", next: flushNext }),
@@ -413,12 +407,8 @@ test("shows the schedules section with name, spec, and next time for a plugin th
 
   render(<Plugins />);
 
-  expect(
-    await screen.findByText(`flush — every 60s (next ${formatHHMM(flushNext)})`),
-  ).toBeInTheDocument();
-  expect(
-    await screen.findByText(`daily — cron: 0 9 * * * (next ${formatHHMM(dailyNext)})`),
-  ).toBeInTheDocument();
+  expect(await screen.findByText(/flush — every 60s \(next .+\)/)).toBeInTheDocument();
+  expect(await screen.findByText(/daily — cron: 0 9 \* \* \* \(next .+\)/)).toBeInTheDocument();
 });
 
 test("hides the schedules section when a plugin declares no schedules", async () => {
