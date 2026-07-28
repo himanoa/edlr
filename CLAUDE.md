@@ -19,3 +19,7 @@
 3. sccache は `~/.cargo/config.toml` でグローバルに有効
    (`rustc-wrapper` + `incremental = false`)。sccache はインクリメンタル
    ビルドをキャッシュできないため、incremental を戻さないこと。
+
+## Issue管理
+
+Issue管理はGitHubではなく git issues のスキルを使ってIssueの作成と閲覧、検索を行うこと
