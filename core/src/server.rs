@@ -626,9 +626,92 @@ fn filesystem_result_json(roots: &[crate::plugin::FilesystemInfo]) -> serde_json
     serde_json::json!({ "roots": items })
 }
 
+/// ダッシュボードウィジェット向け SDK。`include_str!` でバイナリに埋め込み、
+/// デーモン単体で(プラグイン側に SDK を同梱させずに)配信する。
+const PLUGIN_UI_SDK: &str = include_str!("plugin_ui_sdk.js");
+
+/// ウィジェットアセットに付ける CSP。外部ネットワークへのサブリソース
+/// 読み込み・fetch を遮断し、自ウィジェットのアセット(相対パス = この
+/// デーモンのオリジン)のみ許可する。iframe 側は opaque origin
+/// (sandbox="allow-scripts")だが、CSP の 'self' はドキュメント URL の
+/// オリジンを指すため、相対パスのサブリソースは通る。
+const WIDGET_CSP: &str = "default-src 'none'; script-src 'self' 'unsafe-inline'; \
+     style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'none'";
+
+/// 拡張子ベースの Content-Type。ウィジェットアセットは信頼済みインストール
+/// 物なので sniffing 対策よりも単純さを優先し、未知の拡張子は
+/// octet-stream に倒す。
+fn content_type_for(path: &std::path::Path) -> &'static str {
+    match path.extension().and_then(|e| e.to_str()) {
+        Some("html") => "text/html; charset=utf-8",
+        Some("js") => "text/javascript; charset=utf-8",
+        Some("css") => "text/css; charset=utf-8",
+        Some("json") => "application/json",
+        Some("svg") => "image/svg+xml",
+        Some("png") => "image/png",
+        Some("jpg") | Some("jpeg") => "image/jpeg",
+        Some("gif") => "image/gif",
+        Some("webp") => "image/webp",
+        Some("woff2") => "font/woff2",
+        _ => "application/octet-stream",
+    }
+}
+
+/// `GET /plugin-ui/{plugin}/{widget}/{*path}`。
+///
+/// grant チェック・トラバーサル拒否は `Registry::dashboard_asset_path`
+/// (単体テスト済み)に集約してあり、HTTP 層は「失敗はすべて 404」に潰す
+/// だけ。存在の有無・承認の有無を区別したステータスを返さないのは意図的
+/// (未承認の外部者にウィジェット構成を探索させない)。
+async fn plugin_ui_handler(
+    axum::extract::State(state): axum::extract::State<ServerState>,
+    axum::extract::Path((plugin, widget, path)): axum::extract::Path<(String, String, String)>,
+) -> axum::response::Response {
+    use axum::http::{header, StatusCode};
+    use axum::response::IntoResponse;
+    let Some(registry) = state.registry.clone() else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    // ファイル IO はブロッキングなので spawn_blocking に逃がす。
+    let result = tokio::task::spawn_blocking(move || {
+        let file = registry.dashboard_asset_path(&plugin, &widget, &path)?;
+        std::fs::read(&file)
+            .map(|bytes| (bytes, content_type_for(&file)))
+            .map_err(|_| crate::plugin::registry::RegistryError::UnknownDashboard(widget))
+    })
+    .await;
+    match result {
+        Ok(Ok((bytes, content_type))) => (
+            StatusCode::OK,
+            [
+                (header::CONTENT_TYPE, content_type),
+                (header::CONTENT_SECURITY_POLICY, WIDGET_CSP),
+            ],
+            bytes,
+        )
+            .into_response(),
+        _ => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+async fn plugin_ui_sdk_handler() -> impl axum::response::IntoResponse {
+    (
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/javascript; charset=utf-8",
+        )],
+        PLUGIN_UI_SDK,
+    )
+}
+
 pub fn app(state: ServerState, ui_dir: Option<PathBuf>) -> axum::Router {
     let mut app = axum::Router::new()
         .route("/ws", get(ws_handler))
+        .route("/plugin-ui-sdk.js", get(plugin_ui_sdk_handler))
+        .route(
+            "/plugin-ui/{plugin}/{widget}/{*path}",
+            get(plugin_ui_handler),
+        )
         .with_state(state);
     if let Some(dir) = ui_dir {
         let index = dir.join("index.html");
@@ -995,6 +1078,91 @@ mod tests {
         )
         .unwrap();
         assert_eq!(listed["plugins"][0]["bus"][0]["granted"], true);
+    }
+
+    #[tokio::test]
+    async fn plugin_ui_serves_granted_assets_with_csp_and_404s_everything_else() {
+        use tower::ServiceExt;
+        let (registry, tmp) = crate::plugin::registry::tests::test_registry_with_dashboard();
+        let ui_dir = tmp.path().join("plugins").join("widgety").join("ui");
+        std::fs::create_dir_all(&ui_dir).unwrap();
+        std::fs::write(ui_dir.join("index.html"), "<html>w</html>").unwrap();
+
+        let router = crate::router::Router::new(8);
+        let state = ServerState::new(&router, Some(registry.clone()), None);
+        let app = app(state, None);
+
+        let get = |uri: &str| {
+            axum::http::Request::builder()
+                .uri(uri)
+                .body(axum::body::Body::empty())
+                .unwrap()
+        };
+
+        // 未 grant → 404
+        let res = app
+            .clone()
+            .oneshot(get("/plugin-ui/widgety/status/index.html"))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), axum::http::StatusCode::NOT_FOUND);
+
+        registry.set_dashboard_grant("widgety", "status", true).unwrap();
+
+        // grant 済み → 200 + CSP + Content-Type
+        let res = app
+            .clone()
+            .oneshot(get("/plugin-ui/widgety/status/index.html"))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), axum::http::StatusCode::OK);
+        let csp = res
+            .headers()
+            .get("content-security-policy")
+            .expect("csp header present")
+            .to_str()
+            .unwrap();
+        assert!(csp.contains("default-src 'none'"));
+        assert!(res
+            .headers()
+            .get("content-type")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .contains("text/html"));
+
+        // トラバーサル(URL エンコード済み ..)→ 404
+        let res = app
+            .clone()
+            .oneshot(get("/plugin-ui/widgety/status/..%2Fmanifest.toml"))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), axum::http::StatusCode::NOT_FOUND);
+        // 不在ファイル → 404
+        let res = app
+            .clone()
+            .oneshot(get("/plugin-ui/widgety/status/nope.js"))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), axum::http::StatusCode::NOT_FOUND);
+        // 未知プラグイン → 404
+        let res = app
+            .clone()
+            .oneshot(get("/plugin-ui/nope/status/index.html"))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), axum::http::StatusCode::NOT_FOUND);
+
+        // SDK は grant 不要で配信
+        let res = app.clone().oneshot(get("/plugin-ui-sdk.js")).await.unwrap();
+        assert_eq!(res.status(), axum::http::StatusCode::OK);
+        assert!(res
+            .headers()
+            .get("content-type")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .contains("javascript"));
     }
 
     #[test]
