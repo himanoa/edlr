@@ -1,10 +1,10 @@
 ---
 id: schedulesection-xv4e
 title: ScheduleSectionだけテストファイルが無い
-status: open
+status: closed
 labels: frontend, test
 created: 2026-07-28T15:07:27Z
-updated: 2026-07-28T15:09:15Z
+updated: 2026-07-28T15:49:18Z
 ---
 
 ## 問題
