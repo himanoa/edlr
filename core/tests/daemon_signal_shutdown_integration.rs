@@ -136,7 +136,16 @@ async fn call(ws: &mut Ws, id: i64, method: &str, params: serde_json::Value) -> 
     ws.send(Message::Text(msg.to_string().into()))
         .await
         .unwrap();
-    let resp = recv_json(ws).await;
+    // WS ストリームにはイベントフレーム(journal/status に加え、デーモンの
+    // tracing ログ `kind:"log"` も)がいつでも交ざりうる。RPC 応答
+    // (`rpc-result`/`rpc-error`)以外は読み飛ばす。
+    let resp = loop {
+        let msg = recv_json(ws).await;
+        match msg["type"].as_str() {
+            Some("rpc-result") | Some("rpc-error") => break msg,
+            _ => continue,
+        }
+    };
     assert_eq!(resp["id"], id);
     assert_eq!(
         resp["type"], "rpc-result",
