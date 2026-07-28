@@ -40,6 +40,8 @@ var up *uploader.Uploader
 func init() {
 	plugin.Exports.Init = onInit
 	plugin.Exports.OnEvent = onEvent
+	plugin.Exports.OnSchedule = onSchedule
+	plugin.Exports.OnStop = onStop
 }
 
 // main は TinyGo が component をビルドするために必要。エントリポイントとしては
@@ -60,6 +62,29 @@ func onEvent(ev plugin.Event) {
 		Payload:   ev.PayloadJSON,
 		Replay:    ev.Replay,
 	}))
+}
+
+// onSchedule は manifest の `[[schedule]]` から呼ばれる。このプラグインが
+// 宣言しているスケジュールは "flush" 1 つだけなので、name はそれ以外を
+// 無視するためだけに見る(将来 2 つ目のスケジュールを足したら、ここで
+// 分岐する必要がある)。
+//
+// minIntervalSeconds を尊重した定期フラッシュで、直近のイベントで送り
+// 切れなかった端数を拾い上げる。
+func onSchedule(name string) {
+	if name != "flush" {
+		logf(hostlog.LevelWarn, "unknown schedule name: %s", name)
+		return
+	}
+	cfg := settings.Parse(hostsettings.GetAll())
+	report(cfg, up.HandleSchedule(cfg))
+}
+
+// onStop はデーモンの graceful shutdown 時に一度だけ呼ばれる。次の
+// イベントはもう来ないので、間隔を無視して最後の機会としてフラッシュする。
+func onStop() {
+	cfg := settings.Parse(hostsettings.GetAll())
+	report(cfg, up.HandleStop(cfg))
 }
 
 // option は WIT の option<string> を素の string にする。

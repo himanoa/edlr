@@ -6,12 +6,12 @@ import (
 	"go.bytecodealliance.org/cm"
 )
 
-// This file contains wasmimport and wasmexport declarations for "edlr:plugin@0.3.0".
+// This file contains wasmimport and wasmexport declarations for "edlr:plugin@0.4.0".
 
-//go:wasmimport edlr:plugin/bus@0.3.0 publish
+//go:wasmimport edlr:plugin/bus@0.4.0 publish
 //go:noescape
 func wasmimport_Publish(driver0 *uint8, driver1 uint32, topic0 *uint8, topic1 uint32, payload0 *uint8, payload1 uint32, result *cm.Result[BusError, struct{}, BusError])
 
-//go:wasmimport edlr:plugin/bus@0.3.0 get
+//go:wasmimport edlr:plugin/bus@0.4.0 get
 //go:noescape
 func wasmimport_Get(driver0 *uint8, driver1 uint32, topic0 *uint8, topic1 uint32, result *cm.Result[OptionListU8Shape, cm.Option[cm.List[uint8]], BusError])

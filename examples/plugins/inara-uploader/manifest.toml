@@ -27,6 +27,13 @@ kind = "http"
 hosts = ["https://inara.cz"]
 reason = "Journal イベントを INARA の API へアップロードするため"
 
+# 直近のイベントで送り切れなかった端数を定期的に拾い上げる。
+# minIntervalSeconds は uploader 側で尊重するので、ここでの間隔と一致
+# していなくても連打にはならない。
+[[schedule]]
+name = "flush"
+interval-seconds = 60
+
 [[settings]]
 key = "enabled"
 label = "有効"

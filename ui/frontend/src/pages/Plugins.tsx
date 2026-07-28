@@ -4,6 +4,7 @@ import CapabilitySection from "../components/CapabilitySection";
 import { DashboardSection } from "../components/DashboardSection";
 import FilesystemSection from "../components/FilesystemSection";
 import PluginForm from "../components/PluginForm";
+import { ScheduleSection } from "../components/ScheduleSection";
 import SidecarSection from "../components/SidecarSection";
 import { RpcClient } from "../rpc";
 import type {
@@ -225,6 +226,7 @@ export default function Plugins() {
               dashboard={p.dashboard}
               onSetGrant={handleDashboardGrant}
             />
+            <ScheduleSection schedules={p.schedules} />
           </article>
         ))}
     </section>

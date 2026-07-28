@@ -100,6 +100,20 @@ export interface DashboardListEntry {
   state: "running" | "disabled";
 }
 
+/**
+ * `plugins/list` が返すスケジュール宣言 1 件(`[[schedule]]`)。
+ *
+ * `spec` は表示用に整形済みの文字列("every 60s" / "cron: 0 9 * * *")。
+ * `next` は ISO8601(ローカル時刻)の次回発火時刻の**近似値**
+ * (interval 系はサーバがこの応答を組み立てた瞬間からの相対計算 -- 詳細は
+ * `core/src/plugin/registry.rs` の `ScheduleInfo` のドキュメントコメント参照)。
+ */
+export interface Schedule {
+  name: string;
+  spec: string;
+  next: string;
+}
+
 export interface PluginInfo {
   id: string;
   name: string;
@@ -114,6 +128,7 @@ export interface PluginInfo {
   filesystem: FilesystemRoot[];
   bus: BusRequest[];
   dashboard: DashboardWidget[];
+  schedules: Schedule[];
 }
 
 export interface PluginsList {

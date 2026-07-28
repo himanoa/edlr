@@ -77,6 +77,7 @@ function makePlugin(overrides: Partial<PluginInfo> = {}): PluginInfo {
     filesystem: [],
     bus: [],
     dashboard: [],
+    schedules: [],
     ...overrides,
   };
 }
@@ -119,6 +120,17 @@ function makeBusEntry(overrides: Partial<PluginInfo["bus"][number]> = {}): Plugi
     granted: false,
     staleGrant: false,
     resolved: true,
+    ...overrides,
+  };
+}
+
+function makeSchedule(
+  overrides: Partial<PluginInfo["schedules"][number]> = {},
+): PluginInfo["schedules"][number] {
+  return {
+    name: "flush",
+    spec: "every 60s",
+    next: "2026-07-28T09:00:00+09:00",
     ...overrides,
   };
 }
@@ -376,4 +388,45 @@ test("toggling dashboard approval calls setDashboardGrant and replaces the dashb
 
   expect(await screen.findByText("Extra Widget")).toBeInTheDocument();
   await waitFor(() => expect(toggle.checked).toBe(true));
+});
+
+test("shows the schedules section with name, spec, and next time for a plugin that declares schedules", async () => {
+  // `next` を表示側と同じロジック(`Date` のローカル時刻)で `HH:MM` に整形して
+  // 期待値を作る -- テスト実行環境のタイムゾーンに依存させないため
+  // (`next` 自体はサーバがローカル時刻で返す ISO8601 文字列)。
+  const flushNext = "2026-07-28T09:00:00+09:00";
+  const dailyNext = "2026-07-29T21:30:00+09:00";
+  const formatHHMM = (iso: string) => {
+    const date = new Date(iso);
+    return `${date.getHours().toString().padStart(2, "0")}:${date
+      .getMinutes()
+      .toString()
+      .padStart(2, "0")}`;
+  };
+  const plugin = makePlugin({
+    schedules: [
+      makeSchedule({ name: "flush", spec: "every 60s", next: flushNext }),
+      makeSchedule({ name: "daily", spec: "cron: 0 9 * * *", next: dailyNext }),
+    ],
+  });
+  listImpl = () => Promise.resolve({ pluginsDir: "/plugins", plugins: [plugin] });
+
+  render(<Plugins />);
+
+  expect(
+    await screen.findByText(`flush — every 60s (next ${formatHHMM(flushNext)})`),
+  ).toBeInTheDocument();
+  expect(
+    await screen.findByText(`daily — cron: 0 9 * * * (next ${formatHHMM(dailyNext)})`),
+  ).toBeInTheDocument();
+});
+
+test("hides the schedules section when a plugin declares no schedules", async () => {
+  const plugin = makePlugin({ schedules: [] });
+  listImpl = () => Promise.resolve({ pluginsDir: "/plugins", plugins: [plugin] });
+
+  render(<Plugins />);
+
+  await screen.findByText(plugin.name);
+  expect(screen.queryByText("Schedules")).not.toBeInTheDocument();
 });

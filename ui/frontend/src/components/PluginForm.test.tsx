@@ -23,6 +23,7 @@ function makePlugin(overrides: Partial<PluginInfo> = {}): PluginInfo {
     filesystem: [],
     bus: [],
     dashboard: [],
+    schedules: [],
     ...overrides,
   };
 }

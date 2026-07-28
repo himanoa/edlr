@@ -24,6 +24,17 @@
 //! が要求する `SyncSender<Delivery>` を別途受け取り、それを `PluginWork` へ
 //! 詰め替えて転送する専用の tokio タスク(`spawn_bus_subscriber`)が
 //! `spawn_event_subscriber` と対称の形で存在する。
+//!
+//! `manifest.schedules` に基づく `on-schedule` の発火も、この同じ
+//! プラグインスレッドの中で行う(`PluginInstance` を 1 スレッドの外に
+//! 出さない性質を保つため)。専用スレッドは `work_rx.recv_timeout` を
+//! `ScheduleState::until_next` の残り時間でブロックし、タイムアウトかつ
+//! 期限切れがあれば `call_on_schedule` を呼ぶ。仕事(イベント/バス配信)は
+//! 発火より優先するが、`driver-http.send` などで wasm 呼び出しがブロック
+//! している間に期限を過ぎたスケジュールは、その呼び出しの直後に
+//! `ScheduleState::take_due` を引けるだけ引いて 1 回ずつまとめて発火する
+//! (`fire_all_due` 参照)。「次に何をするか」の判定はテスト可能な純粋
+//! 関数 `next_action`/`LoopAction` に切り出してある。
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -106,9 +117,10 @@ use crate::plugin::bus_runtime::{bus_json_string, parse_bus, BusRuntimeEntry};
 use crate::plugin::filesystem::FilesystemConfigStore;
 use crate::plugin::fs_runtime::{filesystem_json_string, FsRuntimeEntry};
 use crate::plugin::grants::GrantsStore;
-use crate::plugin::host::{capabilities_json_string, HostCtx, PluginHost};
+use crate::plugin::host::{capabilities_json_string, HostCtx, PluginHost, PluginInstance};
 use crate::plugin::manifest::{load_manifest, matches_event};
 use crate::plugin::registry::{PluginEntry, PluginState, Registry};
+use crate::plugin::schedule::ScheduleState;
 use crate::plugin::settings::SettingsStore;
 use crate::plugin::sidecar::{assign_ports, SidecarConfig, SidecarConfigStore};
 use crate::plugin::sidecar_runtime::{
@@ -116,6 +128,17 @@ use crate::plugin::sidecar_runtime::{
 };
 use crate::plugin::Manifest;
 use crate::router::Router;
+
+/// スケジュールが 1 件も無いプラグイン向けのフォールバックタイムアウト。
+///
+/// `ScheduleState::until_next` が `None`(スケジュール無し)を返す間は、
+/// このタイムアウトで `work_rx.recv_timeout` をブロックする。値そのものに
+/// 強い意味は無く、単に「スケジュール無しプラグインの挙動を今日と同一に
+/// 保つ」ための実質無限大の代わり(`recv_timeout` は無限待ちを表現できない
+/// ため)。タイムアウトのたびに `take_due` は必ず `None` を返す
+/// (スケジュールが無いので)ので `LoopAction::Idle` になり、単に
+/// もう一度待ち直すだけで観測できる差は無い。
+const SCHEDULE_LESS_FALLBACK_TIMEOUT: Duration = Duration::from_secs(3600);
 
 /// `plugins_dir` を走査し、各プラグインをロードして専用タスクで駆動する。
 ///
@@ -328,7 +351,7 @@ fn load_and_run_plugin(
     let (work_tx, work_rx) = std_mpsc::sync_channel::<PluginWork>(PLUGIN_WORK_QUEUE_CAPACITY);
     let (ready_tx, ready_rx) = std_mpsc::channel::<PluginState>();
 
-    thread::spawn({
+    let thread_handle = thread::spawn({
         let host = host.clone();
         let manifest = manifest.clone();
         let settings_json = settings_json.clone();
@@ -372,6 +395,15 @@ fn load_and_run_plugin(
     });
 
     if running {
+        // `shutdown_plugins`(デーモンの正常終了)がこのプラグインへ
+        // `PluginWork::Stop` を送り、スレッドの終了を待てるように、送信側の
+        // 複製とスレッドの `JoinHandle` を registry に登録する。Disabled
+        // (=このブロックに入らない)プラグインのスレッドは、この時点で既に
+        // `init` 失敗を `ready_tx` へ送って return 済みなので、登録せずに
+        // `thread_handle` を(join せずに)そのまま drop してよい -- スレッド
+        // 自体はもう終了しているか、終了する寸前でしかない。
+        registry.register_plugin_thread(&manifest.id, work_tx.clone(), thread_handle);
+
         spawn_event_subscriber(manifest.clone(), router.subscribe(), work_tx.clone());
 
         // `[[bus]]` の `subscribe` トピックがあれば、購読を登録して配信を
@@ -472,19 +504,18 @@ fn run_plugin_thread(
         return;
     }
 
-    for work in work_rx {
-        let result = match &work {
-            PluginWork::Event(event) => {
-                let (kind, timestamp, name, payload_json, replay) = event_params(event);
-                instance
-                    .call_on_event(kind, timestamp.as_deref(), name.as_deref(), &payload_json, replay)
-                    .map_err(|e| format!("on-event call failed: {e}"))
-            }
-            PluginWork::Message(delivery) => instance
-                .call_on_message(&delivery.driver_id, &delivery.topic, &delivery.payload)
-                .map_err(|e| format!("on-message call failed: {e}")),
-        };
-        if let Err(reason) = result {
+    // 壁時計はここ(ループ側)でのみ読む。`ScheduleState` 自身は時刻を
+    // 引数でしか受け取らない(`schedule` モジュールのドキュメントコメント
+    // 参照、テストで時刻を固定するため)。
+    let mut schedule_state = ScheduleState::new(&manifest.schedules, chrono::Local::now());
+
+    // 1 回の `Err(reason)` を「warn ログ + disable + unsubscribe + ループ
+    // 脱出」という既存の trap 分岐へ合流させるためのマクロ。`Handle` 後の
+    // wasm 呼び出し・`Fire` 自身・`Fire` 後の追い発火のいずれで失敗しても
+    // 同じ扱いにする(呼び出し元がどの分岐であっても trap の意味は同じ)。
+    macro_rules! disable_and_break {
+        ($reason:expr) => {{
+            let reason = $reason;
             tracing::warn!(
                 plugin_id = %manifest.id,
                 "wasm call failed, disabling plugin: {reason}"
@@ -492,17 +523,167 @@ fn run_plugin_thread(
             registry.set_disabled(&manifest.id, reason);
             bus_for_unsubscribe.unsubscribe_plugin(&manifest.id);
             break;
+        }};
+    }
+
+    loop {
+        let now = chrono::Local::now();
+        let timeout = schedule_state
+            .until_next(now)
+            .unwrap_or(SCHEDULE_LESS_FALLBACK_TIMEOUT);
+        let recv_result = work_rx.recv_timeout(timeout);
+        // due は `Timeout` のときだけ取り出す。`Ok(work)` のときにも
+        // 呼んでしまうと(`next_action` がその値を無視するとしても)
+        // `take_due` 自身が呼び出しのたびに状態を進めてしまうため、
+        // 期限切れの発火を 1 回捨ててしまう(仕事優先の仕様に反する)。
+        let due = match &recv_result {
+            Err(std_mpsc::RecvTimeoutError::Timeout) => {
+                schedule_state.take_due(chrono::Local::now())
+            }
+            _ => None,
+        };
+
+        match next_action(recv_result, due) {
+            LoopAction::Handle(work) => {
+                let result = match &work {
+                    PluginWork::Event(event) => {
+                        let (kind, timestamp, name, payload_json, replay) = event_params(event);
+                        instance
+                            .call_on_event(
+                                kind,
+                                timestamp.as_deref(),
+                                name.as_deref(),
+                                &payload_json,
+                                replay,
+                            )
+                            .map_err(|e| format!("on-event call failed: {e}"))
+                    }
+                    PluginWork::Message(delivery) => instance
+                        .call_on_message(&delivery.driver_id, &delivery.topic, &delivery.payload)
+                        .map_err(|e| format!("on-message call failed: {e}")),
+                    // `next_action` は `PluginWork::Stop` を `LoopAction::Handle`
+                    // ではなく専用の `LoopAction::Stop` に振り分けるので、ここに
+                    // 来ることはない。
+                    PluginWork::Stop => unreachable!(
+                        "next_action routes PluginWork::Stop to LoopAction::Stop, not Handle"
+                    ),
+                };
+                if let Err(reason) = result {
+                    disable_and_break!(reason);
+                }
+                if let Err(reason) = fire_all_due(&mut schedule_state, &mut instance) {
+                    disable_and_break!(reason);
+                }
+            }
+            LoopAction::Fire(name) => {
+                if let Err(e) = instance.call_on_schedule(&name) {
+                    disable_and_break!(format!("on-schedule call failed: {e}"));
+                }
+                if let Err(reason) = fire_all_due(&mut schedule_state, &mut instance) {
+                    disable_and_break!(reason);
+                }
+            }
+            LoopAction::Idle => {}
+            LoopAction::Exit => break,
+            LoopAction::Stop => {
+                // デーモンの正常終了シーケンス(`Registry::shutdown_plugins`)
+                // から送られた `PluginWork::Stop`。もう止まる以上、失敗しても
+                // disable する意味が無いので warn ログのみに留め、trap 用の
+                // `disable_and_break!` は使わない。
+                if let Err(e) = instance.call_on_stop() {
+                    tracing::warn!(
+                        plugin_id = %manifest.id,
+                        "on-stop call failed during shutdown: {e}"
+                    );
+                }
+                break;
+            }
         }
+    }
+}
+
+/// 直前の wasm 呼び出し(ブロックしうる)の間に期限を過ぎたスケジュールを、
+/// 1 件ずつ・各名前につき最大 1 回ずつ発火する。
+///
+/// `ScheduleState::take_due` は 1 回の呼び出しで最大 1 件しか返さない仕様
+/// なので、`None` になるまでループして呼び切ることで「同時に複数期限切れ
+/// でも、名前ごとにちょうど 1 回」という仕様(タスク仕様の「ブロック中に
+/// 過ぎた発火は後で 1 回」)を満たす。
+fn fire_all_due(state: &mut ScheduleState, instance: &mut PluginInstance) -> Result<(), String> {
+    loop {
+        let now = chrono::Local::now();
+        let Some(name) = state.take_due(now) else {
+            return Ok(());
+        };
+        instance
+            .call_on_schedule(&name)
+            .map_err(|e| format!("on-schedule call failed: {e}"))?;
     }
 }
 
 /// プラグイン専用スレッドが処理する仕事。journal イベントとバスの配信を
 /// 1 本のキューに混ぜることで、wasm 呼び出しが 1 スレッドに直列化される
 /// 性質(`PluginInstance` が `Send` を気にしなくてよい根拠)を保つ。
+///
+/// `Stop`(Task 5)はデーモンの正常終了シーケンス
+/// (`Registry::shutdown_plugins`)専用で、`Event`/`Message` と同じ 1 本の
+/// キューに混ぜることで「仕事を全部処理し終えてから止める」のではなく
+/// 「今の仕事のあとに来た Stop で速やかに止める」という程度の順序保証を
+/// 得る(`work_tx` は有界なので、詰まっている間は他の仕事同様 Stop も
+/// 送れないことがある -- `Registry::shutdown_plugins` が `try_send` の
+/// 失敗を warn ログにして諦める理由)。
 #[derive(Debug)]
-enum PluginWork {
+pub(crate) enum PluginWork {
     Event(Arc<Event>),
     Message(Delivery),
+    Stop,
+}
+
+/// `run_plugin_thread` のメインループが「次に何をするか」を決めるテスト
+/// 可能な芯。wasm 実体や実際のチャネルを持ち込まずに分岐を検証できるよう、
+/// `work_rx.recv_timeout(..)` の結果と `state.take_due(now)` の結果を
+/// そのまま受け取って純粋に判定するだけの関数として切り出す。
+///
+/// **仕事が発火より優先**: `Ok(work)` は `due` の値に関わらず常に
+/// `Handle`(`work` が `Stop` なら `Stop`)になる。期限超過分の発火は
+/// ループ側が各 wasm 呼び出しの直後に改めて `take_due` を呼んで拾う
+/// (このタスクの仕様「ブロック中に過ぎた発火は後で 1 回」)。
+///
+/// **`Timeout` + due なし**: 単に「何もせずループを継続する(次の待ちへ)」
+/// ことを表す `Idle` を返す。
+///
+/// **`Ok(PluginWork::Stop)` → `LoopAction::Stop`**(Task 5): `Handle` に
+/// 混ぜず専用の分岐にしてあるのは、ループ側が「on-stop を呼んでスレッドを
+/// 終了する」という `Handle`/`Fire` とは異なる後始末をする必要があるため
+/// (`disable_and_break!` の trap 分岐とも別 -- on-stop の失敗は disable
+/// する意味が無い。もう止まるので)。
+#[derive(Debug)]
+enum LoopAction {
+    /// 通常の作業(journal イベント / バス配信)を処理する。
+    Handle(PluginWork),
+    /// このスケジュール名で `call_on_schedule` を呼ぶ。
+    Fire(String),
+    /// 何もせず次の `recv_timeout` へ戻る(タイムアウトしたが期限切れなし)。
+    Idle,
+    /// `work_rx` の送信側が全て閉じた。スレッドを終了する。
+    Exit,
+    /// `PluginWork::Stop` を受け取った。on-stop を呼んでスレッドを終了する。
+    Stop,
+}
+
+fn next_action(
+    recv: Result<PluginWork, std_mpsc::RecvTimeoutError>,
+    due: Option<String>,
+) -> LoopAction {
+    match recv {
+        Ok(PluginWork::Stop) => LoopAction::Stop,
+        Ok(work) => LoopAction::Handle(work),
+        Err(std_mpsc::RecvTimeoutError::Timeout) => match due {
+            Some(name) => LoopAction::Fire(name),
+            None => LoopAction::Idle,
+        },
+        Err(std_mpsc::RecvTimeoutError::Disconnected) => LoopAction::Exit,
+    }
 }
 
 /// `router` を購読し、`manifest.events` にマッチしたイベントだけを
@@ -724,6 +905,7 @@ mod tests {
             filesystem: vec![],
             bus: vec![],
             dashboard: vec![],
+            schedules: vec![],
         }
     }
 
@@ -970,5 +1152,60 @@ mod tests {
              of observing the shutdown flag (this is the exact daemon shutdown \
              hang the fix addresses)",
         );
+    }
+
+    /// `next_action` はループの分岐を wasm 実体なしに検証するために切り
+    /// 出した純粋関数。ここでは仕様の 4 分岐(タイムアウト+期限あり →
+    /// `Fire`、タイムアウト+期限なし → `Idle`、`Ok` → `Handle`、
+    /// `Disconnected` → `Exit`)と、「仕事が発火より優先される」こと
+    /// (`Ok` は `due` の値に関わらず常に `Handle`)を確認する。
+    mod next_action_tests {
+        use super::*;
+
+        fn some_work() -> PluginWork {
+            PluginWork::Event(journal_event("Test"))
+        }
+
+        #[test]
+        fn timeout_with_due_fires() {
+            let action = next_action(
+                Err(std_mpsc::RecvTimeoutError::Timeout),
+                Some("flush".to_string()),
+            );
+            assert!(matches!(action, LoopAction::Fire(name) if name == "flush"));
+        }
+
+        #[test]
+        fn timeout_without_due_is_idle() {
+            let action = next_action(Err(std_mpsc::RecvTimeoutError::Timeout), None);
+            assert!(matches!(action, LoopAction::Idle));
+        }
+
+        #[test]
+        fn ok_work_takes_priority_over_a_pending_due_schedule() {
+            // due が Some でも、recv が Ok なら仕事が優先されて Handle になる
+            // (発火は Handle 後にループ側が改めて take_due するため、ここで
+            // 落としても失われない)。
+            let action = next_action(Ok(some_work()), Some("flush".to_string()));
+            assert!(matches!(action, LoopAction::Handle(PluginWork::Event(_))));
+        }
+
+        #[test]
+        fn disconnected_exits() {
+            let action = next_action(Err(std_mpsc::RecvTimeoutError::Disconnected), None);
+            assert!(matches!(action, LoopAction::Exit));
+        }
+
+        /// Task 5: `PluginWork::Stop` は `Handle` に混ぜず専用の `Stop` へ
+        /// 振り分けられる(`due` が同時に立っていても優先度は変わらない --
+        /// そもそも `Stop` はスレッド終了そのものなので優先度の概念が無い)。
+        #[test]
+        fn stop_work_is_routed_to_loop_action_stop() {
+            let action = next_action(Ok(PluginWork::Stop), None);
+            assert!(matches!(action, LoopAction::Stop));
+
+            let action_with_due = next_action(Ok(PluginWork::Stop), Some("flush".to_string()));
+            assert!(matches!(action_with_due, LoopAction::Stop));
+        }
     }
 }

@@ -251,6 +251,7 @@ mod tests {
             filesystem: vec![],
             bus: vec![],
             dashboard: vec![],
+            schedules: vec![],
         }
     }
 

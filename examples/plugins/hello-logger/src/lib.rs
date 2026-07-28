@@ -43,6 +43,10 @@ impl Guest for HelloLogger {
             &format!("ignoring bus message from {driver}/{topic}"),
         );
     }
+
+    fn on_schedule(_name: String) {}
+
+    fn on_stop() {}
 }
 
 export!(HelloLogger);

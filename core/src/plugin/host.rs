@@ -900,6 +900,27 @@ impl PluginInstance {
             .call_on_message(&mut self.store, driver, topic, payload)
             .map_err(|e| anyhow::anyhow!("plugin on-message() call failed or timed out: {e}"))
     }
+
+    /// manifest の `[[schedule]]` エントリが発火したときに呼ぶ。`name` は
+    /// そのエントリの name。
+    pub fn call_on_schedule(&mut self, name: &str) -> anyhow::Result<()> {
+        self.store
+            .set_epoch_deadline(deadline_ticks(Self::CALL_DEADLINE));
+        self.bindings
+            .call_on_schedule(&mut self.store, name)
+            .map_err(|e| anyhow::anyhow!("plugin on-schedule() call failed or timed out: {e}"))
+    }
+
+    /// デーモンの graceful shutdown 時に一度だけ呼ぶ。trap による無効化
+    /// (disable)の後には呼ばない -- 呼び出し元(daemon shutdown 経路)の
+    /// 責務。
+    pub fn call_on_stop(&mut self) -> anyhow::Result<()> {
+        self.store
+            .set_epoch_deadline(deadline_ticks(Self::CALL_DEADLINE));
+        self.bindings
+            .call_on_stop(&mut self.store)
+            .map_err(|e| anyhow::anyhow!("plugin on-stop() call failed or timed out: {e}"))
+    }
 }
 
 #[cfg(test)]

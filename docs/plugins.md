@@ -15,7 +15,7 @@ capability(HTTP 通信・サイドカープロセス・ファイルアクセス)
 
 - **`plugin`** — ホスト側(`bindgen!`)が使う。edlr が提供する 4 インターフェース
   (`host-log` / `host-settings` / `driver-http` / `driver-process`)と、プラグインが
-  export する `init` / `on-event` だけを宣言する
+  export する `init` / `on-event` / `on-message` / `on-schedule` / `on-stop` を宣言する
 - **`plugin-guest`** — **プラグイン(ゲスト)がビルド時に対象にする world**。
   `plugin` に WASI の import 一式(`wasi:cli/imports@0.2.0`)を足したもの。Go/TinyGo の
   標準ライブラリはプラグインが何も呼ばなくても WASI を import するため、`plugin` を
@@ -27,13 +27,15 @@ WASI 自体はホストが `wasmtime_wasi` の `add_to_linker_sync` で提供す
 
 ### WIT パッケージのバージョン
 
-WIT パッケージは `edlr:plugin@0.3.0`。
+WIT パッケージは `edlr:plugin@0.4.0`。
 
 - `0.1.0` → `0.2.0`: Journal 読み取り位置の永続化に伴い、`event` レコードへ
   `replay: bool` を追加した ABI 破壊的変更
 - `0.2.0` → `0.3.0`: ドライバ機能の追加(`bus` / `bus-host` / `bus-types`
   インターフェースと `driver` / `driver-guest` world の新設、`plugin` world への
   `bus` import 追加)に伴う ABI 破壊的変更
+- `0.3.0` → `0.4.0`: 定期実行・終了フックの追加(`plugin` world への
+  `on-schedule` / `on-stop` export 追加)に伴う ABI 破壊的変更
 
 **旧 world でビルド済みのプラグインは新しいホストへのロードに失敗する**。
 プラグインを新しい `core/wit` に対して再ビルドすること(Rust は
@@ -65,9 +67,48 @@ WIT パッケージは `edlr:plugin@0.3.0`。
 | `[[sidecar]]` | | サイドカープロセスの要求([capabilities.md](capabilities.md#サイドカープロセスdriver-process)) |
 | `[[filesystem]]` | | ファイルアクセスの要求([capabilities.md](capabilities.md#ファイルアクセスdriver-fs)) |
 | `[[bus]]` | | ドライバとのバス接続の要求([drivers.md](drivers.md#プラグイン側の-bus-書式と承認フロー)) |
+| `[[schedule]]` | | 定期実行の宣言(下記「スケジュール」参照) |
 
 設定値は `<settings-dir>/<id>.json` に保存され、未保存キーは manifest の
 `default` にフォールバックする。
+
+## スケジュール(`[[schedule]]`)
+
+プラグインは Journal/Status イベントが届いたときにしか動けないが、
+`[[schedule]]` を宣言すると、その名前を引数に `on-schedule` が定期的に
+呼ばれる。デーモンの graceful shutdown 時には `on-stop` が一度だけ呼ばれる。
+
+    [[schedule]]
+    name = "flush"
+    interval-seconds = 60
+
+    [[schedule]]
+    name = "daily-report"
+    cron = "0 9 * * *"
+
+- `name` は `[a-z0-9-]+` にマッチする必要があり、同一 manifest 内で重複しては
+  ならない(違反時は manifest のロードに失敗する)
+- `interval-seconds` と `cron` は**どちらか一方だけ**を指定する。両方指定・
+  どちらも未指定はどちらも manifest のロード失敗になる
+- `cron` は 5 欄形式(分 時 日 月 曜日)を **ローカル時刻**で評価する
+  (edlr 内部では 7 欄形式の `cron` クレートを使っており、秒は常に 0・年は
+  常に `*` を補って変換している)
+- 発火間隔には 5 秒の下限があり、`interval-seconds` がそれを下回る場合は
+  5 秒へ丸められ、warn ログが出る(manifest 自体は失敗しない)
+- デーモンが長時間ブロックしていた等の理由で発火予定を複数回取りこぼしても、
+  次に評価されたタイミングで 1 回だけ `on-schedule` が呼ばれる(取りこぼした
+  回数ぶん連続では呼ばれない)
+- `on-stop` は**ベストエフォート**であり、有界の猶予時間内(既定 5 秒)に
+  収まった場合にしか呼ばれない。プラグインの作業キューが深く積まれていたり
+  (発火中の `on-schedule`/`on-event` の後ろに多数の項目が並んでいる)、
+  終了時にちょうど wasm 呼び出しが実行中だったりすると、猶予時間内に
+  `on-stop` へ辿り着けず、呼ばれずにデーモンが終了することがある(その場合
+  warn ログが出るのみ)
+- `on-stop` は**デーモンの graceful shutdown のときだけ**呼ばれる保証で、
+  trap によるプラグインの無効化(disable)の後には呼ばれない。`SIGKILL` や
+  プロセスのクラッシュではシグナルハンドラそのものが動かないため、当然
+  呼ばれない。graceful shutdown であっても上記のとおり有界の猶予時間内に
+  限った best-effort であることに注意
 
 ## hello-logger サンプルのビルドと配置
 

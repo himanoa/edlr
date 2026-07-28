@@ -304,8 +304,19 @@ async fn main() {
         }
     }
 
-    // デーモン終了経路: 生きているサイドカーを確実に停止し、バス購読タスクに
-    // shutdown を知らせてから抜ける。
+    // デーモン終了経路: 各プラグインに on-stop を呼ばせ、生きているサイド
+    // カーを確実に停止し、バス購読タスクに shutdown を知らせてから抜ける。
+    //
+    // **`registry.shutdown_plugins()` を `shutdown_bus_subscribers()` より
+    // 前に呼ぶ**(Task 5 で追加): on-stop の中でプラグインがまだバス経由の
+    // 最後の publish を行いたいかもしれない。`shutdown_bus_subscribers` は
+    // 購読(受信)側の後片付けであって publish(送信)を妨げるものではない
+    // ので実害は無いはずだが、「後始末の対象(プラグイン)を先に、後始末の
+    // 仕組み(購読タスク)を後に畳む」という順序の方が直感に反しない。
+    // `shutdown_plugins` はプラグイン 1 件あたり最大
+    // `edlr_config::PLUGIN_ON_STOP_GRACE_SECS` 秒(ポーリングで)ブロック
+    // しうる同期呼び出しなので、`stop_all_sidecars` と同じく非同期ランタイム
+    // のワーカースレッドを塞がないよう `spawn_blocking` に逃がす。
     //
     // **`shutdown_bus_subscribers` を `main` が返る(= `#[tokio::main]` が
     // 暗黙の `Runtime` を drop する)前に呼ぶことが必須**: `[[bus]] subscribe`
@@ -328,6 +339,10 @@ async fn main() {
     // ブロックしうる。ここは非同期ランタイムの最後の一手なので tokio の
     // ワーカースレッドを塞がないよう `spawn_blocking` に逃がしてから待つ。
     if let Some(registry) = registry {
+        let registry_for_plugin_shutdown = registry.clone();
+        let _ = tokio::task::spawn_blocking(move || registry_for_plugin_shutdown.shutdown_plugins())
+            .await;
+
         registry.shutdown_bus_subscribers();
         let _ = tokio::task::spawn_blocking(move || registry.stop_all_sidecars()).await;
     }

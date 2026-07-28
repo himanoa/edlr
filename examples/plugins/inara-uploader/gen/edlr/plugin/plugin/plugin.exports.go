@@ -6,7 +6,7 @@ import (
 	"go.bytecodealliance.org/cm"
 )
 
-// Exports represents the caller-defined exports from "edlr:plugin/plugin@0.3.0".
+// Exports represents the caller-defined exports from "edlr:plugin/plugin@0.4.0".
 var Exports struct {
 	// Init represents the caller-defined, exported function "init".
 	//
@@ -22,4 +22,19 @@ var Exports struct {
 	//
 	//	on-message: func(driver: string, topic: string, payload: list<u8>)
 	OnMessage func(driver string, topic string, payload cm.List[uint8])
+
+	// OnSchedule represents the caller-defined, exported function "on-schedule".
+	//
+	// manifest の `[[schedule]]` エントリごとに、その name を渡して呼ばれる。
+	//
+	//	on-schedule: func(name: string)
+	OnSchedule func(name string)
+
+	// OnStop represents the caller-defined, exported function "on-stop".
+	//
+	// デーモンの graceful shutdown 時に一度だけ呼ばれる。trap による
+	// 無効化(disable)の後には呼ばれない。
+	//
+	//	on-stop: func()
+	OnStop func()
 }

@@ -41,6 +41,40 @@ pub const SIDECAR_SHUTDOWN_WORST_CASE_INSTANCES: u64 = 20;
 /// ため、`SIDECAR_SHUTDOWN_GRACE_SECS` と同じくここで共有する。
 pub const DRIVER_CALL_DEADLINE_SECS: u64 = 30;
 
+/// プラグインスレッドが `PluginWork::Stop` を受け取ってから
+/// `PluginInstance::call_on_stop` を呼び終えるまでを `Registry::shutdown_plugins`
+/// が 1 プラグインあたり待つ上限(秒)。
+///
+/// 名目上は `edlr-core` の `PluginInstance::CALL_DEADLINE`(2 秒)に、スレッドが
+/// `work_rx` からメッセージを受け取ってから実際に呼び出しに入るまでの
+/// スケジューリング遅延分の余裕(3 秒)を足した値、として決めている。
+/// ただし `PluginWork::Stop` はキューの末尾に積まれる**ただの 1 項目**であり、
+/// スレッドがそれを処理するまでには「現在処理中の呼び出し(最大 2 秒)」
+/// **に加えて**「`Stop` より前に既にキューへ積まれていた項目をすべて
+/// 処理し終える」必要がある。キュー容量は `PLUGIN_WORK_QUEUE_CAPACITY`
+/// (現状 64)なので、最悪ケースは呼び出し 1 回あたり `CALL_DEADLINE` として
+/// (64 - 1) 件 × 2 秒 ≈ 126 秒に達し得る。つまりこの 5 秒という値は
+/// **この最悪ケースを一切カバーしない**、意図的に小さく保った値である。
+///
+/// これは許容している設計判断であり、この値自体を大きくして最悪ケースを
+/// カバーしようとはしない: デーモンの終了シーケンスを、たまたまキューが
+/// 詰まっていた 1 プラグインのために(理論上 126 秒も)引き延ばすべきでは
+/// ない。待ちきれなかった場合は warn ログを出して join を諦め、その直後に
+/// プロセス自体が終了するので、on-stop が呼ばれなかったことによる影響は
+/// 限定的である: Journal 由来の作業は読み取り位置が永続化されているため
+/// 次回起動時に replay として再送される。ただし **バス配信(bus delivery)
+/// はこの限りではなく、再送されない**(取りこぼしたバスイベントは失われる)。
+///
+/// `CALL_DEADLINE` や `PLUGIN_WORK_QUEUE_CAPACITY` を変更した場合はこの
+/// コメントの数値も見直すこと(値そのものを共有定数にしていないのは、
+/// `edlr_config` を `edlr-core` に依存させたくないため -- `SIDECAR_SHUTDOWN_GRACE_SECS`
+/// と同じ理由)。
+///
+/// `edlr-core`(`plugin::registry::Registry::shutdown_plugins` の join
+/// タイムアウト)と `edlr-ui`(`daemon::STOP_GRACE` のアサーション)の両方が
+/// 参照する。
+pub const PLUGIN_ON_STOP_GRACE_SECS: u64 = 5;
+
 /// 既知の Journal ディレクトリを探す。現状は Proton 既定パスのみ。
 pub fn default_journal_dir(home: &Path) -> Option<PathBuf> {
     let candidate = home.join(PROTON_JOURNAL_DIR);

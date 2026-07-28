@@ -189,6 +189,52 @@ func (u *Uploader) shouldFlush(cfg settings.Settings, flushLive, backlogTransiti
 	return u.queue.len() >= batch && u.intervalElapsed(cfg)
 }
 
+// HandleSchedule は manifest の `[[schedule]]` (name = "flush") から呼ばれる。
+// minIntervalSeconds を尊重するので、直近のイベントで送り切れなかった端数を
+// 定期的に拾い上げる役割になる。
+//
+// replay 中(!u.sawLive)は送らない。replay のバッチングは Handle/shouldFlush
+// が ReplayBatchSize 件ごとにまとめて送る設計になっており(全速で流し切る
+// バックログを minIntervalSeconds 無視で大きなバッチにまとめるのが目的)、
+// ここでスケジュール発火が割り込んで端数を先に送ってしまうと、その意図的な
+// バッチングが壊れる(replay に 60 秒以上かかると、ReplayBatchSize 未満の
+// 半端な件数を先に送ってしまう)。replay 中に溜まったキューは、live へ
+// 移る遷移か次の ReplayBatchSize 到達で Handle が送る。
+func (u *Uploader) HandleSchedule(cfg settings.Settings) Outcome {
+	if !cfg.Enabled {
+		return Outcome{}
+	}
+
+	var out Outcome
+	if u.sawLive && u.queue.len() > 0 && u.intervalElapsed(cfg) {
+		u.flush(cfg, &out)
+	}
+	out.Pending = u.queue.len()
+	return out
+}
+
+// HandleStop はデーモンの graceful shutdown (`on-stop`) から呼ばれる。次の
+// イベントはもう来ないので、minIntervalSeconds を無視して最後の機会として
+// 無条件にフラッシュする。
+//
+// これは意図した仕様(送れるものは送ってから終了する)であり、
+// HandleSchedule と違って replay 中の sawLive ガードは入れない。そのため
+// replay の途中でデーモンが止まった場合、ReplayBatchSize 未満の半端な件数を
+// 送ってしまうことがあるが、次のイベントはもう来ない(デーモンは終了する)
+// ので、送らずに失うより良いという判断で許容する。
+func (u *Uploader) HandleStop(cfg settings.Settings) Outcome {
+	if !cfg.Enabled {
+		return Outcome{}
+	}
+
+	var out Outcome
+	if u.queue.len() > 0 {
+		u.flush(cfg, &out)
+	}
+	out.Pending = u.queue.len()
+	return out
+}
+
 // intervalElapsed は前回のフラッシュ試行から minIntervalSeconds 経ったか。
 // INARA は高頻度の送信を控えるよう求めている。
 func (u *Uploader) intervalElapsed(cfg settings.Settings) bool {

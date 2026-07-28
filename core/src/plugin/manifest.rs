@@ -157,6 +157,101 @@ pub struct DashboardWidget {
     pub size: WidgetSize,
 }
 
+/// `[[schedule]]` 1 件の実行タイミング。`cron::Schedule` は `PartialEq` を
+/// 持たず `Manifest` の derive を壊すため、検証済みの元の cron 式文字列を
+/// そのまま保持する(実際の `cron::Schedule` への変換は利用側で都度行う)。
+#[derive(Debug, Clone, PartialEq)]
+pub enum ScheduleSpec {
+    IntervalSeconds(u64),
+    /// 検証済みの、正規化前(5 欄)の cron 式。
+    Cron(String),
+}
+
+impl ScheduleSpec {
+    /// RPC 応答(`plugins/list` の `schedules[].spec`)・UI 表示に使う安定した
+    /// 文字列表現。`IntervalSeconds(n)` は `"every {n}s"`、`Cron(expr)` は
+    /// `"cron: {expr}"`(元の 5 欄形式のまま、正規化前の文字列を使う --
+    /// ユーザーが manifest.toml に書いた表現と一致させるため)。
+    pub fn display_string(&self) -> String {
+        match self {
+            ScheduleSpec::IntervalSeconds(secs) => format!("every {secs}s"),
+            ScheduleSpec::Cron(expr) => format!("cron: {expr}"),
+        }
+    }
+}
+
+/// プラグインが宣言する定期実行 1 件(`[[schedule]]`)。
+#[derive(Debug, Clone, PartialEq)]
+pub struct ScheduleRequest {
+    pub name: String,
+    pub spec: ScheduleSpec,
+}
+
+/// `[[schedule]]` の生の serde 表現。`interval-seconds` と `cron` は排他
+/// (どちらか片方だけが Some)。`ScheduleRequest` の `Deserialize` 実装が
+/// これを中間表現として使い、排他性・`interval-seconds > 0`・cron 式の
+/// パース可否をその場で検証する(name の字種・一意性は個別のテーブルの
+/// 情報だけでは判定できないため、`validate_schedules` が変換後の一覧に対して
+/// 別途行う)。
+#[derive(Debug, Clone, serde::Deserialize)]
+struct RawSchedule {
+    name: String,
+    #[serde(rename = "interval-seconds")]
+    interval_seconds: Option<u64>,
+    cron: Option<String>,
+}
+
+impl<'de> serde::Deserialize<'de> for ScheduleRequest {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de::Error as _;
+        use std::str::FromStr;
+
+        let raw = RawSchedule::deserialize(deserializer)?;
+
+        let spec = match (raw.interval_seconds, raw.cron) {
+            (Some(_), Some(_)) => {
+                return Err(D::Error::custom(format!(
+                    "schedule {} must specify exactly one of interval-seconds or cron, not both",
+                    raw.name
+                )));
+            }
+            (None, None) => {
+                return Err(D::Error::custom(format!(
+                    "schedule {} must specify one of interval-seconds or cron",
+                    raw.name
+                )));
+            }
+            (Some(interval), None) => {
+                if interval == 0 {
+                    return Err(D::Error::custom(format!(
+                        "schedule {} interval-seconds must be greater than 0",
+                        raw.name
+                    )));
+                }
+                ScheduleSpec::IntervalSeconds(interval)
+            }
+            (None, Some(cron_expr)) => {
+                let normalized = normalize_cron(&cron_expr);
+                cron::Schedule::from_str(&normalized).map_err(|e| {
+                    D::Error::custom(format!(
+                        "schedule {} has an invalid cron expression {cron_expr:?}: {e}",
+                        raw.name
+                    ))
+                })?;
+                ScheduleSpec::Cron(cron_expr)
+            }
+        };
+
+        Ok(ScheduleRequest {
+            name: raw.name,
+            spec,
+        })
+    }
+}
+
 /// `manifest.toml` のパース結果。
 #[derive(Debug, Clone, PartialEq, serde::Deserialize)]
 pub struct Manifest {
@@ -180,6 +275,12 @@ pub struct Manifest {
     pub bus: Vec<BusRequest>,
     #[serde(default)]
     pub dashboard: Vec<DashboardWidget>,
+    /// プラグインが宣言する定期実行(`[[schedule]]`)。`interval-seconds`/
+    /// `cron` の排他性・値の妥当性は `ScheduleRequest` の `Deserialize` で
+    /// その場で検証される。name の字種・一意性は `load_manifest` が呼ぶ
+    /// `validate_schedules` で検証する。
+    #[serde(default, rename = "schedule")]
+    pub schedules: Vec<ScheduleRequest>,
 }
 
 impl Manifest {
@@ -395,6 +496,10 @@ pub enum ManifestError {
     BadTopic(String),
     /// `dashboard` の内容が不正(id の形式・重複・title 空・entry の脱出など)。
     BadDashboard(String),
+    /// `schedule` の `name` が不正(字種違反・重複)。`interval-seconds`/
+    /// `cron` の排他違反・値の不正・cron 式のパース失敗は `Parse` として
+    /// 現れる(`ScheduleRequest` の `Deserialize` 実装内で検出するため)。
+    BadSchedule(String),
 }
 
 impl fmt::Display for ManifestError {
@@ -414,6 +519,7 @@ impl fmt::Display for ManifestError {
             ManifestError::BadBus(msg) => write!(f, "invalid bus request: {msg}"),
             ManifestError::BadTopic(msg) => write!(f, "invalid topic: {msg}"),
             ManifestError::BadDashboard(msg) => write!(f, "invalid dashboard widget: {msg}"),
+            ManifestError::BadSchedule(msg) => write!(f, "invalid schedule request: {msg}"),
         }
     }
 }
@@ -686,6 +792,38 @@ pub(crate) fn validate_dashboard(widgets: &mut [DashboardWidget]) -> Result<(), 
     Ok(())
 }
 
+/// 標準 5 欄の cron 式(分 時 日 月 曜日)を、`cron` クレートが要求する
+/// 7 欄形式(秒 分 時 日 月 曜日 年)に正規化する。秒は常に `0`、年は常に `*`
+/// を補う。
+pub(crate) fn normalize_cron(expr: &str) -> String {
+    format!("0 {expr} *")
+}
+
+/// `[[schedule]]` の name を検証する(字種・一意性)。
+///
+/// `interval-seconds`/`cron` の排他性・値の妥当性(0 より大きいこと、
+/// cron 式が `cron::Schedule::from_str` でパース可能であること)は
+/// `ScheduleRequest` の `Deserialize` 実装がテーブル単体の情報だけで
+/// その場で検証済み。ここでは一覧全体の情報が要る一意性チェックのみ行う。
+fn validate_schedules(schedules: &[ScheduleRequest]) -> Result<(), ManifestError> {
+    let mut seen = HashSet::new();
+    for schedule in schedules {
+        if !is_valid_id(&schedule.name) {
+            return Err(ManifestError::BadSchedule(format!(
+                "schedule name must match [a-z0-9-]+: {}",
+                schedule.name
+            )));
+        }
+        if !seen.insert(schedule.name.clone()) {
+            return Err(ManifestError::BadSchedule(format!(
+                "duplicate schedule name: {}",
+                schedule.name
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// `entry` がプラグインディレクトリ内に収まる相対パスであることの検証。
 /// 絶対パス・`..`・空・ルート/プレフィックス成分を拒否する(配信ハンドラの
 /// トラバーサル防御の一段目。二段目は `Registry::dashboard_asset_path`)。
@@ -739,6 +877,7 @@ pub fn load_manifest(dir: &Path) -> Result<Manifest, ManifestError> {
     validate_filesystem(&mut manifest.filesystem)?;
     validate_bus(&mut manifest.bus)?;
     validate_dashboard(&mut manifest.dashboard)?;
+    validate_schedules(&manifest.schedules)?;
 
     Ok(manifest)
 }
@@ -1053,6 +1192,18 @@ default = "x"
     }
 
     #[test]
+    fn schedule_spec_display_string_matches_expected_format() {
+        assert_eq!(
+            ScheduleSpec::IntervalSeconds(60).display_string(),
+            "every 60s"
+        );
+        assert_eq!(
+            ScheduleSpec::Cron("0 9 * * *".to_string()).display_string(),
+            "cron: 0 9 * * *"
+        );
+    }
+
+    #[test]
     fn capabilities_with_http_request_are_parsed() {
         let tmp = tempfile::tempdir().unwrap();
         let plugin_dir = tmp.path().join("cap-plugin");
@@ -1251,7 +1402,8 @@ reason = ""
                 sidecars: vec![],
                 filesystem: vec![],
                 bus: vec![],
-            dashboard: vec![],
+                dashboard: vec![],
+                schedules: vec![],
             }
         }
 
@@ -1314,6 +1466,7 @@ reason = ""
             filesystem: vec![],
             bus: vec![],
             dashboard: vec![],
+            schedules: vec![],
         };
 
         // Set B: two separate requests that request an additional host
@@ -1340,6 +1493,7 @@ reason = ""
             filesystem: vec![],
             bus: vec![],
             dashboard: vec![],
+            schedules: vec![],
         };
 
         let fp_a = set_a
@@ -1412,7 +1566,8 @@ reason = "fetch data"
                 sidecars: vec![],
                 filesystem: vec![],
                 bus: vec![],
-            dashboard: vec![],
+                dashboard: vec![],
+                schedules: vec![],
             }
         }
 
@@ -1545,6 +1700,7 @@ reason = "foo"
             filesystem: vec![],
             bus: vec![],
             dashboard: vec![],
+            schedules: vec![],
         };
 
         let old_style_fingerprint = "0123456789abcdef"; // 16 hex chars, FNV-1a-64 shape
@@ -1792,6 +1948,7 @@ port = 50030
             filesystem: Vec::new(),
             bus,
             dashboard: Vec::new(),
+            schedules: Vec::new(),
         }
     }
 
@@ -2046,6 +2203,7 @@ reason = "duplicate publish topic"
             filesystem: vec![],
             bus: vec![],
             dashboard: vec![widget],
+            schedules: vec![],
         }
     }
 
@@ -2079,5 +2237,138 @@ reason = "duplicate publish topic"
                 .unwrap()
         );
         assert!(base.dashboard_fingerprint("missing").is_none());
+    }
+
+    /// `schedule` セクションだけを差し替えた manifest を組み立てて `load_manifest`
+    /// に通すヘルパー。他の `load_with_*_section` ヘルパーと同じ流儀:
+    /// id/name/version/entry は固定で、呼び出し側は `[[schedule]]` の中身だけ渡す。
+    fn try_manifest_from(section: &str) -> Result<Manifest, ManifestError> {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin_dir = tmp.path().join("schedule-plugin");
+        fs::create_dir_all(&plugin_dir).unwrap();
+        write_entry(&plugin_dir, "plugin.wasm");
+        write_manifest(
+            &plugin_dir,
+            &format!(
+                "id = \"schedule-plugin\"\nname = \"Schedule Plugin\"\nversion = \"0.1.0\"\nentry = \"plugin.wasm\"\n{section}"
+            ),
+        );
+        load_manifest(&plugin_dir)
+    }
+
+    fn manifest_from(section: &str) -> Manifest {
+        try_manifest_from(section).expect("manifest should parse")
+    }
+
+    #[test]
+    fn schedule_with_interval_is_parsed() {
+        let m = manifest_from(
+            r#"
+[[schedule]]
+name = "flush"
+interval-seconds = 60
+"#,
+        );
+        assert_eq!(m.schedules.len(), 1);
+        assert_eq!(m.schedules[0].name, "flush");
+        assert!(matches!(
+            m.schedules[0].spec,
+            ScheduleSpec::IntervalSeconds(60)
+        ));
+    }
+
+    #[test]
+    fn schedule_with_cron_is_parsed() {
+        let m = manifest_from(
+            r#"
+[[schedule]]
+name = "daily-report"
+cron = "0 9 * * *"
+"#,
+        );
+        assert_eq!(m.schedules.len(), 1);
+        assert_eq!(m.schedules[0].name, "daily-report");
+        assert_eq!(
+            m.schedules[0].spec,
+            ScheduleSpec::Cron("0 9 * * *".to_string())
+        );
+    }
+
+    #[test]
+    fn schedule_requires_exactly_one_of_interval_and_cron() {
+        let both = try_manifest_from(
+            r#"
+[[schedule]]
+name = "both"
+interval-seconds = 60
+cron = "0 9 * * *"
+"#,
+        );
+        // The interval-seconds/cron exclusivity check runs inside
+        // `ScheduleRequest`'s `Deserialize` impl (it only needs the single
+        // table's own fields, not the whole schedule list), so a violation
+        // surfaces as a TOML deserialize failure (`ManifestError::Parse`),
+        // the same way an unrecognized `[[capabilities]] kind` does.
+        assert!(matches!(both, Err(ManifestError::Parse(_))));
+
+        let neither = try_manifest_from(
+            r#"
+[[schedule]]
+name = "neither"
+"#,
+        );
+        assert!(matches!(neither, Err(ManifestError::Parse(_))));
+    }
+
+    #[test]
+    fn schedule_rejects_bad_names_and_duplicates() {
+        let bad_name = try_manifest_from(
+            r#"
+[[schedule]]
+name = "Bad_Name"
+interval-seconds = 60
+"#,
+        );
+        assert!(matches!(bad_name, Err(ManifestError::BadSchedule(_))));
+
+        let duplicate = try_manifest_from(
+            r#"
+[[schedule]]
+name = "flush"
+interval-seconds = 60
+
+[[schedule]]
+name = "flush"
+interval-seconds = 30
+"#,
+        );
+        assert!(matches!(duplicate, Err(ManifestError::BadSchedule(_))));
+    }
+
+    #[test]
+    fn schedule_rejects_invalid_cron_expression() {
+        let err = try_manifest_from(
+            r#"
+[[schedule]]
+name = "bad-cron"
+cron = "not a cron"
+"#,
+        );
+        // Parsed and rejected inside `ScheduleRequest::deserialize` via
+        // `cron::Schedule::from_str`, so it surfaces as a TOML parse error
+        // (still: a manifest error, so the plugin becomes Disabled).
+        assert!(matches!(err, Err(ManifestError::Parse(_))));
+    }
+
+    #[test]
+    fn schedule_rejects_zero_interval() {
+        let err = try_manifest_from(
+            r#"
+[[schedule]]
+name = "zero"
+interval-seconds = 0
+"#,
+        );
+        assert!(matches!(err, Err(ManifestError::Parse(_))));
     }
 }

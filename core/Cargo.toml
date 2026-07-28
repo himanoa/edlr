@@ -26,6 +26,7 @@ anyhow = "1.0.104"
 wasmtime-wasi = "47.0.2"
 url = "2.5.8"
 sha2 = "0.10"
+cron = "0.12"
 edlr-driver-http = { path = "../drivers/http" }
 edlr-driver-process = { path = "../drivers/process" }
 edlr-driver-fs = { path = "../drivers/fs" }

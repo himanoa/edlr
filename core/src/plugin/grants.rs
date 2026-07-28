@@ -476,6 +476,7 @@ mod tests {
             filesystem: vec![],
             bus: vec![],
             dashboard: vec![],
+            schedules: vec![],
         }
     }
 
@@ -493,6 +494,7 @@ mod tests {
             filesystem: vec![],
             bus: vec![],
             dashboard: vec![],
+            schedules: vec![],
         }
     }
 
@@ -717,6 +719,7 @@ mod tests {
             filesystem: vec![],
             bus: vec![],
             dashboard: vec![],
+            schedules: vec![],
         }
     }
 
@@ -885,6 +888,7 @@ mod tests {
             }],
             bus: vec![],
             dashboard: vec![],
+            schedules: vec![],
         }
     }
 
@@ -993,6 +997,7 @@ mod tests {
                 reason: "r".into(),
             }],
             dashboard: vec![],
+            schedules: vec![],
         }
     }
 
@@ -1125,6 +1130,7 @@ mod tests {
                 entry: "ui/index.html".into(),
                 size: WidgetSize::Small,
             }],
+            schedules: vec![],
         }
     }
 

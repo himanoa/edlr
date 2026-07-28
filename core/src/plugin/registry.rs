@@ -5,7 +5,10 @@ use std::collections::HashMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
+use std::sync::mpsc as std_mpsc;
 use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use edlr_driver_process::{InstanceStatus, ProcessDriver, ProcessSpec};
 
@@ -15,15 +18,29 @@ use crate::plugin::filesystem::{FilesystemConfig, FilesystemConfigError, Filesys
 use crate::plugin::fs_runtime::{filesystem_json_string, FsRuntimeEntry};
 use crate::plugin::grants::{GrantState, GrantsError, GrantsStore};
 use crate::plugin::host::{capabilities_json_string, parse_capability_hosts, PluginHost};
+use crate::plugin::runner::PluginWork;
+use crate::plugin::schedule::ScheduleState;
 use crate::plugin::settings::SettingsStore;
 use crate::plugin::sidecar::{assign_ports, SidecarConfig, SidecarConfigError, SidecarConfigStore};
 use crate::plugin::sidecar_runtime::{
     implicit_http_hosts, sidecars_json_string, SidecarRuntimeEntry,
 };
 use crate::plugin::{
-    BusRequest, CapabilityRequest, DashboardWidget, FilesystemRequest, Manifest, SettingsError,
-    SidecarRequest,
+    BusRequest, CapabilityRequest, DashboardWidget, FilesystemRequest, Manifest, ScheduleSpec,
+    SettingsError, SidecarRequest,
 };
+
+/// `Registry::shutdown_plugins` が 1 プラグインの `JoinHandle` を待つ上限。
+/// `edlr_config::PLUGIN_ON_STOP_GRACE_SECS` のドキュメントコメント参照
+/// (= `PluginInstance::CALL_DEADLINE` + 余裕)。
+const PLUGIN_STOP_JOIN_TIMEOUT: Duration =
+    Duration::from_secs(edlr_config::PLUGIN_ON_STOP_GRACE_SECS);
+
+/// `shutdown_plugins` が `JoinHandle::is_finished()` をポーリングする間隔。
+/// std に `join_timeout` が無いための代替手段(タスクブリーフ参照)。値自体に
+/// 強い意味は無く、`PLUGIN_STOP_JOIN_TIMEOUT` に対して十分細かく、かつ
+/// 無駄なビジーポーリングにならない程度、という程度の選択。
+const PLUGIN_STOP_JOIN_POLL_INTERVAL: Duration = Duration::from_millis(20);
 
 /// プラグイン 1 件の現在の駆動状態。
 #[derive(Debug, Clone, PartialEq)]
@@ -105,6 +122,23 @@ pub struct DashboardInfo {
     pub resolved: bool,
 }
 
+/// スケジュール 1 件の RPC 応答用スナップショット(`PluginInfo::schedules` 用)。
+///
+/// `next` は表示用の**近似値**である点に注意: 真の発火スケジュール
+/// (`ScheduleState`)はプラグイン専用スレッドが所有しており、ここへは共有
+/// しない(タスクブリーフの設計判断: スレッドをまたいで `ScheduleState` を
+/// 共有する複雑さを避ける)。代わりに `plugins/list` が呼ばれるたびに
+/// `ScheduleState::new(&manifest.schedules, Local::now())` で**独立に作り
+/// 直し**、そこから「今から」の次回発火時刻を求める。cron 系は壁時計から
+/// 一意に決まるため厳密に一致するが、interval 系はプラグインスレッド側の
+/// 実際の発火起点(スレッド開始時刻起点)とはズレうる近似値になる。
+#[derive(Debug, Clone)]
+pub struct ScheduleInfo {
+    pub name: String,
+    pub spec: ScheduleSpec,
+    pub next: chrono::DateTime<chrono::Local>,
+}
+
 /// RPC 応答用のプラグイン情報スナップショット。
 pub struct PluginInfo {
     pub manifest: Manifest,
@@ -115,6 +149,7 @@ pub struct PluginInfo {
     pub sidecars: Vec<SidecarInfo>,
     pub filesystem: Vec<FilesystemInfo>,
     pub dashboard: Vec<DashboardInfo>,
+    pub schedules: Vec<ScheduleInfo>,
 }
 
 /// `control_sidecar` が指定できる操作。
@@ -295,6 +330,20 @@ pub struct Registry {
     /// `BUS_SUBSCRIBER_SHUTDOWN_POLL_INTERVAL` ごとにこれを見に行く。詳しい
     /// 経緯は `shutdown_bus_subscribers` のドキュメントコメント参照。
     bus_subscriber_shutdown: Arc<AtomicBool>,
+    /// Running として起動した各プラグインの `work_tx`(の複製)と専用
+    /// スレッドの `JoinHandle` を id で引けるようにしたマップ
+    /// (`shutdown_plugins` 用)。`register_plugin_thread` が
+    /// `runner::start_plugins` から呼ばれて登録する。Disabled で終わった
+    /// プラグイン(init 失敗など)は登録しない -- そのスレッドは既に
+    /// return 済みで `work_rx` を読んでいないため、`Stop` を送っても意味が
+    /// 無い(`register_plugin_thread` のドキュメント参照)。
+    plugin_threads: Arc<Mutex<HashMap<String, PluginThreadHandle>>>,
+}
+
+/// `Registry::plugin_threads` の 1 エントリ。`shutdown_plugins` 専用。
+struct PluginThreadHandle {
+    work_tx: std_mpsc::SyncSender<PluginWork>,
+    handle: thread::JoinHandle<()>,
 }
 
 impl Registry {
@@ -324,6 +373,101 @@ impl Registry {
             driver_registry,
             plugins_dir,
             bus_subscriber_shutdown: Arc::new(AtomicBool::new(false)),
+            plugin_threads: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    /// `runner::start_plugins`(実際には `load_and_run_plugin`)が Running と
+    /// して起動したプラグインの `work_tx` の複製と専用スレッドの
+    /// `JoinHandle` を登録する。`shutdown_plugins` がこれを引いて
+    /// `PluginWork::Stop` を送り、スレッドの終了を待つ(crate 内部専用)。
+    ///
+    /// Disabled で終わったプラグイン(`load` や `init` の失敗)はこれを
+    /// 呼ばない -- そのスレッドは既に `ready_tx` へ結果を送って return 済み
+    /// で `work_rx` を二度と読まないため、登録しても `Stop` が届かないだけ
+    /// でなく、`shutdown_plugins` 側の join 待ちを無駄に長引かせる理由も無い
+    /// (スレッド自体は既に終了しているので `is_finished()` は直ちに `true`
+    /// になり実害は無いが、そもそも意味のある登録ではないため呼び出し元
+    /// [`runner::load_and_run_plugin`] は Running のときだけ呼ぶ)。
+    pub(crate) fn register_plugin_thread(
+        &self,
+        id: &str,
+        work_tx: std_mpsc::SyncSender<PluginWork>,
+        handle: thread::JoinHandle<()>,
+    ) {
+        self.plugin_threads
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(id.to_string(), PluginThreadHandle { work_tx, handle });
+    }
+
+    /// Running な全プラグインへ `PluginWork::Stop` を送り、それぞれの専用
+    /// スレッドの終了を(1 件あたり `PLUGIN_STOP_JOIN_TIMEOUT` を上限に)
+    /// 待つ。デーモンの正常終了シーケンス専用(`core/src/bin/edlr.rs` を
+    /// 参照)。
+    ///
+    /// **`shutdown_bus_subscribers` より前に呼ぶこと**: on-stop の中で
+    /// プラグインがまだバス経由の publish を行いたいかもしれない
+    /// (`HostCtx::check_bus` はこの時点でまだ `shutdown_bus_subscribers` が
+    /// 立てるフラグを見ないので、bus 自体はまだ生きている)。先に
+    /// バス購読側を止めてしまう理由が無い以上、後始末の順序として自然な方
+    /// (プラグインに最後の一仕事をさせてから、購読タスクを畳む)にしてある。
+    ///
+    /// **満杯キューは諦める**: 各プラグインの `work_tx`(容量固定の
+    /// `sync_channel`)へ `try_send` するだけで、詰まっていれば
+    /// `tracing::warn!` を出してその 1 件の on-stop 呼び出しは諦める
+    /// (ブロックする `send` は使わない -- 1 プラグインの詰まりが shutdown
+    /// シーケンス全体を巻き込んで遅延させるべきではないため、
+    /// `spawn_event_subscriber`/`spawn_bus_subscriber` が満杯時に `try_send`
+    /// を使うのと同じ判断)。送信側が既に切断されている(スレッドが trap
+    /// などで既に終了済み)場合も同様に何もしない -- どちらの場合も後続の
+    /// join は行う(トラップ済みなら即座に `is_finished()` が `true` に
+    /// なるだけ)。
+    ///
+    /// **join はスレッドごとに独立してポーリングで打ち切る**: 標準ライブラリの
+    /// `JoinHandle` には `join_timeout` が無いため、`is_finished()` を
+    /// `PLUGIN_STOP_JOIN_POLL_INTERVAL` 間隔でポーリングし、
+    /// `PLUGIN_STOP_JOIN_TIMEOUT` を過ぎたら諦める(warn ログを出して、その
+    /// スレッドの完了を待たずに次のプラグインへ進む -- プロセス自体はこの
+    /// 直後に終了するので、待ちきれなかったスレッドはプロセス終了と共に
+    /// 消える。ハングしたプラグインのために shutdown シーケンス全体を
+    /// 無期限に止めるべきではない)。
+    pub fn shutdown_plugins(&self) {
+        let handles: Vec<(String, PluginThreadHandle)> = self
+            .plugin_threads
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .drain()
+            .collect();
+
+        for (id, thread_handle) in handles {
+            match thread_handle.work_tx.try_send(PluginWork::Stop) {
+                Ok(()) => {}
+                Err(std_mpsc::TrySendError::Full(_)) => {
+                    tracing::warn!(
+                        plugin_id = %id,
+                        "plugin work queue full during shutdown; giving up on calling \
+                         on-stop for this plugin"
+                    );
+                }
+                Err(std_mpsc::TrySendError::Disconnected(_)) => {
+                    // プラグインスレッドは既に(trap などで)終了済み。
+                }
+            }
+
+            let deadline = Instant::now() + PLUGIN_STOP_JOIN_TIMEOUT;
+            while !thread_handle.handle.is_finished() && Instant::now() < deadline {
+                thread::sleep(PLUGIN_STOP_JOIN_POLL_INTERVAL);
+            }
+            if thread_handle.handle.is_finished() {
+                let _ = thread_handle.handle.join();
+            } else {
+                tracing::warn!(
+                    plugin_id = %id,
+                    "plugin thread did not exit within {PLUGIN_STOP_JOIN_TIMEOUT:?} of the \
+                     stop signal; abandoning join (the process is exiting regardless)"
+                );
+            }
         }
     }
 
@@ -382,6 +526,7 @@ impl Registry {
                 let sidecars = self.build_sidecar_infos(&manifest);
                 let filesystem = self.build_filesystem_infos(&manifest);
                 let dashboard = self.build_dashboard_infos(&manifest);
+                let schedules = Self::build_schedule_infos(&manifest);
                 PluginInfo {
                     manifest,
                     state,
@@ -391,6 +536,7 @@ impl Registry {
                     sidecars,
                     filesystem,
                     dashboard,
+                    schedules,
                 }
             })
             .collect()
@@ -531,6 +677,33 @@ impl Registry {
                     request: widget.clone(),
                     grant,
                     resolved,
+                }
+            })
+            .collect()
+    }
+
+    /// `manifest.schedules` から `ScheduleInfo` の一覧を組み立てる(宣言順)。
+    ///
+    /// ディスク I/O もロックも不要な純粋計算(`ScheduleInfo` のドキュメント
+    /// コメント参照): `ScheduleState::new` をこの場で作り直して壁時計
+    /// (`Local::now()`)からの次回発火時刻を求めるだけなので、`&self` すら
+    /// 使わない関連関数にしてある。
+    fn build_schedule_infos(manifest: &Manifest) -> Vec<ScheduleInfo> {
+        let state = ScheduleState::new(&manifest.schedules, chrono::Local::now());
+        state
+            .next_times()
+            .into_iter()
+            .map(|(name, next)| {
+                let spec = manifest
+                    .schedules
+                    .iter()
+                    .find(|s| s.name == name)
+                    .map(|s| s.spec.clone())
+                    .expect("next_times names must come from manifest.schedules");
+                ScheduleInfo {
+                    name: name.to_string(),
+                    spec,
+                    next,
                 }
             })
             .collect()
@@ -1568,6 +1741,8 @@ impl Registry {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use crate::event::Event;
+    use std::sync::atomic::Ordering;
     use std::thread;
     use std::time::Duration;
 
@@ -1666,6 +1841,7 @@ pub(crate) mod tests {
             }],
             bus: vec![],
             dashboard: vec![],
+            schedules: vec![],
         }
     }
 
@@ -1688,6 +1864,7 @@ pub(crate) mod tests {
                 reason: "r".into(),
             }],
             dashboard: vec![],
+            schedules: vec![],
         }
     }
 
@@ -1813,7 +1990,94 @@ pub(crate) mod tests {
                 entry: "ui/index.html".into(),
                 size: WidgetSize::Small,
             }],
+            schedules: vec![],
         }
+    }
+
+    /// `[[schedule]]` を 2 件(interval・cron)持つプラグイン `scheduler-plugin`。
+    fn manifest_with_schedule(id: &str) -> Manifest {
+        use crate::plugin::manifest::ScheduleRequest;
+        Manifest {
+            id: id.to_string(),
+            name: id.to_string(),
+            version: "0.1.0".into(),
+            description: String::new(),
+            entry: "plugin.wasm".into(),
+            events: vec![],
+            settings: vec![],
+            capabilities: vec![],
+            sidecars: vec![],
+            filesystem: vec![],
+            bus: vec![],
+            dashboard: vec![],
+            schedules: vec![
+                ScheduleRequest {
+                    name: "flush".into(),
+                    spec: ScheduleSpec::IntervalSeconds(60),
+                },
+                ScheduleRequest {
+                    name: "daily".into(),
+                    spec: ScheduleSpec::Cron("0 9 * * *".to_string()),
+                },
+            ],
+        }
+    }
+
+    /// `[[schedule]]` を 2 件持つプラグインだけを載せた `Registry`。
+    pub(crate) fn test_registry_with_schedule() -> Registry {
+        let registry = empty_registry();
+        registry.push(PluginEntry {
+            manifest: manifest_with_schedule("scheduler-plugin"),
+            state: PluginState::Running,
+            settings_json: Arc::new(Mutex::new("{}".to_string())),
+            capabilities_json: Arc::new(Mutex::new(crate::plugin::host::capabilities_json_string(
+                &[],
+            ))),
+            sidecars_json: Arc::new(Mutex::new("[]".to_string())),
+            filesystem_json: Arc::new(Mutex::new("[]".to_string())),
+            bus_json: Arc::new(Mutex::new("[]".to_string())),
+        });
+        registry
+    }
+
+    #[test]
+    fn list_reports_schedules_with_name_spec_and_next() {
+        let registry = test_registry_with_schedule();
+        let infos = registry.list();
+        assert_eq!(infos.len(), 1);
+        let schedules = &infos[0].schedules;
+        assert_eq!(schedules.len(), 2);
+
+        assert_eq!(schedules[0].name, "flush");
+        assert_eq!(schedules[0].spec, ScheduleSpec::IntervalSeconds(60));
+        assert!(schedules[0].next > chrono::Local::now());
+
+        assert_eq!(schedules[1].name, "daily");
+        assert_eq!(
+            schedules[1].spec,
+            ScheduleSpec::Cron("0 9 * * *".to_string())
+        );
+        assert!(schedules[1].next > chrono::Local::now());
+    }
+
+    #[test]
+    fn list_reports_empty_schedules_array_when_none_declared() {
+        let registry = empty_registry();
+        registry.push(PluginEntry {
+            manifest: manifest_with_dashboard("no-schedule-plugin"),
+            state: PluginState::Running,
+            settings_json: Arc::new(Mutex::new("{}".to_string())),
+            capabilities_json: Arc::new(Mutex::new(crate::plugin::host::capabilities_json_string(
+                &[],
+            ))),
+            sidecars_json: Arc::new(Mutex::new("[]".to_string())),
+            filesystem_json: Arc::new(Mutex::new("[]".to_string())),
+            bus_json: Arc::new(Mutex::new("[]".to_string())),
+        });
+
+        let infos = registry.list();
+        assert_eq!(infos.len(), 1);
+        assert!(infos[0].schedules.is_empty());
     }
 
     #[test]
@@ -2129,6 +2393,7 @@ pub(crate) mod tests {
             filesystem: vec![],
             bus: vec![],
             dashboard: vec![],
+            schedules: vec![],
         }
     }
 
@@ -2464,6 +2729,7 @@ pub(crate) mod tests {
             filesystem: vec![],
             bus: vec![],
             dashboard: vec![],
+            schedules: vec![],
         }
     }
 
@@ -2610,5 +2876,129 @@ pub(crate) mod tests {
              with GrantsStore's on-disk state (granted={disk_granted}) after \
              concurrent set_capabilities calls"
         );
+    }
+
+    /// Task 5: `shutdown_plugins` のための最小限の manifest(id 以外はどの
+    /// テストでも共通)。
+    fn plain_manifest(id: &str) -> Manifest {
+        Manifest {
+            id: id.to_string(),
+            name: id.to_string(),
+            version: "0.1.0".into(),
+            description: String::new(),
+            entry: "plugin.wasm".into(),
+            events: vec![],
+            settings: vec![],
+            capabilities: vec![],
+            sidecars: vec![],
+            filesystem: vec![],
+            bus: vec![],
+            dashboard: vec![],
+            schedules: vec![],
+        }
+    }
+
+    /// `id` の `Running` エントリを(`register_plugin_thread` は呼ばずに)
+    /// `registry` へ載せる。`shutdown_plugins` のテストは別途
+    /// `register_plugin_thread` を呼んでスレッドを登録する。
+    fn push_running_entry(registry: &Registry, id: &str) {
+        registry.push(PluginEntry {
+            manifest: plain_manifest(id),
+            state: PluginState::Running,
+            settings_json: Arc::new(Mutex::new("{}".to_string())),
+            capabilities_json: Arc::new(Mutex::new(
+                crate::plugin::host::capabilities_json_string(&[]),
+            )),
+            sidecars_json: Arc::new(Mutex::new("[]".to_string())),
+            filesystem_json: Arc::new(Mutex::new("[]".to_string())),
+            bus_json: Arc::new(Mutex::new("[]".to_string())),
+        });
+    }
+
+    /// `shutdown_plugins` が Running かつ登録済みのプラグインへ
+    /// `PluginWork::Stop` を送り、そのスレッドの終了を実際に待つことの検証。
+    /// wasm の実体は無く、`register_plugin_thread` に渡すのは `Stop` を
+    /// 受け取ったらフラグを立てて終了するだけの素のスレッド
+    /// (`runner::run_plugin_thread` の `LoopAction::Stop` 分岐の骨格だけを
+    /// 模したもの)。
+    #[test]
+    fn shutdown_plugins_sends_stop_and_waits_for_the_registered_thread_to_exit() {
+        let registry = empty_registry();
+        push_running_entry(&registry, "stoppable");
+
+        let (work_tx, work_rx) = std_mpsc::sync_channel::<PluginWork>(4);
+        let stopped = Arc::new(AtomicBool::new(false));
+        let handle = {
+            let stopped = stopped.clone();
+            thread::spawn(move || {
+                if let Ok(PluginWork::Stop) = work_rx.recv() {
+                    stopped.store(true, Ordering::SeqCst);
+                }
+            })
+        };
+        registry.register_plugin_thread("stoppable", work_tx, handle);
+
+        registry.shutdown_plugins();
+
+        assert!(
+            stopped.load(Ordering::SeqCst),
+            "shutdown_plugins must send PluginWork::Stop to a registered Running \
+             plugin's thread and wait for it to exit"
+        );
+    }
+
+    /// キューが満杯で `try_send(Stop)` が失敗しても `shutdown_plugins` は
+    /// パニックせず、他のプラグインの後始末を続けられることの検証
+    /// (「満杯なら warn して諦める」の非パニック部分。ログ出力自体は
+    /// アサートしない -- 既存の `spawn_event_subscriber`/`spawn_bus_subscriber`
+    /// の満杯テストと同じ流儀で、観測可能な副作用[ここでは「パニックしない
+    /// でループを終える」こと]だけを見る)。
+    #[test]
+    fn shutdown_plugins_does_not_panic_when_the_work_queue_is_full() {
+        let registry = empty_registry();
+        push_running_entry(&registry, "full-queue");
+
+        let (work_tx, _work_rx) = std_mpsc::sync_channel::<PluginWork>(1);
+        // キューを埋めて `try_send(Stop)` が `Full` になるようにする。誰も
+        // 消費しないので、詰まって動かないプラグインを模している。
+        work_tx
+            .try_send(PluginWork::Event(Arc::new(Event::Status {
+                raw: serde_json::json!({}),
+            })))
+            .expect("capacity-1 channel should accept the first send");
+        // このスレッド自体は(テストを速く保つため)即座に終了する -- ここで
+        // 検証したいのは「送信が失敗しても panic しない」ことであって、
+        // 「詰まった実プラグインが実際に止まるまで待つ」ことの再検証では
+        // ない(それは上のテストで別途検証済み)。
+        let handle = thread::spawn(|| {});
+        registry.register_plugin_thread("full-queue", work_tx, handle);
+
+        registry.shutdown_plugins();
+    }
+
+    /// `Disabled`(init 失敗などで Running にならなかった)プラグインは
+    /// `register_plugin_thread` を呼ばれない(`runner::load_and_run_plugin`
+    /// が Running のときだけ呼ぶ設計)ため、`shutdown_plugins` にとっては
+    /// 最初から存在しないのと同じになる。ここではその前提のもとで
+    /// `shutdown_plugins` が(送るべき相手がいなくても)パニックしないことを
+    /// 確認する。
+    #[test]
+    fn shutdown_plugins_is_a_no_op_for_disabled_plugins_that_were_never_registered() {
+        let registry = empty_registry();
+        registry.push(PluginEntry {
+            manifest: plain_manifest("disabled-plugin"),
+            state: PluginState::Disabled {
+                reason: "init failed".to_string(),
+            },
+            settings_json: Arc::new(Mutex::new("{}".to_string())),
+            capabilities_json: Arc::new(Mutex::new(
+                crate::plugin::host::capabilities_json_string(&[]),
+            )),
+            sidecars_json: Arc::new(Mutex::new("[]".to_string())),
+            filesystem_json: Arc::new(Mutex::new("[]".to_string())),
+            bus_json: Arc::new(Mutex::new("[]".to_string())),
+        });
+
+        registry.shutdown_plugins();
     }
 }

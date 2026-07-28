@@ -6,7 +6,7 @@ import (
 	"go.bytecodealliance.org/cm"
 )
 
-// This file contains wasmimport and wasmexport declarations for "edlr:plugin@0.3.0".
+// This file contains wasmimport and wasmexport declarations for "edlr:plugin@0.4.0".
 
 //go:wasmexport init
 //export init
@@ -30,5 +30,20 @@ func wasmexport_OnMessage(driver0 *uint8, driver1 uint32, topic0 *uint8, topic1 
 	topic := cm.LiftString[string]((*uint8)(topic0), (uint32)(topic1))
 	payload := cm.LiftList[cm.List[uint8]]((*uint8)(payload0), (uint32)(payload1))
 	Exports.OnMessage(driver, topic, payload)
+	return
+}
+
+//go:wasmexport on-schedule
+//export on-schedule
+func wasmexport_OnSchedule(name0 *uint8, name1 uint32) {
+	name := cm.LiftString[string]((*uint8)(name0), (uint32)(name1))
+	Exports.OnSchedule(name)
+	return
+}
+
+//go:wasmexport on-stop
+//export on-stop
+func wasmexport_OnStop() {
+	Exports.OnStop()
 	return
 }

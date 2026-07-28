@@ -62,6 +62,7 @@ impl DriverManifest {
             filesystem: self.filesystem.clone(),
             bus: Vec::new(),
             dashboard: Vec::new(),
+            schedules: Vec::new(),
         }
     }
 }

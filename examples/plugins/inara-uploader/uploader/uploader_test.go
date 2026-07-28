@@ -515,6 +515,109 @@ func TestAttemptedCountsRealSendAttempts(t *testing.T) {
 	}
 }
 
+// スケジュール発火は minIntervalSeconds を経過していれば端数もフラッシュする。
+func TestScheduleFlushesAPartialBatchAfterTheInterval(t *testing.T) {
+	sender := okSender()
+	c := newClock()
+	u := New(c.now, sender)
+	openLiveSession(u)
+	cfg := testSettings()
+
+	u.Handle(cfg, jump("Sol", false))
+	if len(sender.calls) != 0 {
+		t.Fatalf("expected no upload before the schedule fires, got %d", len(sender.calls))
+	}
+
+	c.advance(time.Minute)
+	out := u.HandleSchedule(cfg)
+	if len(sender.calls) != 1 || out.Sent != 1 {
+		t.Errorf("expected the schedule to flush the partial batch, got %d uploads / %+v", len(sender.calls), out)
+	}
+}
+
+// スケジュール発火も minIntervalSeconds を尊重する。
+func TestScheduleRespectsTheMinimumInterval(t *testing.T) {
+	sender := okSender()
+	u := New(newClock().now, sender)
+	openLiveSession(u)
+	cfg := testSettings()
+
+	u.Handle(cfg, jump("Sol", false))
+	out := u.HandleSchedule(cfg)
+	if out.Attempted != 0 || len(sender.calls) != 0 {
+		t.Errorf("expected the schedule to respect the interval, got %d uploads / %+v", len(sender.calls), out)
+	}
+}
+
+// キューが空のときスケジュール発火は何もしない。
+func TestScheduleWithAnEmptyQueueDoesNothing(t *testing.T) {
+	sender := okSender()
+	c := newClock()
+	u := New(c.now, sender)
+	openLiveSession(u)
+	cfg := testSettings()
+
+	c.advance(time.Minute)
+	out := u.HandleSchedule(cfg)
+	if len(sender.calls) != 0 || out.Attempted != 0 {
+		t.Errorf("expected nothing to happen with an empty queue, got %d uploads / %+v", len(sender.calls), out)
+	}
+}
+
+// replay 中はスケジュール発火が割り込んで送ってはならない。ReplayBatchSize
+// ごとにまとめて送る Handle 側のバッチングが、端数の先出しで壊れるため。
+func TestScheduleDuringReplayDoesNotFlush(t *testing.T) {
+	sender := okSender()
+	c := newClock()
+	u := New(c.now, sender)
+	openLiveSession(u)
+	cfg := testSettings()
+
+	u.Handle(cfg, jump("Sol", true))
+	if u.sawLive {
+		t.Fatalf("precondition: sawLive must still be false during replay")
+	}
+
+	c.advance(time.Minute)
+	out := u.HandleSchedule(cfg)
+	if out.Attempted != 0 || len(sender.calls) != 0 {
+		t.Errorf("expected the schedule to skip during replay, got %d uploads / %+v", len(sender.calls), out)
+	}
+	if out.Pending != 1 {
+		t.Errorf("expected the queue to stay intact during replay, got %+v", out)
+	}
+}
+
+// on-stop は replay 中であっても無条件にフラッシュする(意図した仕様: 送れる
+// ものは送ってから終了する)。ReplayBatchSize 未満の半端な件数を送ることに
+// なっても、次のイベントはもう来ないので許容する。
+func TestStopDuringReplayFlushesAnyway(t *testing.T) {
+	sender := okSender()
+	u := New(newClock().now, sender)
+	openLiveSession(u)
+	cfg := testSettings()
+
+	u.Handle(cfg, jump("Sol", true))
+	out := u.HandleStop(cfg)
+	if len(sender.calls) != 1 || out.Sent != 1 {
+		t.Errorf("expected on-stop to flush even during replay, got %d uploads / %+v", len(sender.calls), out)
+	}
+}
+
+// on-stop は間隔を無視して即座にフラッシュする(最後の機会)。
+func TestStopFlushesImmediatelyIgnoringTheInterval(t *testing.T) {
+	sender := okSender()
+	u := New(newClock().now, sender)
+	openLiveSession(u)
+	cfg := testSettings()
+
+	u.Handle(cfg, jump("Sol", false))
+	out := u.HandleStop(cfg)
+	if len(sender.calls) != 1 || out.Sent != 1 {
+		t.Errorf("expected on-stop to flush immediately, got %d uploads / %+v", len(sender.calls), out)
+	}
+}
+
 func TestAttemptedStaysZeroWithoutASend(t *testing.T) {
 	sender := okSender()
 	u := New(newClock().now, sender)

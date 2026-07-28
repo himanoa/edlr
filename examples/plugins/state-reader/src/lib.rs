@@ -33,6 +33,10 @@ impl Guest for Component {
             ),
         );
     }
+
+    fn on_schedule(_name: String) {}
+
+    fn on_stop() {}
 }
 
 /// `StarSystem` を素朴に取り出す(サンプルなので依存を増やさない)。
