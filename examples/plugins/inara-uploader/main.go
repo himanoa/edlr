@@ -64,10 +64,18 @@ func onEvent(ev plugin.Event) {
 	}))
 }
 
-// onSchedule は manifest の `[[schedule]]` (name = "flush") から呼ばれる。
+// onSchedule は manifest の `[[schedule]]` から呼ばれる。このプラグインが
+// 宣言しているスケジュールは "flush" 1 つだけなので、name はそれ以外を
+// 無視するためだけに見る(将来 2 つ目のスケジュールを足したら、ここで
+// 分岐する必要がある)。
+//
 // minIntervalSeconds を尊重した定期フラッシュで、直近のイベントで送り
 // 切れなかった端数を拾い上げる。
 func onSchedule(name string) {
+	if name != "flush" {
+		logf(hostlog.LevelWarn, "unknown schedule name: %s", name)
+		return
+	}
 	cfg := settings.Parse(hostsettings.GetAll())
 	report(cfg, up.HandleSchedule(cfg))
 }
