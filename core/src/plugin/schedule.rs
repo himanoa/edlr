@@ -3,37 +3,57 @@
 //! この型自身は壁時計を読まない。すべての「現在時刻」は引数として
 //! `chrono::DateTime<chrono::Local>` で渡される(テストで時刻を固定するため)。
 //!
-//! ## 壁時計 vs 単調時計(設計からの逸脱)
+//! ## 壁時計 vs 単調時計
 //!
-//! 設計時点(`docs/superpowers/specs/2026-07-28-plugin-scheduler-design.md`)
-//! では interval スケジュールの発火間隔追跡には単調時計(`Instant`)を使い、
-//! cron の定刻計算にだけ壁時計(`chrono::Local`)を使う想定だった。実装では
-//! interval・cron の両方を `chrono::Local` の壁時計で統一して扱っている
-//! (この `Entry::next` も `runner.rs` 側の現在時刻取得も、常に
-//! `chrono::Local::now()` 系統)。
+//! 設計(`docs/superpowers/specs/2026-07-28-plugin-scheduler-design.md`)どおり、
+//! **interval は単調時計(`Instant`)、cron は壁時計(`chrono::Local`)** で
+//! 追跡する。それぞれ意味が違うため:
 //!
-//! これは意図的な逸脱であり、値そのものは変更しない: 時刻表現をひとつに
-//! 統一した方が実装・テストが単純になり、`plugins/list` の応答に載せる
-//! `next`(ISO8601 の壁時計時刻)も結局はどこかで壁時計へ変換する必要が
-//! ある。また前方への時刻ジャンプ(NTP 補正など)はそもそも「1 回だけ
-//! 発火してそれ以降追いつく」既存のクランプ処理で吸収される。
+//! - `interval-seconds = 60` は「前回から 60 秒後」という**経過時間**の宣言
+//!   であり、時計の付け替えとは無関係であるべき。壁時計で追うと、NTP の
+//!   後方ステップやサスペンド/レジュームでステップ量ぶん発火が遅延し、
+//!   前方ステップでは発火が早まって合体してしまう
+//! - `cron = "0 9 * * *"` は「毎朝 9 時」という**定刻**の宣言なので、
+//!   壁時計が正。時計が直れば定刻も追従してよい
 //!
-//! トレードオフとして、interval スケジュールは NTP のステップ補正や
-//! サスペンド/レジュームの影響を単調時計より受けやすい:
-//! - 前方へのステップ(時計が進む方向)-- 上記のクランプにより、単に
-//!   1 回早めに(コアレスして)発火するだけで済む
-//! - 後方へのステップ(時計が戻る方向)-- 次回発火が、戻った分だけ
-//!   遅延する
-//!
-//! いずれも許容している: edlr のスケジュールはユーザー体感のための
-//! おおまかな定期実行であり、秒単位の厳密さは要求されない。
+//! そのため現在時刻は `Clock`(壁時計 + 単調時計のペア)で受け取る。
+//! この型自身はどちらの時計も読まない(テストで時刻を固定するため)。
+//! `plugins/list` に載せる `next`(ISO8601 の壁時計時刻)は、`Clock` を
+//! 基準に単調時刻を壁時計へ変換して組み立てる。
 
 use std::str::FromStr;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Local};
 
 use super::manifest::{normalize_cron, ScheduleRequest, ScheduleSpec};
+
+/// 「いまが何時か」を壁時計と単調時計の両方で表したもの。
+///
+/// interval は `mono`、cron は `wall` を基準に評価する。両者は同一時点を
+/// 指している必要があるため、必ずペアで取得する(`Clock::now`)。
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Clock {
+    pub wall: DateTime<Local>,
+    pub mono: Instant,
+}
+
+impl Clock {
+    /// 実時計を読む。`ScheduleState` の外側(`runner.rs` のループや
+    /// `registry.rs` の RPC)でのみ呼ばれる。
+    pub fn now() -> Clock {
+        Clock {
+            wall: Local::now(),
+            mono: Instant::now(),
+        }
+    }
+
+    /// 単調時刻を、この `Clock` を基準に壁時計へ変換する(表示用)。
+    fn wall_at(&self, mono: Instant) -> DateTime<Local> {
+        let delta = mono.saturating_duration_since(self.mono);
+        self.wall + chrono::Duration::from_std(delta).unwrap_or_else(|_| chrono::Duration::zero())
+    }
+}
 
 /// 実効最小発火間隔。これより短い interval や cron の間隔はここまで
 /// クランプされる(5 秒未満の連射を防ぐ)。
@@ -42,8 +62,8 @@ pub(crate) const MIN_FIRE_INTERVAL: Duration = Duration::from_secs(5);
 /// 1 スケジュールぶんの発火計算方法。
 #[derive(Debug, Clone)]
 enum Fire {
-    /// 固定間隔(`MIN_FIRE_INTERVAL` 未満は丸め済み)。
-    Interval(chrono::Duration),
+    /// 固定間隔(`MIN_FIRE_INTERVAL` 未満は丸め済み)。単調時計で追う。
+    Interval(Duration),
     /// cron 式(正規化前の 5 欄形式)。`cron::Schedule` は大きいため
     /// `Interval` とのサイズ差を抑えるべく Box で包む。
     ///
@@ -57,17 +77,52 @@ enum Fire {
     },
 }
 
+/// 次回発火時刻。どちらの時計で追っているかで表現が分かれる。
+#[derive(Debug, Clone, Copy)]
+enum NextFire {
+    /// interval — 単調時計基準。
+    Mono(Instant),
+    /// cron — 壁時計基準。
+    Wall(DateTime<Local>),
+}
+
+impl NextFire {
+    /// 発火までの残り時間。既に過ぎていれば `Duration::ZERO`。
+    fn remaining(&self, clock: &Clock) -> Duration {
+        match self {
+            NextFire::Mono(at) => at.saturating_duration_since(clock.mono),
+            NextFire::Wall(at) => (*at - clock.wall).to_std().unwrap_or(Duration::ZERO),
+        }
+    }
+
+    fn is_due(&self, clock: &Clock) -> bool {
+        match self {
+            NextFire::Mono(at) => *at <= clock.mono,
+            NextFire::Wall(at) => *at <= clock.wall,
+        }
+    }
+
+    /// 表示用の壁時計時刻。
+    fn wall(&self, clock: &Clock) -> DateTime<Local> {
+        match self {
+            NextFire::Mono(at) => clock.wall_at(*at),
+            NextFire::Wall(at) => *at,
+        }
+    }
+}
+
 /// 1 スケジュールの実行時状態。
 #[derive(Debug, Clone)]
 struct Entry {
     name: String,
     fire: Fire,
-    next: DateTime<Local>,
+    next: NextFire,
 }
 
 /// 1 プラグインの全スケジュールの発火状態。
 ///
-/// 壁時計は引数で受け取り、この型自身は時計を読まない(テストのため)。
+/// 時計は `Clock` として引数で受け取り、この型自身は時計を読まない
+/// (テストのため)。
 pub(crate) struct ScheduleState {
     entries: Vec<Entry>,
 }
@@ -75,15 +130,15 @@ pub(crate) struct ScheduleState {
 impl ScheduleState {
     /// manifest から構築する。下限未満の interval は 5 秒へ丸めて
     /// warn ログを出した状態にする。
-    pub fn new(schedules: &[ScheduleRequest], now: DateTime<Local>) -> Self {
+    pub fn new(schedules: &[ScheduleRequest], clock: Clock) -> Self {
         let entries = schedules
             .iter()
-            .map(|req| Self::build_entry(req, now))
+            .map(|req| Self::build_entry(req, clock))
             .collect();
         ScheduleState { entries }
     }
 
-    fn build_entry(req: &ScheduleRequest, now: DateTime<Local>) -> Entry {
+    fn build_entry(req: &ScheduleRequest, clock: Clock) -> Entry {
         match &req.spec {
             ScheduleSpec::IntervalSeconds(secs) => {
                 let effective = if Duration::from_secs(*secs) < MIN_FIRE_INTERVAL {
@@ -97,12 +152,10 @@ impl ScheduleState {
                 } else {
                     Duration::from_secs(*secs)
                 };
-                let interval = chrono::Duration::from_std(effective)
-                    .unwrap_or_else(|_| chrono::Duration::seconds(MIN_FIRE_INTERVAL.as_secs() as i64));
                 Entry {
                     name: req.name.clone(),
-                    next: now + interval,
-                    fire: Fire::Interval(interval),
+                    next: NextFire::Mono(clock.mono + effective),
+                    fire: Fire::Interval(effective),
                 }
             }
             ScheduleSpec::Cron(expr) => {
@@ -122,14 +175,15 @@ impl ScheduleState {
                     cron::Schedule::from_str("0 0 0 1 1 * 2999").expect("dummy cron must parse")
                 });
                 let mut clamp_warned = false;
-                let next = Self::next_cron_fire(&req.name, &schedule, now, &mut clamp_warned);
+                let next =
+                    Self::next_cron_fire(&req.name, &schedule, clock.wall, &mut clamp_warned);
                 Entry {
                     name: req.name.clone(),
                     fire: Fire::Cron {
                         schedule: Box::new(schedule),
                         clamp_warned,
                     },
-                    next,
+                    next: NextFire::Wall(next),
                 }
             }
         }
@@ -173,23 +227,19 @@ impl ScheduleState {
     /// 各スケジュールの `(name, 次回発火時刻)` を宣言順に返す。
     ///
     /// `plugins/list` の RPC 応答(`registry.rs`)が「表示用の次回発火時刻」を
-    /// 組み立てるための純粋な読み取り専用アクセサ。この型自身は壁時計を
-    /// 読まないので、呼び出し側が現在時刻を渡す(`until_next`/`take_due` と
-    /// 同じ流儀)。
-    pub(crate) fn next_times(&self) -> Vec<(&str, DateTime<Local>)> {
+    /// 組み立てるための純粋な読み取り専用アクセサ。この型自身は時計を
+    /// 読まないので、呼び出し側が `Clock` を渡す(`until_next`/`take_due` と
+    /// 同じ流儀)。interval の単調時刻はここで壁時計へ変換される。
+    pub(crate) fn next_times(&self, clock: Clock) -> Vec<(&str, DateTime<Local>)> {
         self.entries
             .iter()
-            .map(|e| (e.name.as_str(), e.next))
+            .map(|e| (e.name.as_str(), e.next.wall(&clock)))
             .collect()
     }
 
     /// 次の発火までの残り時間(スケジュールが無ければ None)。
-    pub fn until_next(&self, now: DateTime<Local>) -> Option<Duration> {
-        self.entries
-            .iter()
-            .map(|e| e.next)
-            .min()
-            .map(|next| (next - now).to_std().unwrap_or(Duration::ZERO))
+    pub fn until_next(&self, clock: Clock) -> Option<Duration> {
+        self.entries.iter().map(|e| e.next.remaining(&clock)).min()
     }
 
     /// 期限が来ているスケジュール名を最大 1 つ返し、その次回時刻を
@@ -198,35 +248,41 @@ impl ScheduleState {
     /// 複数のスケジュールが同時に期限切れでも 1 回の呼び出しでは 1 件だけ
     /// 返す(呼び出し側がループで繰り返し呼ぶ想定)。同時に複数が期限切れの
     /// 場合の順序は宣言順で決定的。
-    pub fn take_due(&mut self, now: DateTime<Local>) -> Option<String> {
-        let idx = self.entries.iter().position(|e| e.next <= now)?;
+    pub fn take_due(&mut self, clock: Clock) -> Option<String> {
+        let idx = self.entries.iter().position(|e| e.next.is_due(&clock))?;
         let entry = &mut self.entries[idx];
         let name = entry.name.clone();
-        entry.next = Self::advance_to_future(&name, &mut entry.fire, entry.next, now);
+        entry.next = Self::advance_to_future(&name, &mut entry.fire, entry.next, clock);
         Some(name)
     }
 
-    /// どれだけ遅れていても、`next` を「now より未来の直近の発火時刻」まで
+    /// どれだけ遅れていても、`next` を「いまより未来の直近の発火時刻」まで
     /// 一気に進める(見逃した発火は 1 回に集約される)。
-    fn advance_to_future(
-        name: &str,
-        fire: &mut Fire,
-        next: DateTime<Local>,
-        now: DateTime<Local>,
-    ) -> DateTime<Local> {
-        match fire {
-            Fire::Interval(interval) => {
+    fn advance_to_future(name: &str, fire: &mut Fire, next: NextFire, clock: Clock) -> NextFire {
+        match (fire, next) {
+            (Fire::Interval(interval), NextFire::Mono(next)) => {
                 let mut next = next;
                 // interval は必ず正(MIN_FIRE_INTERVAL 未満は構築時に丸め済み)。
-                while next <= now {
+                while next <= clock.mono {
                     next += *interval;
                 }
-                next
+                NextFire::Mono(next)
             }
-            Fire::Cron {
+            (
+                Fire::Cron {
+                    schedule,
+                    clamp_warned,
+                },
+                _,
+            ) => NextFire::Wall(Self::next_cron_fire(
+                name,
                 schedule,
+                clock.wall,
                 clamp_warned,
-            } => Self::next_cron_fire(name, schedule, now, clamp_warned),
+            )),
+            // `Fire` と `NextFire` は構築時に対で決まるため到達しない。
+            // 万一ずれても、次の周期で拾い直せる時刻へ倒す。
+            (Fire::Interval(interval), NextFire::Wall(_)) => NextFire::Mono(clock.mono + *interval),
         }
     }
 }
@@ -243,25 +299,67 @@ mod tests {
         }
     }
 
+    /// テスト用の固定時計。基準時刻からのオフセットで `Clock` を作る。
+    ///
+    /// 通常は `at()` で壁時計と単調時計を同じだけ進める(時計が正常なケース)。
+    /// NTP のステップ補正やサスペンド/レジュームを再現したいときは `skewed()`
+    /// で両者を別々に進める。
+    struct FakeClock {
+        wall0: DateTime<Local>,
+        mono0: Instant,
+    }
+
+    impl FakeClock {
+        fn new(wall0: DateTime<Local>) -> FakeClock {
+            FakeClock {
+                wall0,
+                // 壁時計が後方へステップするテストでも単調時計側を引き算
+                // できるよう、十分に先を基準点にしておく。
+                mono0: Instant::now() + Duration::from_secs(86_400),
+            }
+        }
+
+        fn at(&self, offset: chrono::Duration) -> Clock {
+            self.skewed(offset, offset)
+        }
+
+        fn skewed(&self, mono_offset: chrono::Duration, wall_offset: chrono::Duration) -> Clock {
+            let mono = if mono_offset >= chrono::Duration::zero() {
+                self.mono0 + mono_offset.to_std().unwrap()
+            } else {
+                self.mono0 - (-mono_offset).to_std().unwrap()
+            };
+            Clock {
+                wall: self.wall0 + wall_offset,
+                mono,
+            }
+        }
+    }
+
+    fn secs(n: i64) -> chrono::Duration {
+        chrono::Duration::seconds(n)
+    }
+
     #[test]
     fn interval_fires_after_the_interval() {
-        let t0 = Local.with_ymd_and_hms(2026, 7, 28, 0, 0, 0).unwrap();
+        let c = FakeClock::new(Local.with_ymd_and_hms(2026, 7, 28, 0, 0, 0).unwrap());
+        let t0 = c.at(secs(0));
         let mut s = ScheduleState::new(&[req("flush", ScheduleSpec::IntervalSeconds(60))], t0);
         assert_eq!(s.take_due(t0), None);
         assert_eq!(s.until_next(t0), Some(Duration::from_secs(60)));
-        assert_eq!(
-            s.take_due(t0 + chrono::Duration::seconds(60)),
-            Some("flush".into())
-        );
+        assert_eq!(s.take_due(c.at(secs(60))), Some("flush".into()));
     }
 
     #[test]
     fn missed_fires_are_coalesced_to_one() {
-        let t0 = Local.with_ymd_and_hms(2026, 7, 28, 0, 0, 0).unwrap();
-        let mut s = ScheduleState::new(&[req("flush", ScheduleSpec::IntervalSeconds(60))], t0);
+        let c = FakeClock::new(Local.with_ymd_and_hms(2026, 7, 28, 0, 0, 0).unwrap());
+        let mut s = ScheduleState::new(
+            &[req("flush", ScheduleSpec::IntervalSeconds(60))],
+            c.at(secs(0)),
+        );
 
         // 10 分経過(本来 10 回発火しているはず)。
-        let t_later = t0 + chrono::Duration::minutes(10);
+        let t_later = c.at(chrono::Duration::minutes(10));
         assert_eq!(s.take_due(t_later), Some("flush".into()));
         // 2 回目は None(同時刻ではもう期限切れがない = 1 回に集約された)。
         assert_eq!(s.take_due(t_later), None);
@@ -272,49 +370,92 @@ mod tests {
 
     #[test]
     fn interval_below_minimum_is_clamped_to_five_seconds() {
-        let t0 = Local.with_ymd_and_hms(2026, 7, 28, 0, 0, 0).unwrap();
+        let c = FakeClock::new(Local.with_ymd_and_hms(2026, 7, 28, 0, 0, 0).unwrap());
+        let t0 = c.at(secs(0));
         let mut s = ScheduleState::new(&[req("tick", ScheduleSpec::IntervalSeconds(1))], t0);
         assert_eq!(s.until_next(t0), Some(Duration::from_secs(5)));
-        assert_eq!(s.take_due(t0 + chrono::Duration::seconds(4)), None);
-        assert_eq!(
-            s.take_due(t0 + chrono::Duration::seconds(5)),
-            Some("tick".into())
+        assert_eq!(s.take_due(c.at(secs(4))), None);
+        assert_eq!(s.take_due(c.at(secs(5))), Some("tick".into()));
+    }
+
+    /// 壁時計が後方へステップしても(NTP 補正・サスペンドからの復帰)、
+    /// interval の発火は経過時間どおりに来ること。壁時計で追っていた頃は、
+    /// ここでステップ量ぶん発火が遅延していた。
+    #[test]
+    fn interval_ignores_a_backward_wall_clock_step() {
+        let c = FakeClock::new(Local.with_ymd_and_hms(2026, 7, 28, 0, 0, 0).unwrap());
+        let mut s = ScheduleState::new(
+            &[req("flush", ScheduleSpec::IntervalSeconds(60))],
+            c.at(secs(0)),
         );
+
+        // 単調時計は 60 秒進んだが、壁時計は 1 時間戻された。
+        let stepped_back = c.skewed(secs(60), -chrono::Duration::hours(1));
+        assert_eq!(s.take_due(stepped_back), Some("flush".into()));
+    }
+
+    /// 壁時計が前方へステップしても、interval の発火が早まって合体しないこと。
+    #[test]
+    fn interval_ignores_a_forward_wall_clock_step() {
+        let c = FakeClock::new(Local.with_ymd_and_hms(2026, 7, 28, 0, 0, 0).unwrap());
+        let mut s = ScheduleState::new(
+            &[req("flush", ScheduleSpec::IntervalSeconds(60))],
+            c.at(secs(0)),
+        );
+
+        // 単調時計は 10 秒しか進んでいないのに、壁時計は 1 時間進んだ。
+        let stepped_forward = c.skewed(secs(10), chrono::Duration::hours(1));
+        assert_eq!(s.take_due(stepped_forward), None);
+        assert_eq!(s.until_next(stepped_forward), Some(Duration::from_secs(50)));
+    }
+
+    /// cron は逆に壁時計が正。時計が直れば定刻も追従してよい。
+    #[test]
+    fn cron_follows_a_forward_wall_clock_step() {
+        let c = FakeClock::new(Local.with_ymd_and_hms(2026, 7, 28, 8, 59, 0).unwrap());
+        let mut s = ScheduleState::new(
+            &[req("daily", ScheduleSpec::Cron("0 9 * * *".to_string()))],
+            c.at(secs(0)),
+        );
+
+        // 単調時計は 1 秒しか進んでいないが、壁時計は 09:00 を回った。
+        let stepped = c.skewed(secs(1), secs(60));
+        assert_eq!(s.take_due(stepped), Some("daily".into()));
     }
 
     #[test]
     fn cron_fires_at_the_wall_clock_time() {
-        let t0 = Local.with_ymd_and_hms(2026, 7, 28, 8, 59, 0).unwrap();
+        let c = FakeClock::new(Local.with_ymd_and_hms(2026, 7, 28, 8, 59, 0).unwrap());
+        let t0 = c.at(secs(0));
         let mut s = ScheduleState::new(
             &[req("daily", ScheduleSpec::Cron("0 9 * * *".to_string()))],
             t0,
         );
         assert_eq!(s.until_next(t0), Some(Duration::from_secs(60)));
         assert_eq!(s.take_due(t0), None);
-        let t_fire = Local.with_ymd_and_hms(2026, 7, 28, 9, 0, 0).unwrap();
-        assert_eq!(s.take_due(t_fire), Some("daily".into()));
+        assert_eq!(s.take_due(c.at(secs(60))), Some("daily".into()));
     }
 
     #[test]
     fn two_schedules_fire_independently() {
         // interval は 70 秒にして、cron の分境界(09:00:00)と重ならない
         // ようにする(でないと両方が同時刻で期限切れになり得る)。
-        let t0 = Local.with_ymd_and_hms(2026, 7, 28, 8, 58, 0).unwrap();
+        let c = FakeClock::new(Local.with_ymd_and_hms(2026, 7, 28, 8, 58, 0).unwrap());
         let mut s = ScheduleState::new(
             &[
                 req("flush", ScheduleSpec::IntervalSeconds(70)),
                 req("daily", ScheduleSpec::Cron("0 9 * * *".to_string())),
             ],
-            t0,
+            c.at(secs(0)),
         );
 
         // 08:59:10: interval 側だけが期限切れ。
-        let t1 = t0 + chrono::Duration::seconds(70);
+        let t1 = c.at(secs(70));
         assert_eq!(s.take_due(t1), Some("flush".into()));
         assert_eq!(s.take_due(t1), None);
 
         // 09:00:00: cron 側だけが期限切れ(interval の次回は 09:00:20)。
-        let t2 = Local.with_ymd_and_hms(2026, 7, 28, 9, 0, 0).unwrap();
+        let t2 = c.at(secs(120));
         assert_eq!(s.take_due(t2), Some("daily".into()));
         assert_eq!(s.take_due(t2), None);
     }
@@ -324,15 +465,15 @@ mod tests {
         // 同一 interval の 2 件を用意し、同時に期限切れになるようにする。
         // take_due は 1 回の呼び出しで 1 件だけ返すため、宣言順(a → b)で
         // 決定的に返ることを確認する。
-        let t0 = Local.with_ymd_and_hms(2026, 7, 28, 0, 0, 0).unwrap();
+        let c = FakeClock::new(Local.with_ymd_and_hms(2026, 7, 28, 0, 0, 0).unwrap());
         let mut s = ScheduleState::new(
             &[
                 req("a", ScheduleSpec::IntervalSeconds(60)),
                 req("b", ScheduleSpec::IntervalSeconds(60)),
             ],
-            t0,
+            c.at(secs(0)),
         );
-        let t1 = t0 + chrono::Duration::seconds(60);
+        let t1 = c.at(secs(60));
         assert_eq!(s.take_due(t1), Some("a".into()));
         assert_eq!(s.take_due(t1), Some("b".into()));
         assert_eq!(s.take_due(t1), None);
@@ -340,7 +481,9 @@ mod tests {
 
     #[test]
     fn next_times_reports_each_schedules_next_fire_in_declaration_order() {
-        let t0 = Local.with_ymd_and_hms(2026, 7, 28, 8, 58, 0).unwrap();
+        let wall0 = Local.with_ymd_and_hms(2026, 7, 28, 8, 58, 0).unwrap();
+        let c = FakeClock::new(wall0);
+        let t0 = c.at(secs(0));
         let s = ScheduleState::new(
             &[
                 req("flush", ScheduleSpec::IntervalSeconds(60)),
@@ -349,10 +492,11 @@ mod tests {
             t0,
         );
 
-        let next = s.next_times();
+        // interval 側は単調時計で持っているので、表示用に壁時計へ変換される。
+        let next = s.next_times(t0);
         assert_eq!(next.len(), 2);
         assert_eq!(next[0].0, "flush");
-        assert_eq!(next[0].1, t0 + chrono::Duration::seconds(60));
+        assert_eq!(next[0].1, wall0 + secs(60));
         assert_eq!(next[1].0, "daily");
         assert_eq!(
             next[1].1,

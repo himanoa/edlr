@@ -19,7 +19,7 @@ use crate::plugin::fs_runtime::{filesystem_json_string, FsRuntimeEntry};
 use crate::plugin::grants::{GrantState, GrantsError, GrantsStore};
 use crate::plugin::host::{capabilities_json_string, parse_capability_hosts, PluginHost};
 use crate::plugin::runner::PluginWork;
-use crate::plugin::schedule::ScheduleState;
+use crate::plugin::schedule::{Clock, ScheduleState};
 use crate::plugin::settings::SettingsStore;
 use crate::plugin::sidecar::{assign_ports, SidecarConfig, SidecarConfigError, SidecarConfigStore};
 use crate::plugin::sidecar_runtime::{
@@ -685,13 +685,14 @@ impl Registry {
     /// `manifest.schedules` から `ScheduleInfo` の一覧を組み立てる(宣言順)。
     ///
     /// ディスク I/O もロックも不要な純粋計算(`ScheduleInfo` のドキュメント
-    /// コメント参照): `ScheduleState::new` をこの場で作り直して壁時計
-    /// (`Local::now()`)からの次回発火時刻を求めるだけなので、`&self` すら
+    /// コメント参照): `ScheduleState::new` をこの場で作り直して現在時刻
+    /// (`Clock::now()`)からの次回発火時刻を求めるだけなので、`&self` すら
     /// 使わない関連関数にしてある。
     fn build_schedule_infos(manifest: &Manifest) -> Vec<ScheduleInfo> {
-        let state = ScheduleState::new(&manifest.schedules, chrono::Local::now());
+        let clock = Clock::now();
+        let state = ScheduleState::new(&manifest.schedules, clock);
         state
-            .next_times()
+            .next_times(clock)
             .into_iter()
             .map(|(name, next)| {
                 let spec = manifest

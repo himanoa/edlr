@@ -120,7 +120,7 @@ use crate::plugin::grants::GrantsStore;
 use crate::plugin::host::{capabilities_json_string, HostCtx, PluginHost, PluginInstance};
 use crate::plugin::manifest::{load_manifest, matches_event};
 use crate::plugin::registry::{PluginEntry, PluginState, Registry};
-use crate::plugin::schedule::ScheduleState;
+use crate::plugin::schedule::{Clock, ScheduleState};
 use crate::plugin::settings::SettingsStore;
 use crate::plugin::sidecar::{assign_ports, SidecarConfig, SidecarConfigStore};
 use crate::plugin::sidecar_runtime::{
@@ -504,10 +504,11 @@ fn run_plugin_thread(
         return;
     }
 
-    // 壁時計はここ(ループ側)でのみ読む。`ScheduleState` 自身は時刻を
+    // 時計はここ(ループ側)でのみ読む。`ScheduleState` 自身は時刻を
     // 引数でしか受け取らない(`schedule` モジュールのドキュメントコメント
-    // 参照、テストで時刻を固定するため)。
-    let mut schedule_state = ScheduleState::new(&manifest.schedules, chrono::Local::now());
+    // 参照、テストで時刻を固定するため)。interval は `Clock` の単調時計、
+    // cron は壁時計で評価される。
+    let mut schedule_state = ScheduleState::new(&manifest.schedules, Clock::now());
 
     // 1 回の `Err(reason)` を「warn ログ + disable + unsubscribe + ループ
     // 脱出」という既存の trap 分岐へ合流させるためのマクロ。`Handle` 後の
@@ -527,9 +528,8 @@ fn run_plugin_thread(
     }
 
     loop {
-        let now = chrono::Local::now();
         let timeout = schedule_state
-            .until_next(now)
+            .until_next(Clock::now())
             .unwrap_or(SCHEDULE_LESS_FALLBACK_TIMEOUT);
         let recv_result = work_rx.recv_timeout(timeout);
         // due は `Timeout` のときだけ取り出す。`Ok(work)` のときにも
@@ -537,9 +537,7 @@ fn run_plugin_thread(
         // `take_due` 自身が呼び出しのたびに状態を進めてしまうため、
         // 期限切れの発火を 1 回捨ててしまう(仕事優先の仕様に反する)。
         let due = match &recv_result {
-            Err(std_mpsc::RecvTimeoutError::Timeout) => {
-                schedule_state.take_due(chrono::Local::now())
-            }
+            Err(std_mpsc::RecvTimeoutError::Timeout) => schedule_state.take_due(Clock::now()),
             _ => None,
         };
 
@@ -611,8 +609,7 @@ fn run_plugin_thread(
 /// 過ぎた発火は後で 1 回」)を満たす。
 fn fire_all_due(state: &mut ScheduleState, instance: &mut PluginInstance) -> Result<(), String> {
     loop {
-        let now = chrono::Local::now();
-        let Some(name) = state.take_due(now) else {
+        let Some(name) = state.take_due(Clock::now()) else {
             return Ok(());
         };
         instance
