@@ -536,6 +536,12 @@ impl Registry {
             .collect()
     }
 
+    /// `id` の manifest が宣言する `events` フィルタ(`dashboard/list` が
+    /// ウィジェットへのイベント転送範囲を UI に伝えるのに使う)。
+    pub fn events_of(&self, id: &str) -> Result<Vec<String>, RegistryError> {
+        Ok(self.find_manifest(id)?.events.clone())
+    }
+
     /// `id` のダッシュボードウィジェット一覧(UI 表示用)。
     pub fn dashboard(&self, id: &str) -> Result<Vec<DashboardInfo>, RegistryError> {
         let manifest = self.find_manifest(id)?;

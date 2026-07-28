@@ -150,6 +150,7 @@ pub fn handle_rpc_with_drivers(
                     value["filesystem"] = filesystem_result_json(&info.filesystem)["roots"].clone();
                     let bus = registry.bus(&info.manifest.id).unwrap_or_default();
                     value["bus"] = bus_result_json(&bus)["bus"].clone();
+                    value["dashboard"] = dashboard_result_json(&info.dashboard)["dashboard"].clone();
                     match info.state {
                         crate::plugin::PluginState::Running => {
                             value["state"] = serde_json::json!("running");
@@ -182,6 +183,54 @@ pub fn handle_rpc_with_drivers(
             // 返す(UI が 1 往復でリスト全体を更新できるように)。
             let bus = registry.bus(plugin).map_err(|e| e.to_string())?;
             Ok(bus_result_json(&bus))
+        }
+        "plugins/set-dashboard-grant" => {
+            let plugin = param_str(params, "plugin")?;
+            let widget = param_str(params, "widget")?;
+            let granted = params
+                .get("granted")
+                .and_then(|v| v.as_bool())
+                .ok_or_else(|| "params.granted must be a bool".to_string())?;
+            // `set_bus_grant` と同じ流儀: その plugin のウィジェット一覧全体を
+            // 返す(UI が 1 往復でリスト全体を更新できるように)。
+            let dashboard = registry
+                .set_dashboard_grant(plugin, widget, granted)
+                .map_err(|e| e.to_string())?;
+            Ok(dashboard_result_json(&dashboard))
+        }
+        "dashboard/list" => {
+            // Dashboard 画面用: grant 済みウィジェットだけを、iframe が
+            // そのまま使える URL 付きで返す。未 grant を混ぜないのは、
+            // アセット配信側も未 grant を 404 にする(見えないものは
+            // 取得もできない)のと対になる。
+            let widgets: Vec<serde_json::Value> = registry
+                .dashboard_widgets_for_ui()
+                .into_iter()
+                .filter(|(_, _, _, info)| info.grant.granted)
+                .map(|(plugin_id, plugin_name, state, info)| {
+                    let entry_file = std::path::Path::new(&info.request.entry)
+                        .file_name()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("index.html");
+                    let events = registry.events_of(&plugin_id).unwrap_or_default();
+                    let state_str = match state {
+                        crate::plugin::PluginState::Running => "running",
+                        crate::plugin::PluginState::Disabled { .. } => "disabled",
+                    };
+                    serde_json::json!({
+                        "plugin": plugin_id,
+                        "pluginName": plugin_name,
+                        "widget": info.request.id,
+                        "title": info.request.title,
+                        "url": format!("/plugin-ui/{plugin_id}/{}/{entry_file}", info.request.id),
+                        "size": info.request.size.as_str(),
+                        "events": events,
+                        "resolved": info.resolved,
+                        "state": state_str,
+                    })
+                })
+                .collect();
+            Ok(serde_json::json!({ "widgets": widgets }))
         }
         "plugins/get-settings" => {
             let plugin = params
@@ -483,6 +532,27 @@ fn capabilities_result_json(
 /// `ServerState` の `DriverRegistry` から独立に再計算していたが、それは
 /// 同じ判定ロジックの二重管理になり、将来どちらか片方だけ直した変更が
 /// サイレントに食い違ってしまう(コードレビュー指摘)。
+/// `plugins/set-dashboard-grant`・`plugins/list` が共有する応答形。
+fn dashboard_result_json(
+    dashboard: &[crate::plugin::registry::DashboardInfo],
+) -> serde_json::Value {
+    let items: Vec<serde_json::Value> = dashboard
+        .iter()
+        .map(|info| {
+            serde_json::json!({
+                "id": info.request.id,
+                "title": info.request.title,
+                "entry": info.request.entry,
+                "size": info.request.size.as_str(),
+                "granted": info.grant.granted,
+                "staleGrant": info.grant.stale,
+                "resolved": info.resolved,
+            })
+        })
+        .collect();
+    serde_json::json!({ "dashboard": items })
+}
+
 fn bus_result_json(bus: &[crate::plugin::registry::BusInfo]) -> serde_json::Value {
     let items: Vec<serde_json::Value> = bus
         .iter()
@@ -925,6 +995,84 @@ mod tests {
         )
         .unwrap();
         assert_eq!(listed["plugins"][0]["bus"][0]["granted"], true);
+    }
+
+    #[test]
+    fn set_dashboard_grant_rpc_returns_full_dashboard_list() {
+        let (registry, tmp) = crate::plugin::registry::tests::test_registry_with_dashboard();
+        let ui_dir = tmp.path().join("plugins").join("widgety").join("ui");
+        std::fs::create_dir_all(&ui_dir).unwrap();
+        std::fs::write(ui_dir.join("index.html"), "<html></html>").unwrap();
+
+        let result = handle_rpc_with_drivers(
+            Some(&registry),
+            None,
+            "plugins/set-dashboard-grant",
+            &serde_json::json!({"plugin": "widgety", "widget": "status", "granted": true}),
+        )
+        .unwrap();
+        assert_eq!(result["dashboard"][0]["id"], "status");
+        assert_eq!(result["dashboard"][0]["granted"], true);
+        assert_eq!(result["dashboard"][0]["resolved"], true);
+        assert_eq!(result["dashboard"][0]["size"], "small");
+
+        // 二重チェック: `plugins/list` を経由しても同じ承認状態が見える
+        let listed =
+            handle_rpc_with_drivers(Some(&registry), None, "plugins/list", &serde_json::json!({}))
+                .unwrap();
+        assert_eq!(listed["plugins"][0]["dashboard"][0]["granted"], true);
+
+        // dashboard/list は grant 済みウィジェットを URL 付きで返す
+        let widgets = handle_rpc_with_drivers(
+            Some(&registry),
+            None,
+            "dashboard/list",
+            &serde_json::json!({}),
+        )
+        .unwrap();
+        assert_eq!(widgets["widgets"][0]["plugin"], "widgety");
+        assert_eq!(widgets["widgets"][0]["widget"], "status");
+        assert_eq!(widgets["widgets"][0]["title"], "Status");
+        assert_eq!(
+            widgets["widgets"][0]["url"],
+            "/plugin-ui/widgety/status/index.html"
+        );
+        assert_eq!(widgets["widgets"][0]["size"], "small");
+        assert_eq!(widgets["widgets"][0]["events"][0], "FSDJump");
+        assert_eq!(widgets["widgets"][0]["resolved"], true);
+        assert_eq!(widgets["widgets"][0]["state"], "running");
+    }
+
+    #[test]
+    fn dashboard_list_excludes_ungranted_widgets() {
+        let (registry, _tmp) = crate::plugin::registry::tests::test_registry_with_dashboard();
+        let widgets = handle_rpc_with_drivers(
+            Some(&registry),
+            None,
+            "dashboard/list",
+            &serde_json::json!({}),
+        )
+        .unwrap();
+        assert_eq!(widgets["widgets"].as_array().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn set_dashboard_grant_requires_plugin_widget_and_granted() {
+        let (registry, _tmp) = crate::plugin::registry::tests::test_registry_with_dashboard();
+        assert!(handle_rpc_with_drivers(
+            Some(&registry),
+            None,
+            "plugins/set-dashboard-grant",
+            &serde_json::json!({"plugin": "widgety"})
+        )
+        .is_err());
+        assert!(handle_rpc_with_drivers(
+            Some(&registry),
+            None,
+            "plugins/set-dashboard-grant",
+            &serde_json::json!({"plugin": "widgety", "widget": "nope", "granted": true})
+        )
+        .is_err());
     }
 
     #[test]
