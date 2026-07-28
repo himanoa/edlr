@@ -168,6 +168,26 @@ API キーのように UI から読み出せてはいけない設定はこの型
 `interval-seconds` は「前回から N 秒後」という経過時間の宣言であって
 「何時に実行する」ではないため、追い掛けるべき定刻が存在しない。
 
+## サンプルのビルドと配置(スクリプト)
+
+`manifest.toml` / `driver.toml` を同梱しているサンプル(`state-reader`、
+`inara-uploader`、ドライバの `ed-state`)は、まとめてビルド・配置できる:
+
+    ./scripts/install-examples.sh              # 全件
+    ./scripts/install-examples.sh state-reader # 指定したものだけ
+    ./scripts/install-examples.sh --list       # 対象一覧
+    ./scripts/install-examples.sh -n           # 何をするかだけ表示
+
+配置先は既定で `$XDG_CONFIG_HOME/edlr/{plugins,drivers}`(未設定なら
+`~/.config/edlr/...`)。`--plugins-dir`/`--drivers-dir` を付けて起動している
+デーモンには `--prefix` を合わせる。
+
+- **設定値と承認状態は消えない**(それらは settings-dir / grants-dir 側にあり、
+  スクリプトが触るのは wasm と manifest だけ)
+- **配置後はデーモンの再起動が要る**(プラグインのロードは起動時に一度だけ)
+
+以下は手作業で行う場合の手順。
+
 ## hello-logger サンプルのビルドと配置
 
 `examples/plugins/hello-logger` は購読したイベントをそのまま `host-log` へ

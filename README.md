@@ -95,6 +95,8 @@ Documentation under `docs/` is currently written in Japanese.
   (thin Tauri 2 shell)
 - `examples/` — sample plugins (`hello-logger`, `state-reader`,
   `inara-uploader`) and drivers (`ed-state`)
+- `scripts/` — `install-examples.sh` builds the bundled plugins/drivers and
+  installs them into the daemon's `plugins-dir` / `drivers-dir`
 
 ## Status
 
