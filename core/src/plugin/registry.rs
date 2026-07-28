@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc as std_mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -356,6 +356,11 @@ pub struct Registry {
 struct PluginThreadHandle {
     work_tx: std_mpsc::SyncSender<PluginWork>,
     handle: thread::JoinHandle<()>,
+    /// `Stop` のアウトオブバンド経路。ランナーループが毎周期(ワークキューを
+    /// 読む前に)確認するので、有界キューに積まれた先行ワークを追い越せる。
+    /// `work_tx` への `PluginWork::Stop` 送信は、待ちに入っているスレッドを
+    /// 起こすためのもの(`shutdown_plugins` 参照)。
+    stop_flag: Arc<AtomicBool>,
 }
 
 impl Registry {
@@ -407,11 +412,19 @@ impl Registry {
         id: &str,
         work_tx: std_mpsc::SyncSender<PluginWork>,
         handle: thread::JoinHandle<()>,
+        stop_flag: Arc<AtomicBool>,
     ) {
         self.plugin_threads
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .insert(id.to_string(), PluginThreadHandle { work_tx, handle });
+            .insert(
+                id.to_string(),
+                PluginThreadHandle {
+                    work_tx,
+                    handle,
+                    stop_flag,
+                },
+            );
     }
 
     /// プラグイン専用スレッドが、自分のスケジュール状態を公開する窓口を
@@ -438,16 +451,24 @@ impl Registry {
     /// バス購読側を止めてしまう理由が無い以上、後始末の順序として自然な方
     /// (プラグインに最後の一仕事をさせてから、購読タスクを畳む)にしてある。
     ///
-    /// **満杯キューは諦める**: 各プラグインの `work_tx`(容量固定の
-    /// `sync_channel`)へ `try_send` するだけで、詰まっていれば
-    /// `tracing::warn!` を出してその 1 件の on-stop 呼び出しは諦める
-    /// (ブロックする `send` は使わない -- 1 プラグインの詰まりが shutdown
-    /// シーケンス全体を巻き込んで遅延させるべきではないため、
-    /// `spawn_event_subscriber`/`spawn_bus_subscriber` が満杯時に `try_send`
-    /// を使うのと同じ判断)。送信側が既に切断されている(スレッドが trap
-    /// などで既に終了済み)場合も同様に何もしない -- どちらの場合も後続の
-    /// join は行う(トラップ済みなら即座に `is_finished()` が `true` に
-    /// なるだけ)。
+    /// **`Stop` はワークキューを追い越す**: 停止の合図は 2 経路ある。
+    ///
+    /// 1. `PluginThreadHandle::stop_flag`(主経路)-- ランナーループが毎周期、
+    ///    ワークキューを読む**前**に確認する。これにより、有界 64 スロットの
+    ///    キューに積まれた先行ワークを `Stop` が追い越せる
+    /// 2. `work_tx` への `PluginWork::Stop`(補助)-- キューが空で
+    ///    `recv_timeout` に入っているスレッドを直ちに起こすためだけのもの。
+    ///    満杯なら `try_send` は失敗するが、その場合スレッドは待ちに入って
+    ///    おらず、次の周回でフラグを見るので問題ない
+    ///
+    /// かつては 2 の経路しか無かったため、プラグインスレッドは先行する全ワーク
+    /// を消化するまで `call_on_stop` へ到達できず(最悪 63 件 x
+    /// `CALL_DEADLINE` 2 秒 ≒ 126 秒)、`PLUGIN_STOP_JOIN_TIMEOUT` しか待たない
+    /// この関数から見ると on-stop の flush は事実上スキップされていた。
+    ///
+    /// 送信側が既に切断されている(スレッドが trap などで既に終了済み)場合も
+    /// 何もしない -- いずれの場合も後続の join は行う(トラップ済みなら即座に
+    /// `is_finished()` が `true` になるだけ)。
     ///
     /// **join はスレッドごとに独立してポーリングで打ち切る**: 標準ライブラリの
     /// `JoinHandle` には `join_timeout` が無いため、`is_finished()` を
@@ -466,14 +487,16 @@ impl Registry {
             .collect();
 
         for (id, thread_handle) in handles {
+            // 主経路: フラグを先に立てる。ランナーループは次の周回で、
+            // キューを読む前にこれを見て on-stop へ進む。
+            thread_handle.stop_flag.store(true, Ordering::SeqCst);
+
+            // 補助経路: `recv_timeout` で待ちに入っているスレッドを起こす。
             match thread_handle.work_tx.try_send(PluginWork::Stop) {
                 Ok(()) => {}
                 Err(std_mpsc::TrySendError::Full(_)) => {
-                    tracing::warn!(
-                        plugin_id = %id,
-                        "plugin work queue full during shutdown; giving up on calling \
-                         on-stop for this plugin"
-                    );
+                    // キューが満杯 = スレッドは待ちに入っていないので、
+                    // 起こす必要が無い。次の周回でフラグを見る。
                 }
                 Err(std_mpsc::TrySendError::Disconnected(_)) => {
                     // プラグインスレッドは既に(trap などで)終了済み。
@@ -3015,7 +3038,12 @@ pub(crate) mod tests {
                 }
             })
         };
-        registry.register_plugin_thread("stoppable", work_tx, handle);
+        registry.register_plugin_thread(
+            "stoppable",
+            work_tx,
+            handle,
+            Arc::new(AtomicBool::new(false)),
+        );
 
         registry.shutdown_plugins();
 
@@ -3026,33 +3054,50 @@ pub(crate) mod tests {
         );
     }
 
-    /// キューが満杯で `try_send(Stop)` が失敗しても `shutdown_plugins` は
-    /// パニックせず、他のプラグインの後始末を続けられることの検証
-    /// (「満杯なら warn して諦める」の非パニック部分。ログ出力自体は
-    /// アサートしない -- 既存の `spawn_event_subscriber`/`spawn_bus_subscriber`
-    /// の満杯テストと同じ流儀で、観測可能な副作用[ここでは「パニックしない
-    /// でループを終える」こと]だけを見る)。
+    /// **`Stop` がワークキューを追い越すことの検証**。キューが満杯で
+    /// `try_send(Stop)` が失敗しても、ランナーループはキューを読む前に
+    /// `stop_flag` を見るので on-stop へ到達できる。
+    ///
+    /// かつては `Stop` がキュー経由だけだったため、詰まったプラグインは
+    /// 先行ワークを全部消化するまで on-stop に辿り着けず、5 秒しか待たない
+    /// `shutdown_plugins` から見ると flush は事実上スキップされていた。
     #[test]
-    fn shutdown_plugins_does_not_panic_when_the_work_queue_is_full() {
+    fn shutdown_plugins_stop_flag_overtakes_a_full_work_queue() {
         let registry = empty_registry();
         push_running_entry(&registry, "full-queue");
 
-        let (work_tx, _work_rx) = std_mpsc::sync_channel::<PluginWork>(1);
-        // キューを埋めて `try_send(Stop)` が `Full` になるようにする。誰も
-        // 消費しないので、詰まって動かないプラグインを模している。
+        let (work_tx, work_rx) = std_mpsc::sync_channel::<PluginWork>(1);
+        // キューを埋めて `try_send(Stop)` が `Full` になるようにする。
         work_tx
             .try_send(PluginWork::Event(Arc::new(Event::Status {
                 raw: serde_json::json!({}),
             })))
             .expect("capacity-1 channel should accept the first send");
-        // このスレッド自体は(テストを速く保つため)即座に終了する -- ここで
-        // 検証したいのは「送信が失敗しても panic しない」ことであって、
-        // 「詰まった実プラグインが実際に止まるまで待つ」ことの再検証では
-        // ない(それは上のテストで別途検証済み)。
-        let handle = thread::spawn(|| {});
-        registry.register_plugin_thread("full-queue", work_tx, handle);
+
+        let stop_flag = Arc::new(AtomicBool::new(false));
+        let flushed = Arc::new(AtomicBool::new(false));
+        let handle = {
+            let stop_flag = stop_flag.clone();
+            let flushed = flushed.clone();
+            // `run_plugin_thread` のループの骨格: 毎周期、キューを読む**前**に
+            // stop フラグを確認する。
+            thread::spawn(move || loop {
+                if stop_flag.load(Ordering::SeqCst) {
+                    flushed.store(true, Ordering::SeqCst);
+                    return;
+                }
+                let _ = work_rx.recv_timeout(Duration::from_millis(10));
+            })
+        };
+        registry.register_plugin_thread("full-queue", work_tx, handle, stop_flag);
 
         registry.shutdown_plugins();
+
+        assert!(
+            flushed.load(Ordering::SeqCst),
+            "a plugin with a full work queue must still reach on-stop, because the \
+             stop flag is checked before the queue is read"
+        );
     }
 
     /// `Disabled`(init 失敗などで Running にならなかった)プラグインは

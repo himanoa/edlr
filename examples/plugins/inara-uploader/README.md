@@ -165,9 +165,10 @@ wit-bindgen-go generate --world plugin --out gen ../../../core/wit
 - `on-stop` は **graceful shutdown のときだけ**呼ばれる。trap による無効化
   (disable)の後には呼ばれず、SIGKILL やクラッシュでも当然呼ばれない
 - graceful shutdown であっても `on-stop` は有界の猶予時間内(既定 5 秒)に
-  限った best-effort でしかない。`flush` の間隔クランプにより作業キューに
-  積み残しが多い状態だと、猶予時間内に `on-stop` へ辿り着けず呼ばれない
-  ことがある(その場合は warn ログのみで、フラッシュされないまま終了する)
+  限った best-effort でしかない。停止の合図は作業キューを追い越すので、
+  積み残しが多いだけなら `on-stop` へ到達できるが、終了時にちょうど
+  実行中だった wasm 呼び出し(例: 応答しないホストへの `driver-http.send`)が
+  猶予時間内に返らない場合は、フラッシュされないまま終了する(warn ログのみ)
 - キューはメモリ上にしか無いため、`on-stop` が呼ばれない終わり方(SIGKILL・
   クラッシュ・ゲームが `Shutdown` を書かずに落ちた場合)では未送信分が
   失われる。ただし Journal の読み取り位置は永続化されているので、

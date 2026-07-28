@@ -351,6 +351,10 @@ fn load_and_run_plugin(
     let (work_tx, work_rx) = std_mpsc::sync_channel::<PluginWork>(PLUGIN_WORK_QUEUE_CAPACITY);
     let (ready_tx, ready_rx) = std_mpsc::channel::<PluginState>();
 
+    // `Stop` のアウトオブバンド経路(`Registry::shutdown_plugins` が立てる)。
+    // 詳細は `run_plugin_thread` のループ先頭のコメント参照。
+    let stop_flag = Arc::new(AtomicBool::new(false));
+
     let thread_handle = thread::spawn({
         let host = host.clone();
         let manifest = manifest.clone();
@@ -361,6 +365,7 @@ fn load_and_run_plugin(
         let bus_json = bus_json.clone();
         let bus = bus.clone();
         let registry = registry.clone();
+        let stop_flag = stop_flag.clone();
         move || {
             run_plugin_thread(
                 host,
@@ -375,6 +380,7 @@ fn load_and_run_plugin(
                 registry,
                 work_rx,
                 ready_tx,
+                stop_flag,
             );
         }
     });
@@ -402,7 +408,7 @@ fn load_and_run_plugin(
         // `init` 失敗を `ready_tx` へ送って return 済みなので、登録せずに
         // `thread_handle` を(join せずに)そのまま drop してよい -- スレッド
         // 自体はもう終了しているか、終了する寸前でしかない。
-        registry.register_plugin_thread(&manifest.id, work_tx.clone(), thread_handle);
+        registry.register_plugin_thread(&manifest.id, work_tx.clone(), thread_handle, stop_flag);
 
         spawn_event_subscriber(manifest.clone(), router.subscribe(), work_tx.clone());
 
@@ -463,6 +469,7 @@ fn run_plugin_thread(
     registry: Registry,
     work_rx: std_mpsc::Receiver<PluginWork>,
     ready_tx: std_mpsc::Sender<PluginState>,
+    stop_flag: Arc<AtomicBool>,
 ) {
     // trap 時にこのプラグインの購読を `Bus` の購読表から取り除くために手元に
     // 残しておく(`ctx` へ渡す方は `HostCtx::new` に move する)。
@@ -536,7 +543,38 @@ fn run_plugin_thread(
         }};
     }
 
+    // `LoopAction::Stop` と、下のアウトオブバンド経路の両方から使う on-stop。
+    // もう止まる以上、失敗しても disable する意味が無いので warn ログのみに
+    // 留め、trap 用の `disable_and_break!` は使わない。
+    macro_rules! stop_and_break {
+        () => {{
+            if let Err(e) = instance.call_on_stop() {
+                tracing::warn!(
+                    plugin_id = %manifest.id,
+                    "on-stop call failed during shutdown: {e}"
+                );
+            }
+            break;
+        }};
+    }
+
     loop {
+        // **`Stop` はワークキューを追い越す**: `Registry::shutdown_plugins` は
+        // このフラグを立ててから、待ちに入っているスレッドを起こすために
+        // `PluginWork::Stop` も送る。フラグをここで(キューを読む前に)
+        // 見ることで、`Stop` が有界 64 スロットのキューに並んだ先行ワークを
+        // 追い越せる。
+        //
+        // かつて `Stop` はイベント/バス配信と同じキューに `try_send` される
+        // だけだったため、プラグインスレッドは先行する全ワークを消化するまで
+        // `call_on_stop` に到達できず(最悪 63 件 x `CALL_DEADLINE` 2 秒
+        // ≒ 126 秒)、5 秒しか待たない `shutdown_plugins` から見ると on-stop の
+        // flush は事実上スキップされていた。積み残したワークは捨てる -- どのみち
+        // プロセスはこの直後に終了するので、最後の一仕事(flush)を優先する。
+        if stop_flag.load(Ordering::SeqCst) {
+            stop_and_break!();
+        }
+
         // 待ちに入る直前に、いまの状態を公開する。発火(`take_due`/
         // `fire_all_due`)は必ずこのループを一周してここへ戻ってくるので、
         // 状態が進むたびに公開値も更新される。
@@ -597,19 +635,10 @@ fn run_plugin_thread(
             }
             LoopAction::Idle => {}
             LoopAction::Exit => break,
-            LoopAction::Stop => {
-                // デーモンの正常終了シーケンス(`Registry::shutdown_plugins`)
-                // から送られた `PluginWork::Stop`。もう止まる以上、失敗しても
-                // disable する意味が無いので warn ログのみに留め、trap 用の
-                // `disable_and_break!` は使わない。
-                if let Err(e) = instance.call_on_stop() {
-                    tracing::warn!(
-                        plugin_id = %manifest.id,
-                        "on-stop call failed during shutdown: {e}"
-                    );
-                }
-                break;
-            }
+            // デーモンの正常終了シーケンス(`Registry::shutdown_plugins`)から
+            // 送られた `PluginWork::Stop`。キューが空で待ちに入っていた場合は
+            // 上のフラグ検査より先にこちらへ届く(送信はスレッドを起こすため)。
+            LoopAction::Stop => stop_and_break!(),
         }
     }
 }
