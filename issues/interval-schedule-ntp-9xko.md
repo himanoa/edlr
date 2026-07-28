@@ -1,10 +1,10 @@
 ---
 id: interval-schedule-ntp-9xko
 title: interval scheduleが壁時計基準でNTP/サスペンドに脆弱
-status: open
+status: closed
 labels: scheduler
 created: 2026-07-28T15:07:27Z
-updated: 2026-07-28T15:09:15Z
+updated: 2026-07-28T15:57:12Z
 ---
 
 ## 問題
