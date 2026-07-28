@@ -47,6 +47,23 @@ pub fn default_journal_dir(home: &Path) -> Option<PathBuf> {
     candidate.is_dir().then_some(candidate)
 }
 
+/// デーモン側の journal ディレクトリ解決。優先順: CLI 引数 →
+/// 設定ファイル(`config.json` の `journalDir`)→ 既知パスの自動検出。
+///
+/// Tauri シェル側の [`resolve_journal_dir`](既定は env → config)とは役割が
+/// 違う: あちらは「デーモンへ `--journal-dir` として渡す値」を決め、こちらは
+/// デーモン自身が引数なしで起動されたときに同じ設定へフォールバックする
+/// ためのもの。デーモン単体起動(`edlr`)でも Tauri 経由でも、設定した
+/// journalDir が実効値になることをこの 2 段構えで保証する。
+pub fn daemon_journal_dir(
+    cli: Option<PathBuf>,
+    configured: Option<PathBuf>,
+    home: Option<&Path>,
+) -> Option<PathBuf> {
+    cli.or(configured)
+        .or_else(|| home.and_then(default_journal_dir))
+}
+
 /// `edlr` の設定サブディレクトリ(例: `plugins`, `settings`)の既定パスを組み立てる。
 ///
 /// `<home>/.config/edlr/<sub>` を返す。`$XDG_CONFIG_HOME` を考慮した解決は
@@ -338,6 +355,43 @@ mod tests {
         // HOME も XDG_STATE_HOME も無い環境でも panic しない。
         let base = state_base(None, None);
         assert!(base.ends_with("edlr"));
+    }
+
+    #[test]
+    fn daemon_journal_dir_prefers_cli_arg() {
+        let cli = PathBuf::from("/from/cli");
+        let configured = PathBuf::from("/from/config");
+        assert_eq!(
+            daemon_journal_dir(Some(cli.clone()), Some(configured), None),
+            Some(cli)
+        );
+    }
+
+    #[test]
+    fn daemon_journal_dir_uses_config_when_no_cli_arg() {
+        let configured = PathBuf::from("/from/config");
+        assert_eq!(
+            daemon_journal_dir(None, Some(configured.clone()), None),
+            Some(configured)
+        );
+    }
+
+    #[test]
+    fn daemon_journal_dir_falls_back_to_auto_detection() {
+        let home = tempfile::tempdir().unwrap();
+        let proton = home.path().join(PROTON_JOURNAL_DIR);
+        std::fs::create_dir_all(&proton).unwrap();
+        assert_eq!(
+            daemon_journal_dir(None, None, Some(home.path())),
+            Some(proton)
+        );
+    }
+
+    #[test]
+    fn daemon_journal_dir_none_when_nothing_resolves() {
+        let home = tempfile::tempdir().unwrap();
+        assert_eq!(daemon_journal_dir(None, None, Some(home.path())), None);
+        assert_eq!(daemon_journal_dir(None, None, None), None);
     }
 
     #[test]

@@ -64,12 +64,29 @@ async fn main() {
         .init();
     let args = Args::parse();
 
-    let dir = args.journal_dir.or_else(|| {
-        let home = std::env::var_os("HOME").map(PathBuf::from)?;
-        config::default_journal_dir(&home)
-    });
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let xdg_config_home = std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from);
+
+    // config.json(UI の Settings 画面が保存するのと同じファイル)の
+    // journalDir を CLI 引数と自動検出の間に挟む。壊れた config.json は
+    // 黙って無視せず警告する(`AppConfig::load` のドキュメント参照)が、
+    // 自動検出で解決できるなら起動自体は続ける。
+    let configured = match config::AppConfig::load(&config::config_file_path(
+        xdg_config_home.as_deref(),
+        home.as_deref(),
+    )) {
+        Ok(config) => config.journal_dir,
+        Err(e) => {
+            tracing::warn!("ignoring unreadable config.json: {e}");
+            None
+        }
+    };
+    let dir = config::daemon_journal_dir(args.journal_dir, configured, home.as_deref());
     let Some(dir) = dir else {
-        eprintln!("error: journal directory not found; specify one with --journal-dir <PATH>");
+        eprintln!(
+            "error: journal directory not found; specify one with --journal-dir <PATH> \
+             or set journalDir in config.json"
+        );
         std::process::exit(1);
     };
 
@@ -81,8 +98,6 @@ async fn main() {
     tracing::info!("watching {}", dir.display());
     let router = Router::new(256);
 
-    let home = std::env::var_os("HOME").map(PathBuf::from);
-    let xdg_config_home = std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from);
     let plugins_dir = args.plugins_dir.clone().unwrap_or_else(|| {
         config::config_subdir(xdg_config_home.as_deref(), home.as_deref(), "plugins")
     });
