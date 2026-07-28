@@ -2,6 +2,8 @@
 
 mod config;
 mod daemon;
+mod devserver;
+mod signals;
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -123,11 +125,13 @@ fn restart_daemon(
 
     let mut guard = slot.lock().unwrap_or_else(|p| p.into_inner());
     if let Some(mut old) = guard.take() {
+        signals::set_daemon_pid(None);
         stop_child(&mut old);
     }
 
     let child = daemon::spawn_daemon(&bin, journal_dir)
         .map_err(|e| format!("failed to spawn edlr daemon: {e}"))?;
+    signals::set_daemon_pid(Some(child.id()));
     *guard = Some(child);
     Ok(())
 }
@@ -295,6 +299,22 @@ async fn pick_directory(app: tauri::AppHandle) -> Option<String> {
 fn main() {
     // ウィンドウを出してフロントエンドを表示する薄い皮 + デーモンの道連れ起動。
     // 既に起動済みのデーモンには spawn も kill もしない。
+    //
+    // デバッグビルドは WebView が `devUrl`(vite の 5173)を読むため、
+    // vite も道連れ起動する(`devserver` モジュール参照)。`tauri dev` 経由や
+    // 手動起動の vite がいる場合は spawn しない。リリースビルドは
+    // `frontendDist` 同梱なので不要。
+    // シグナルで死ぬ経路でも道連れ子(vite・デーモン)を片付けられるよう、
+    // 子を spawn する前にハンドラを仕込む(`signals` モジュール参照)。
+    signals::install();
+
+    let dev_server = if cfg!(debug_assertions) {
+        devserver::ensure_dev_server()
+    } else {
+        None
+    };
+    let dev_server = Arc::new(Mutex::new(dev_server));
+
     let loaded = config::load_from_env();
     if let Some(error) = &loaded.error {
         eprintln!("failed to load {}: {error}", loaded.path.display());
@@ -306,6 +326,7 @@ fn main() {
     let resolved_journal_dir =
         config::resolve_journal_dir(env_journal_dir.clone(), loaded.config.journal_dir.clone());
     let (child, startup) = autostart_daemon(resolved_journal_dir);
+    signals::set_daemon_pid(child.as_ref().map(|c| c.id()));
     let owns_daemon = startup.owns_daemon();
     let daemon_error = startup.error();
 
@@ -338,6 +359,7 @@ fn main() {
         Ok(app) => app,
         Err(e) => {
             kill_daemon(&daemon);
+            kill_dev_server(&dev_server);
             eprintln!("error while building tauri application: {e}");
             std::process::exit(1);
         }
@@ -346,6 +368,7 @@ fn main() {
     app.run(move |_app, event| {
         if let tauri::RunEvent::Exit = event {
             kill_daemon(&daemon);
+            kill_dev_server(&dev_server);
         }
     });
 }
@@ -354,6 +377,15 @@ fn main() {
 fn kill_daemon(slot: &Mutex<Option<std::process::Child>>) {
     let mut guard = slot.lock().unwrap_or_else(|p| p.into_inner());
     if let Some(mut child) = guard.take() {
+        signals::set_daemon_pid(None);
         stop_child(&mut child);
+    }
+}
+
+/// 道連れ起動した vite dev サーバがあれば停止する(終了時・ビルド失敗時)。
+fn kill_dev_server(slot: &Mutex<Option<std::process::Child>>) {
+    let mut guard = slot.lock().unwrap_or_else(|p| p.into_inner());
+    if let Some(mut child) = guard.take() {
+        devserver::stop_dev_server(&mut child, devserver::STOP_GRACE);
     }
 }
