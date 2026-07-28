@@ -59,8 +59,17 @@ struct Args {
 
 #[tokio::main]
 async fn main() {
-    tracing_subscriber::fmt()
-        .with_writer(std::io::stderr)
+    // stderr への従来の fmt 出力に加え、GUI(WS クライアント)へ INFO 以上を
+    // 転送する LogLayer を重ねる(`edlr_core::logs` 参照)。レジストリ全体に
+    // INFO フィルタを掛けるのは、従来の `fmt().init()` の既定(INFO 以上)を
+    // 保つため。
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
+    let (log_layer, log_rx) = edlr_core::logs::log_channel();
+    tracing_subscriber::registry()
+        .with(tracing_subscriber::filter::LevelFilter::INFO)
+        .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
+        .with(log_layer)
         .init();
     let args = Args::parse();
 
@@ -240,6 +249,7 @@ async fn main() {
     // `stop_all_sidecars` を呼ぶために手元に残しておく必要があるので、渡す
     // のは複製(`DriverRegistry` も `Clone` = 内部は `Arc` 共有で安価)。
     let state = server::ServerState::new(&router, registry.clone(), drivers.clone());
+    state.attach_log_stream(log_rx);
     tokio::spawn(server::serve(listener, state, args.ui_dir.clone()));
 
     let mut rx = router.subscribe();

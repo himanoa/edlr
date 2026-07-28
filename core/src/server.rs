@@ -80,8 +80,27 @@ impl ServerState {
         state
     }
 
+    /// tracing ログのフレーム(`crate::logs::LogLayer` 産)をイベントと同じ
+    /// ReplayBuffer + broadcast に合流させる。受信ラグ(Lagged)は捨てて
+    /// 続行する -- ログ表示はベストエフォートで、イベント配信を妨げない。
+    pub fn attach_log_stream(&self, mut rx: broadcast::Receiver<Arc<String>>) {
+        let feeder = self.clone();
+        tokio::spawn(async move {
+            loop {
+                match rx.recv().await {
+                    Ok(frame) => feeder.push_frame(frame),
+                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        });
+    }
+
     fn push(&self, json: String) {
-        let json = Arc::new(json);
+        self.push_frame(Arc::new(json));
+    }
+
+    fn push_frame(&self, json: Arc<String>) {
         let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         if inner.buf.len() == REPLAY_CAPACITY {
             inner.buf.pop_front();
@@ -1078,6 +1097,40 @@ mod tests {
         )
         .unwrap();
         assert_eq!(listed["plugins"][0]["bus"][0]["granted"], true);
+    }
+
+    /// attach_log_stream で流し込んだフレームが、journal/status イベントと
+    /// 同じ経路(ReplayBuffer + broadcast)で新規クライアントに届くことを
+    /// 確認する。
+    #[tokio::test]
+    async fn attached_log_frames_reach_the_replay_buffer_and_broadcast() {
+        let router = crate::router::Router::new(8);
+        let state = ServerState::new(&router, None, None);
+        let (tx, rx) = tokio::sync::broadcast::channel::<std::sync::Arc<String>>(8);
+        state.attach_log_stream(rx);
+
+        tx.send(std::sync::Arc::new(crate::logs::format_log_frame(
+            "info",
+            "t",
+            "2026-07-28T00:00:00.000Z",
+            "hello",
+        )))
+        .unwrap();
+
+        // feeder タスクが処理するまでポーリングで待つ
+        let mut found = false;
+        for _ in 0..100 {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            let (snapshot, _rx) = state.snapshot_and_subscribe();
+            if snapshot
+                .iter()
+                .any(|f| f.contains("\"kind\":\"log\"") && f.contains("hello"))
+            {
+                found = true;
+                break;
+            }
+        }
+        assert!(found, "log frame must appear in the replay snapshot");
     }
 
     #[tokio::test]
