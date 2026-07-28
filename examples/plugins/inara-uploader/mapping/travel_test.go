@@ -6,7 +6,7 @@ import (
 )
 
 func TestFSDJumpCarriesDistanceAndCoords(t *testing.T) {
-	st := NewState()
+	st := newLiveState()
 	res := convertOne(t, st, "FSDJump", `{"StarSystem":"Sol","JumpDist":8.5,"StarPos":[1,2,3]}`)
 
 	if len(res.Events) != 1 || res.Events[0].Name != "addCommanderTravelFSDJump" {
@@ -22,7 +22,7 @@ func TestFSDJumpCarriesDistanceAndCoords(t *testing.T) {
 }
 
 func TestDockedNeedsBothSystemAndStation(t *testing.T) {
-	st := NewState()
+	st := newLiveState()
 	if res := convertOne(t, st, "Docked", `{"StarSystem":"Sol"}`); len(res.Events) != 0 {
 		t.Errorf("Docked without a station must send nothing, got %+v", res.Events)
 	}
@@ -46,7 +46,7 @@ func TestLocationAndCarrierJumpSendWithoutAStation(t *testing.T) {
 		"Location":    "setCommanderTravelLocation",
 		"CarrierJump": "addCommanderTravelCarrierJump",
 	} {
-		st := NewState()
+		st := newLiveState()
 		res := convertOne(t, st, name, `{"StarSystem":"Sol"}`)
 		if len(res.Events) != 1 || res.Events[0].Name != want {
 			t.Errorf("%s: unexpected events: %+v", name, res.Events)

@@ -6,7 +6,7 @@ import (
 )
 
 func TestDiedBorrowsTheSystemFromTheLastTravelEvent(t *testing.T) {
-	st := NewState()
+	st := newLiveState()
 	convertOne(t, st, "FSDJump", `{"StarSystem":"Sol"}`)
 	res := convertOne(t, st, "Died", `{"KillerName":"Salvation"}`)
 
@@ -17,7 +17,7 @@ func TestDiedBorrowsTheSystemFromTheLastTravelEvent(t *testing.T) {
 }
 
 func TestDiedFallsBackToTheFirstOfAWing(t *testing.T) {
-	st := NewState()
+	st := newLiveState()
 	res := convertOne(t, st, "Died", `{"Killers":[{"Name":"Wing Leader"},{"Name":"Wingman"}]}`)
 
 	body, _ := json.Marshal(res.Events[0].Data)
@@ -27,7 +27,7 @@ func TestDiedFallsBackToTheFirstOfAWing(t *testing.T) {
 }
 
 func TestShutdownOnlyRequestsAFlush(t *testing.T) {
-	st := NewState()
+	st := newLiveState()
 	res := convertOne(t, st, "Shutdown", `{}`)
 	if len(res.Events) != 0 {
 		t.Errorf("Shutdown must not produce events, got %+v", res.Events)

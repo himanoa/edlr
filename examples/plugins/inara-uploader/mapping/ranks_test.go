@@ -7,7 +7,7 @@ import (
 
 // 段位だけ先に来ても送らない。送ると INARA 側の進捗が 0 に潰れる。
 func TestRankWaitsForProgress(t *testing.T) {
-	st := NewState()
+	st := newLiveState()
 	if res := convertOne(t, st, "Rank", `{"Combat":3}`); len(res.Events) != 0 {
 		t.Fatalf("Rank alone must send nothing, got %+v", res.Events)
 	}
@@ -24,7 +24,7 @@ func TestRankWaitsForProgress(t *testing.T) {
 
 // 進捗だけ先に来ても送らない。送ると INARA 側の段位が 0 に落ちうる。
 func TestProgressWaitsForRank(t *testing.T) {
-	st := NewState()
+	st := newLiveState()
 	if res := convertOne(t, st, "Progress", `{"Trade":10}`); len(res.Events) != 0 {
 		t.Fatalf("Progress alone must send nothing, got %+v", res.Events)
 	}
@@ -41,7 +41,7 @@ func TestProgressWaitsForRank(t *testing.T) {
 
 // 送信順は固定(map を回すと毎回変わる)。
 func TestRankOrderIsStable(t *testing.T) {
-	st := NewState()
+	st := newLiveState()
 	convertOne(t, st, "Progress", `{"Combat":10,"Trade":20,"Explore":30}`)
 	res := convertOne(t, st, "Rank", `{"Combat":1,"Trade":2,"Explore":3}`)
 
@@ -61,7 +61,7 @@ func TestRankOrderIsStable(t *testing.T) {
 }
 
 func TestReputationIsScaledToRatio(t *testing.T) {
-	st := NewState()
+	st := newLiveState()
 	res := convertOne(t, st, "Reputation", `{"Empire":50,"Federation":-25}`)
 	if len(res.Events) != 2 {
 		t.Fatalf("expected 2 events, got %+v", res.Events)
@@ -75,7 +75,7 @@ func TestReputationIsScaledToRatio(t *testing.T) {
 }
 
 func TestEngineerProgressAcceptsBothShapes(t *testing.T) {
-	st := NewState()
+	st := newLiveState()
 
 	batch := convertOne(t, st, "EngineerProgress", `{"Engineers":[{"Engineer":"Felicity Farseer","Progress":"Unlocked","Rank":5},{"Engineer":"Elvira Martuuk","Progress":"Known"}]}`)
 	if len(batch.Events) != 2 {

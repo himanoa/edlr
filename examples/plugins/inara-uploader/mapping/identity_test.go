@@ -16,7 +16,7 @@ func convertOne(t *testing.T, st *State, name, payload string) Result {
 }
 
 func TestCommanderLearnsIdentityWithoutSendingAnything(t *testing.T) {
-	st := NewState()
+	st := newLiveState()
 	res := convertOne(t, st, "Commander", `{"Name":"Hutton","FID":"F123"}`)
 
 	if len(res.Events) != 0 {
@@ -28,7 +28,7 @@ func TestCommanderLearnsIdentityWithoutSendingAnything(t *testing.T) {
 }
 
 func TestLoadGameLearnsIdentityAndSendsCredits(t *testing.T) {
-	st := NewState()
+	st := newLiveState()
 	res := convertOne(t, st, "LoadGame", `{"Commander":"Hutton","FID":"F123","Credits":1000,"Loan":0}`)
 
 	if st.CommanderName != "Hutton" {
@@ -49,7 +49,7 @@ func TestLoadGameLearnsIdentityAndSendsCredits(t *testing.T) {
 }
 
 func TestLoadGameWithoutCreditsSendsNothing(t *testing.T) {
-	st := NewState()
+	st := newLiveState()
 	res := convertOne(t, st, "LoadGame", `{"Commander":"Hutton"}`)
 	if len(res.Events) != 0 {
 		t.Errorf("expected no events without Credits, got %+v", res.Events)
@@ -57,7 +57,7 @@ func TestLoadGameWithoutCreditsSendsNothing(t *testing.T) {
 }
 
 func TestLoanIsOmittedWhenAbsent(t *testing.T) {
-	st := NewState()
+	st := newLiveState()
 	res := convertOne(t, st, "LoadGame", `{"Commander":"Hutton","Credits":5}`)
 	body, _ := json.Marshal(res.Events[0].Data)
 	if string(body) != `{"commanderCredits":5}` {

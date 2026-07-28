@@ -64,9 +64,24 @@ func feed(u *Uploader, cfg settings.Settings, n int, replay bool) []Outcome {
 	return out
 }
 
+// openLiveSession はゲーム版ゲートを開く(INARA は Live のデータしか
+// 受け付けないため、バージョン学習前のイベントは全て捨てられる)。
+// LoadGame 自体はイベントを生まない(Credits なし)ので、キューや
+// フラッシュのカウントには影響しない。
+func openLiveSession(u *Uploader) {
+	u.Handle(testSettings(), Event{
+		Kind:      "journal",
+		Name:      "LoadGame",
+		Timestamp: "2026-07-27T00:00:00Z",
+		Payload:   `{"gameversion":"4.0.0.1904"}`,
+		Replay:    true,
+	})
+}
+
 func TestStatusEventsAreIgnored(t *testing.T) {
 	sender := okSender()
 	u := New(newClock().now, sender)
+	openLiveSession(u)
 
 	out := u.Handle(testSettings(), Event{Kind: "status", Payload: `{}`})
 	if out.Queued != 0 || len(sender.calls) != 0 {
@@ -79,6 +94,7 @@ func TestDisabledPluginDoesNothing(t *testing.T) {
 	cfg := testSettings()
 	cfg.Enabled = false
 	u := New(newClock().now, sender)
+	openLiveSession(u)
 
 	if out := u.Handle(cfg, jump("Sol", false)); out.Queued != 0 {
 		t.Errorf("a disabled plugin must not queue, got %+v", out)
@@ -90,6 +106,7 @@ func TestReplayFlushesEveryReplayBatchIgnoringTheInterval(t *testing.T) {
 	sender := okSender()
 	c := newClock()
 	u := New(c.now, sender)
+	openLiveSession(u)
 
 	feed(u, testSettings(), ReplayBatchSize-1, true)
 	if len(sender.calls) != 0 {
@@ -110,6 +127,7 @@ func TestReplayFlushesEveryReplayBatchIgnoringTheInterval(t *testing.T) {
 func TestReplayedShutdownDoesNotFlush(t *testing.T) {
 	sender := okSender()
 	u := New(newClock().now, sender)
+	openLiveSession(u)
 	cfg := testSettings()
 
 	u.Handle(cfg, jump("Sol", true))
@@ -127,6 +145,7 @@ func TestReplayedShutdownDoesNotFlush(t *testing.T) {
 func TestTransitionToLiveFlushesTheBacklog(t *testing.T) {
 	sender := okSender()
 	u := New(newClock().now, sender)
+	openLiveSession(u)
 	cfg := testSettings()
 
 	feed(u, cfg, 3, true)
@@ -146,6 +165,7 @@ func TestReplayBacksOffWhenItCannotSend(t *testing.T) {
 	sender := okSender()
 	c := newClock()
 	u := New(c.now, sender)
+	openLiveSession(u)
 	cfg := testSettings()
 	cfg.APIKey = ""
 
@@ -178,6 +198,7 @@ func TestReplayBacksOffWhenItCannotSend(t *testing.T) {
 func TestFirstLiveEventWithoutBacklogDoesNotFlush(t *testing.T) {
 	sender := okSender()
 	u := New(newClock().now, sender)
+	openLiveSession(u)
 	cfg := testSettings()
 
 	out := u.Handle(cfg, jump("Sol", false))
@@ -190,6 +211,7 @@ func TestFirstLiveEventWithoutBacklogDoesNotFlush(t *testing.T) {
 func TestSkippedReplayIsReportedOnceAtTheTransition(t *testing.T) {
 	sender := okSender()
 	u := New(newClock().now, sender)
+	openLiveSession(u)
 	cfg := testSettings()
 	cfg.UploadHistorical = false
 
@@ -213,6 +235,7 @@ func TestLiveRespectsBatchSizeAndInterval(t *testing.T) {
 	sender := okSender()
 	c := newClock()
 	u := New(c.now, sender)
+	openLiveSession(u)
 	cfg := testSettings()
 	cfg.BatchSize = 3
 
@@ -234,6 +257,7 @@ func TestLiveRespectsBatchSizeAndInterval(t *testing.T) {
 func TestLiveShutdownFlushesImmediately(t *testing.T) {
 	sender := okSender()
 	u := New(newClock().now, sender)
+	openLiveSession(u)
 	cfg := testSettings()
 
 	u.Handle(cfg, jump("Sol", false))
@@ -249,6 +273,7 @@ func TestQueueStaysBoundedWithoutAnApiKey(t *testing.T) {
 	sender := okSender()
 	c := newClock()
 	u := New(c.now, sender)
+	openLiveSession(u)
 	cfg := testSettings()
 	cfg.APIKey = ""
 
@@ -274,6 +299,7 @@ func TestQueueStaysBoundedWithoutAnApiKey(t *testing.T) {
 func TestHoldsWhenTheCommanderIsUnknown(t *testing.T) {
 	sender := okSender()
 	u := New(newClock().now, sender)
+	openLiveSession(u)
 	cfg := testSettings()
 	cfg.CommanderName = ""
 
@@ -295,6 +321,7 @@ func TestHoldsWhenTheCommanderIsUnknown(t *testing.T) {
 func TestCommanderNameIsLearnedFromTheJournal(t *testing.T) {
 	sender := okSender()
 	u := New(newClock().now, sender)
+	openLiveSession(u)
 	cfg := testSettings()
 	cfg.CommanderName = ""
 
@@ -310,6 +337,7 @@ func TestCommanderNameIsLearnedFromTheJournal(t *testing.T) {
 func TestDryRunReturnsTheBodyWithoutSending(t *testing.T) {
 	sender := okSender()
 	u := New(newClock().now, sender)
+	openLiveSession(u)
 	cfg := testSettings()
 	cfg.DryRun = true
 
@@ -329,6 +357,7 @@ func TestTransportFailureKeepsTheQueue(t *testing.T) {
 	sender := &stubSender{err: errors.New("timeout")}
 	c := newClock()
 	u := New(c.now, sender)
+	openLiveSession(u)
 	cfg := testSettings()
 
 	u.Handle(cfg, jump("Sol", false))
@@ -354,6 +383,7 @@ func TestTransportFailureKeepsTheQueue(t *testing.T) {
 func TestBatchRejectionDropsTheQueue(t *testing.T) {
 	sender := &stubSender{status: 200, body: `{"header":{"eventStatus":400,"eventStatusText":"bad key"},"events":[]}`}
 	u := New(newClock().now, sender)
+	openLiveSession(u)
 	cfg := testSettings()
 
 	u.Handle(cfg, jump("Sol", false))
@@ -375,6 +405,7 @@ func TestReplayBacksOffAfterABatchRejection(t *testing.T) {
 	sender := &stubSender{status: 200, body: `{"header":{"eventStatus":400,"eventStatusText":"bad key"},"events":[]}`}
 	c := newClock()
 	u := New(c.now, sender)
+	openLiveSession(u)
 	cfg := testSettings()
 
 	// ReplayBatchSize の 2.5 倍ほど流す。時計は一切進めない
@@ -392,6 +423,7 @@ func TestReplayBacksOffAfterABatchRejection(t *testing.T) {
 func TestHeaderSoftErrorIsTreatedAsSuccess(t *testing.T) {
 	sender := &stubSender{status: 200, body: `{"header":{"eventStatus":204,"eventStatusText":"no results"},"events":[]}`}
 	u := New(newClock().now, sender)
+	openLiveSession(u)
 	cfg := testSettings()
 
 	u.Handle(cfg, jump("Sol", false))
@@ -417,6 +449,7 @@ func TestIndividualRejectionsAreReported(t *testing.T) {
 		body:   `{"header":{"eventStatus":200},"events":[{"eventStatus":400,"eventStatusText":"nope"}]}`,
 	}
 	u := New(newClock().now, sender)
+	openLiveSession(u)
 	cfg := testSettings()
 
 	u.Handle(cfg, jump("Sol", false))
@@ -433,6 +466,7 @@ func TestIndividualRejectionsAreReported(t *testing.T) {
 func TestBrokenPayloadIsReportedButDoesNotStopTheUploader(t *testing.T) {
 	sender := okSender()
 	u := New(newClock().now, sender)
+	openLiveSession(u)
 	cfg := testSettings()
 
 	out := u.Handle(cfg, Event{Kind: "journal", Name: "FSDJump", Payload: "{oops"})
@@ -451,6 +485,7 @@ func TestOversizedBatchSizeStillFlushes(t *testing.T) {
 	sender := okSender()
 	c := newClock()
 	u := New(c.now, sender)
+	openLiveSession(u)
 	cfg := testSettings()
 	cfg.BatchSize = MaxQueued * 10
 

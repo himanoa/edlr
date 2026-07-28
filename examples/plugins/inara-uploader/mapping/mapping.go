@@ -83,6 +83,13 @@ func Convert(name, timestamp string, payload json.RawMessage, st *State) (Result
 	if err != nil {
 		return res, fmt.Errorf("%s: %w", name, err)
 	}
+	// INARA は Live(4.0 以降、beta 除く)のデータしか受け付けない。変換
+	// (= 学習込み)を済ませてから、Live と確認できていないセッションの
+	// イベントはここでまとめて捨てる。LoadGame 自身の出力もゲート対象
+	// (Legacy の LoadGame が学習した直後にその Credits を送らない)。
+	if !st.liveAllowed() {
+		return res, nil
+	}
 	// timestamp はここでまとめて埋める。個々のマッパーに配って回らずに済む。
 	for i := range events {
 		events[i].Timestamp = timestamp
