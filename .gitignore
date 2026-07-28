@@ -7,3 +7,4 @@ ui/src-tauri/gen/
 examples/plugins/*/target/
 examples/drivers/*/target/
 .worktrees/
+/.issues/
