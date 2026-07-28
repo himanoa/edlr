@@ -275,3 +275,12 @@ body {
     grid-column: span 1 !important;
   }
 }
+
+/* Logs: デーモンログ行 */
+.log-level { min-width: 3.2rem; text-transform: uppercase; font-size: 0.75rem; }
+.log-level-info { color: #7fb3d8; }
+.log-level-warn { color: #e0b429; }
+.log-level-error { color: #e05555; }
+.log-kind-log { color: #b48ce0; }
+.log-message { overflow-wrap: anywhere; }
+.logs-kind-toggle { display: inline-flex; align-items: center; gap: 0.25rem; }

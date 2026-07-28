@@ -57,3 +57,27 @@ test("auto-scroll re-fires on new entries even after the client buffer hits its 
 
   expect(scrollIntoView).toHaveBeenCalledTimes(2);
 });
+
+test("renders log entries with level badge and message", () => {
+  mockEntries = [
+    { id: 1, kind: "log", timestamp: "t1", level: "warn", message: "watch out", raw: {} },
+  ];
+  const { getByText } = render(<Logs />);
+  expect(getByText("watch out")).toBeTruthy();
+  expect(getByText("warn")).toBeTruthy();
+});
+
+test("kind filter checkboxes hide unchecked kinds", async () => {
+  const userEvent = (await import("@testing-library/user-event")).default;
+  mockEntries = [
+    { id: 1, kind: "journal", timestamp: "t", event: "FSDJump", raw: {} },
+    { id: 2, kind: "log", timestamp: "t", level: "info", message: "daemon log line", raw: {} },
+  ];
+  const { getByText, queryByText, getByRole } = render(<Logs />);
+  expect(getByText("daemon log line")).toBeTruthy();
+  await act(async () => {
+    await userEvent.click(getByRole("checkbox", { name: "log" }));
+  });
+  expect(queryByText("daemon log line")).toBeNull();
+  expect(getByText("FSDJump")).toBeTruthy();
+});

@@ -13,18 +13,33 @@ function Row({ entry }: { entry: LogEntry }) {
     <li className="log-row" onClick={() => setOpen((o) => !o)}>
       <span className="log-time">{entry.timestamp ?? "-"}</span>
       <span className={`log-kind log-kind-${entry.kind}`}>{entry.kind}</span>
-      <span className="log-event">{entry.event ?? "Status"}</span>
+      {entry.kind === "log" ? (
+        <>
+          <span className={`log-level log-level-${entry.level}`}>{entry.level}</span>
+          <span className="log-message">{entry.message}</span>
+        </>
+      ) : (
+        <span className="log-event">{entry.event ?? "Status"}</span>
+      )}
       {open && <pre className="log-raw">{JSON.stringify(entry.raw, null, 2)}</pre>}
     </li>
   );
 }
 
+const KINDS = ["journal", "status", "log"] as const;
+type Kind = (typeof KINDS)[number];
+
 export default function Logs() {
   const { entries, connection } = useEventStream(defaultWsUrl());
   const [query, setQuery] = useState("");
   const [follow, setFollow] = useState(true);
+  const [kinds, setKinds] = useState<Record<Kind, boolean>>({
+    journal: true,
+    status: true,
+    log: true,
+  });
   const bottomRef = useRef<HTMLDivElement>(null);
-  const shown = filterEntries(entries, query);
+  const shown = filterEntries(entries, query).filter((e) => kinds[e.kind]);
 
   useEffect(() => {
     if (follow && bottomRef.current?.scrollIntoView) {
@@ -42,6 +57,17 @@ export default function Logs() {
           value={query}
           onChange={(e) => setQuery(e.target.value)}
         />
+        {KINDS.map((k) => (
+          <label key={k} className="logs-kind-toggle">
+            <input
+              type="checkbox"
+              aria-label={k}
+              checked={kinds[k]}
+              onChange={(e) => setKinds((prev) => ({ ...prev, [k]: e.target.checked }))}
+            />
+            {k}
+          </label>
+        ))}
         <label>
           <input
             type="checkbox"
