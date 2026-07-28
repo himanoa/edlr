@@ -1,4 +1,4 @@
-package edlr:plugin@0.3.0;
+package edlr:plugin@0.4.0;
 
 interface host-log {
   enum level { debug, info, warn, error }
@@ -139,6 +139,11 @@ world plugin {
   export init: func();
   export on-event: func(ev: event);
   export on-message: func(driver: string, topic: string, payload: list<u8>);
+  // manifest の `[[schedule]]` エントリごとに、その name を渡して呼ばれる。
+  export on-schedule: func(name: string);
+  // デーモンの graceful shutdown 時に一度だけ呼ばれる。trap による
+  // 無効化(disable)の後には呼ばれない。
+  export on-stop: func();
 }
 
 /// ゲスト(プラグイン)がビルド時に対象とする world。

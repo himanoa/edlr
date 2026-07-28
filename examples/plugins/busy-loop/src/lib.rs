@@ -21,6 +21,10 @@ impl Guest for BusyLoop {
     }
 
     fn on_message(_driver: String, _topic: String, _payload: Vec<u8>) {}
+
+    fn on_schedule(_name: String) {}
+
+    fn on_stop() {}
 }
 
 export!(BusyLoop);
