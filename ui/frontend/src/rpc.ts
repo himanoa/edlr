@@ -1,4 +1,10 @@
-import type { BusRequest, Capabilities, DriversList } from "./types/plugin";
+import type {
+  BusRequest,
+  Capabilities,
+  DashboardListEntry,
+  DashboardWidget,
+  DriversList,
+} from "./types/plugin";
 
 const DEFAULT_TIMEOUT_MS = 5000;
 
@@ -141,6 +147,28 @@ export class RpcClient {
       driver,
       granted,
     });
+  }
+
+  /**
+   * ダッシュボードウィジェットの表示承認を更新する
+   * (`plugins/set-dashboard-grant`)。`setBusGrant` と同じ流儀で、サーバは
+   * そのプラグインの `dashboard` 配列全体を返す。
+   */
+  setDashboardGrant(
+    pluginId: string,
+    widget: string,
+    granted: boolean,
+  ): Promise<{ dashboard: DashboardWidget[] }> {
+    return this.call<{ dashboard: DashboardWidget[] }>("plugins/set-dashboard-grant", {
+      plugin: pluginId,
+      widget,
+      granted,
+    });
+  }
+
+  /** grant 済みダッシュボードウィジェットの一覧(`dashboard/list`)。 */
+  listDashboard(): Promise<{ widgets: DashboardListEntry[] }> {
+    return this.call<{ widgets: DashboardListEntry[] }>("dashboard/list");
   }
 
   private rejectAllPending(reason: unknown): void {

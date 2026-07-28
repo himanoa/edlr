@@ -74,6 +74,32 @@ export interface BusRequest {
   resolved: boolean;
 }
 
+export type WidgetSize = "small" | "medium" | "large";
+
+/** `plugins/list` / `plugins/set-dashboard-grant` が返すウィジェット宣言 1 件。 */
+export interface DashboardWidget {
+  id: string;
+  title: string;
+  entry: string;
+  size: WidgetSize;
+  granted: boolean;
+  staleGrant: boolean;
+  resolved: boolean;
+}
+
+/** `dashboard/list` が返す grant 済みウィジェット 1 件(Dashboard 画面用)。 */
+export interface DashboardListEntry {
+  plugin: string;
+  pluginName: string;
+  widget: string;
+  title: string;
+  url: string;
+  size: WidgetSize;
+  events: string[];
+  resolved: boolean;
+  state: "running" | "disabled";
+}
+
 export interface PluginInfo {
   id: string;
   name: string;
@@ -87,6 +113,7 @@ export interface PluginInfo {
   sidecars: Sidecar[];
   filesystem: FilesystemRoot[];
   bus: BusRequest[];
+  dashboard: DashboardWidget[];
 }
 
 export interface PluginsList {

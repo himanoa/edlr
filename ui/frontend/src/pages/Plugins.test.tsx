@@ -63,6 +63,7 @@ function makePlugin(overrides: Partial<PluginInfo> = {}): PluginInfo {
     sidecars: [],
     filesystem: [],
     bus: [],
+    dashboard: [],
     ...overrides,
   };
 }
