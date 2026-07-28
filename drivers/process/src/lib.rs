@@ -303,8 +303,20 @@ impl ProcessDriver {
                 .map(|(key, group)| (key.clone(), take_for_stop(group)))
                 .collect()
         };
-        for (key, taken) in per_key {
-            self.finish_stop(&key, taken);
+        // **全キーの子をまとめて 1 つの猶予で停止する**。キーごとに
+        // `finish_stop` を直列に呼ぶと、SIGTERM を無視する子がいた場合に
+        // 最悪 "キー数 × shutdown_grace" かかり、デーモン終了を待っている
+        // Tauri 側(`ui/src-tauri/src/daemon.rs` の `STOP_GRACE`)がその分
+        // 長く待たされる。
+        let mut flat: Vec<(String, TakenChild)> = per_key
+            .into_iter()
+            .flat_map(|(key, taken)| taken.into_iter().map(move |t| (key.clone(), t)))
+            .collect();
+        let mut children: Vec<&mut Child> = flat.iter_mut().map(|(_, t)| &mut t.child).collect();
+        let exit_codes = kill_and_wait_all(&mut children, self.shutdown_grace);
+
+        for ((key, taken), exit_code) in flat.iter().zip(exit_codes) {
+            self.record_stopped(key, taken.index, taken.port, exit_code);
         }
 
         let pending: Vec<std::thread::JoinHandle<()>> = std::mem::take(
@@ -323,24 +335,36 @@ impl ProcessDriver {
     /// ロックは子ごとに個別に取り直すので、他のキー(や他の呼び出し)を
     /// 長時間ブロックしない。
     fn finish_stop(&self, key: &str, taken: Vec<TakenChild>) {
-        for mut taken in taken {
-            let exit_code = kill_and_wait(&mut taken.child, self.shutdown_grace);
-            let mut groups = self.lock();
-            if let Some(group) = groups.get_mut(key) {
-                // index/port に加えて `terminating` も確認する: この間に
-                // ポート構成が変わって `align_instances` がインスタンス列を
-                // 丸ごと作り直していたら、そこの `terminating` は初期値の
-                // `false` に戻っているので一致せず、書き戻しをスキップする
-                // (別物のインスタンスを誤って更新しない)。
-                if let Some(instance) = group
-                    .instances
-                    .iter_mut()
-                    .find(|i| i.index == taken.index && i.port == taken.port && i.terminating)
-                {
-                    instance.exit_code = exit_code;
-                    instance.terminating = false;
-                }
-            }
+        let mut taken = taken;
+        // このキーの子はまとめて 1 つの猶予で停止する(`kill_and_wait_all`)。
+        let mut children: Vec<&mut Child> = taken.iter_mut().map(|t| &mut t.child).collect();
+        let exit_codes = kill_and_wait_all(&mut children, self.shutdown_grace);
+
+        for (taken, exit_code) in taken.iter().zip(exit_codes) {
+            self.record_stopped(key, taken.index, taken.port, exit_code);
+        }
+    }
+
+    /// 停止し終えた 1 インスタンスの終了コードを書き戻す。ロックは
+    /// インスタンスごとに取り直すので、他のキー(や他の呼び出し)を
+    /// 長時間ブロックしない。
+    fn record_stopped(&self, key: &str, index: u32, port: u16, exit_code: Option<i32>) {
+        let mut groups = self.lock();
+        let Some(group) = groups.get_mut(key) else {
+            return;
+        };
+        // index/port に加えて `terminating` も確認する: この間に
+        // ポート構成が変わって `align_instances` がインスタンス列を
+        // 丸ごと作り直していたら、そこの `terminating` は初期値の
+        // `false` に戻っているので一致せず、書き戻しをスキップする
+        // (別物のインスタンスを誤って更新しない)。
+        if let Some(instance) = group
+            .instances
+            .iter_mut()
+            .find(|i| i.index == index && i.port == port && i.terminating)
+        {
+            instance.exit_code = exit_code;
+            instance.terminating = false;
         }
     }
 }
@@ -541,33 +565,72 @@ fn terminate(instance: &mut Instance, grace: Duration) {
 /// ではないため)。呼び出し元はロックを保持していないことが前提
 /// (`stop`/`stop_all` は `take_for_stop` で子を切り離してから呼ぶ)。
 fn kill_and_wait(child: &mut Child, grace: Duration) -> Option<i32> {
-    let pid = child.id() as i32;
+    kill_and_wait_all(&mut [child], grace)
+        .pop()
+        .expect("one child in, one result out")
+}
 
-    // SAFETY: `pid` は自分が spawn した(まだ wait していない)子のもので、
+/// 複数の子プロセスを **1 つの共有猶予** で停止する。
+///
+/// 全員へ先に SIGTERM を送り、そのうえで 1 本のデッドラインで全員を待ち、
+/// 生き残りへ SIGKILL を送る。1 件ずつ `kill_and_wait` を直列に呼ぶと最悪
+/// `N × grace` かかるが、この形なら `1 × grace` で済む(デーモン終了時に
+/// Tauri 側が待たされる時間を決めているのがこの最悪ケース --
+/// `ui/src-tauri/src/daemon.rs` の `STOP_GRACE` 参照)。
+///
+/// 戻り値は入力と同じ順序。正常終了時のみ `Some(code)` で、SIGKILL へ昇格
+/// した場合や `wait` に失敗した場合は `None`(強制終了なので意味のある終了
+/// コードではないため)。呼び出し元はロックを保持していないことが前提。
+fn kill_and_wait_all(children: &mut [&mut Child], grace: Duration) -> Vec<Option<i32>> {
+    // SAFETY: いずれも自分が spawn した(まだ wait していない)子の pid で、
     // `process_group(0)` により pid == pgid。
-    unsafe {
-        libc::killpg(pid, libc::SIGTERM);
+    for child in children.iter() {
+        unsafe {
+            libc::killpg(child.id() as i32, libc::SIGTERM);
+        }
     }
 
+    // 猶予は全員で共有する。`None` はまだ回収できていないことを表す。
+    let mut reaped: Vec<Option<Option<i32>>> = vec![None; children.len()];
+    // `try_wait` がエラーを返した子は、以後ポーリングせず直ちに SIGKILL へ
+    // 進める(単体版が `Err` で待ちループを抜けていたのと同じ扱い)。
+    let mut give_up = vec![false; children.len()];
     let deadline = Instant::now() + grace;
     loop {
-        match child.try_wait() {
-            Ok(Some(status)) => return status.code(),
-            Ok(None) => {}
-            Err(_) => break,
+        let mut all_settled = true;
+        for (i, child) in children.iter_mut().enumerate() {
+            if reaped[i].is_some() || give_up[i] {
+                continue;
+            }
+            match child.try_wait() {
+                Ok(Some(status)) => reaped[i] = Some(status.code()),
+                Ok(None) => all_settled = false,
+                Err(_) => give_up[i] = true,
+            }
         }
-        if Instant::now() >= deadline {
+        if all_settled || Instant::now() >= deadline {
             break;
         }
         std::thread::sleep(Duration::from_millis(10));
     }
 
-    // SAFETY: 同上。grace 経過後の強制終了。
-    unsafe {
-        libc::killpg(pid, libc::SIGKILL);
+    // 猶予内に終わらなかった(あるいは `try_wait` が失敗した)子を強制終了。
+    for (i, child) in children.iter_mut().enumerate() {
+        if reaped[i].is_some() {
+            continue;
+        }
+        // SAFETY: 同上。
+        unsafe {
+            libc::killpg(child.id() as i32, libc::SIGKILL);
+        }
+        let _ = child.wait();
+        reaped[i] = Some(None);
     }
-    let _ = child.wait();
-    None
+
+    reaped
+        .into_iter()
+        .map(|r| r.expect("every child is settled by the SIGKILL pass"))
+        .collect()
 }
 
 #[cfg(test)]

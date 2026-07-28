@@ -6,8 +6,10 @@ use std::path::{Path, PathBuf};
 
 const PROTON_JOURNAL_DIR: &str = ".steam/steam/steamapps/compatdata/359320/pfx/drive_c/users/steamuser/Saved Games/Frontier Developments/Elite Dangerous";
 
-/// SIGTERM 送信から SIGKILL へ昇格するまでの、サイドカー 1 インスタンスあたりの
-/// 猶予(秒)。`edlr-core`(`plugin::host::SIDECAR_SHUTDOWN_GRACE`)と `edlr-ui`
+/// SIGTERM 送信から SIGKILL へ昇格するまでの、サイドカー停止 1 回あたりの
+/// 猶予(秒)。1 回の `stop_all`/`stop` に含まれる全インスタンスはこの猶予を
+/// **共有**する(`drivers/process` の `kill_and_wait_all` が全員へ先に SIGTERM
+/// を送り、1 本のデッドラインで待つ)ので、インスタンス数には比例しない。`edlr-core`(`plugin::host::SIDECAR_SHUTDOWN_GRACE`)と `edlr-ui`
 /// (`daemon::STOP_GRACE` の下限を決める根拠)の両方から参照する共有定数。
 ///
 /// この値をここに 1 箇所だけ置くのは、Tauri 側がデーモンを止める猶予
@@ -20,55 +22,36 @@ const PROTON_JOURNAL_DIR: &str = ".steam/steam/steamapps/compatdata/359320/pfx/d
 /// 一度指摘された)。
 pub const SIDECAR_SHUTDOWN_GRACE_SECS: u64 = 3;
 
-/// デーモンの `stop_all`(`drivers/process::ProcessDriver::stop_all`)が
-/// 現実的に処理しうる、全プラグイン・全サイドカーの合計インスタンス数の
-/// 上限として運用上想定する値。
-///
-/// `stop_all` は SIGTERM 無視の子がいる場合、インスタンスごとに逐次
-/// `SIDECAR_SHUTDOWN_GRACE_SECS` 秒ブロックしうる(`finish_stop` が
-/// `taken` を順に処理するため)。したがってデーモン全体の後始末の最悪時間は
-/// おおよそ `SIDECAR_SHUTDOWN_GRACE_SECS * SIDECAR_SHUTDOWN_WORST_CASE_INSTANCES`
-/// に収まる、という前提を置く。実際の合計インスタンス数はユーザー設定
-/// (`replicas` の合計)次第で理論上はこれを超えうるが、edlr は小規模な
-/// ローカルプラグイン向けであり、それを大きく超える構成は非現実的とみなす。
-/// `ui/src-tauri/src/daemon.rs` の `STOP_GRACE` はこの想定を超えて初めて
-/// 「デーモンより先にタイムアウトしない」と言えるため、コンパイル時
-/// アサーションでこの関係を固定してある(`daemon.rs` を参照)。
-pub const SIDECAR_SHUTDOWN_WORST_CASE_INSTANCES: u64 = 20;
-
 /// ドライバ 1 呼び出しの期限(秒)。`edlr-core`(`driver::host::DriverInstance::
 /// CALL_DEADLINE`)と `edlr-ui`(`STOP_GRACE` のアサーション)の両方が参照する
 /// ため、`SIDECAR_SHUTDOWN_GRACE_SECS` と同じくここで共有する。
 pub const DRIVER_CALL_DEADLINE_SECS: u64 = 30;
 
-/// プラグインスレッドが `PluginWork::Stop` を受け取ってから
-/// `PluginInstance::call_on_stop` を呼び終えるまでを `Registry::shutdown_plugins`
-/// が 1 プラグインあたり待つ上限(秒)。
+/// プラグインが停止要求を受け取ってから `PluginInstance::call_on_stop` を
+/// 呼び終えるまでを `Registry::shutdown_plugins` が待つ上限(秒)。
 ///
-/// 名目上は `edlr-core` の `PluginInstance::CALL_DEADLINE`(2 秒)に、スレッドが
-/// `work_rx` からメッセージを受け取ってから実際に呼び出しに入るまでの
-/// スケジューリング遅延分の余裕(3 秒)を足した値、として決めている。
-/// ただし `PluginWork::Stop` はキューの末尾に積まれる**ただの 1 項目**であり、
-/// スレッドがそれを処理するまでには「現在処理中の呼び出し(最大 2 秒)」
-/// **に加えて**「`Stop` より前に既にキューへ積まれていた項目をすべて
-/// 処理し終える」必要がある。キュー容量は `PLUGIN_WORK_QUEUE_CAPACITY`
-/// (現状 64)なので、最悪ケースは呼び出し 1 回あたり `CALL_DEADLINE` として
-/// (64 - 1) 件 × 2 秒 ≈ 126 秒に達し得る。つまりこの 5 秒という値は
-/// **この最悪ケースを一切カバーしない**、意図的に小さく保った値である。
+/// **全プラグインでこの猶予を共有する**: `shutdown_plugins` は停止要求を
+/// 全件へ先に送ってから、1 つの共有デッドラインで全スレッドを join するので、
+/// プラグイン数には比例しない。
 ///
-/// これは許容している設計判断であり、この値自体を大きくして最悪ケースを
-/// カバーしようとはしない: デーモンの終了シーケンスを、たまたまキューが
-/// 詰まっていた 1 プラグインのために(理論上 126 秒も)引き延ばすべきでは
-/// ない。待ちきれなかった場合は warn ログを出して join を諦め、その直後に
-/// プロセス自体が終了するので、on-stop が呼ばれなかったことによる影響は
-/// 限定的である: Journal 由来の作業は読み取り位置が永続化されているため
-/// 次回起動時に replay として再送される。ただし **バス配信(bus delivery)
-/// はこの限りではなく、再送されない**(取りこぼしたバスイベントは失われる)。
+/// 値は `edlr-core` の `PluginInstance::CALL_DEADLINE`(2 秒)に、スレッドが
+/// 停止要求に気づいてから実際に呼び出しに入るまでのスケジューリング遅延分の
+/// 余裕(3 秒)を足したもの。停止要求は**ワークキューを追い越す**
+/// (`PluginThreadHandle::stop_flag` -- ランナーループがキューを読む前に
+/// 確認する)ため、キューに積み残しがあっても on-stop はこの猶予内に到達
+/// できる。かつては `Stop` がキュー経由のみで、積み残し (64 - 1) 件 × 2 秒
+/// ≈ 126 秒を消化しないと on-stop に辿り着けなかった。
 ///
-/// `CALL_DEADLINE` や `PLUGIN_WORK_QUEUE_CAPACITY` を変更した場合はこの
-/// コメントの数値も見直すこと(値そのものを共有定数にしていないのは、
-/// `edlr_config` を `edlr-core` に依存させたくないため -- `SIDECAR_SHUTDOWN_GRACE_SECS`
-/// と同じ理由)。
+/// それでも猶予は best-effort である: 終了時にちょうど実行中だった wasm
+/// 呼び出し(応答しないホストへの `driver-http.send` など)がこの猶予内に
+/// 返らなければ、warn ログを出して join を諦める。その直後にプロセス自体が
+/// 終了するので影響は限定的で、Journal 由来の作業は読み取り位置が永続化
+/// されているため次回起動時に replay として再送される。ただし
+/// **バス配信(bus delivery)はこの限りではなく、再送されない**。
+///
+/// `CALL_DEADLINE` を変更した場合はこのコメントの数値も見直すこと
+/// (値そのものを共有定数にしていないのは、`edlr_config` を `edlr-core` に
+/// 依存させたくないため -- `SIDECAR_SHUTDOWN_GRACE_SECS` と同じ理由)。
 ///
 /// `edlr-core`(`plugin::registry::Registry::shutdown_plugins` の join
 /// タイムアウト)と `edlr-ui`(`daemon::STOP_GRACE` のアサーション)の両方が

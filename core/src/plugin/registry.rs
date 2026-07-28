@@ -470,14 +470,20 @@ impl Registry {
     /// 何もしない -- いずれの場合も後続の join は行う(トラップ済みなら即座に
     /// `is_finished()` が `true` になるだけ)。
     ///
-    /// **join はスレッドごとに独立してポーリングで打ち切る**: 標準ライブラリの
-    /// `JoinHandle` には `join_timeout` が無いため、`is_finished()` を
-    /// `PLUGIN_STOP_JOIN_POLL_INTERVAL` 間隔でポーリングし、
-    /// `PLUGIN_STOP_JOIN_TIMEOUT` を過ぎたら諦める(warn ログを出して、その
-    /// スレッドの完了を待たずに次のプラグインへ進む -- プロセス自体はこの
-    /// 直後に終了するので、待ちきれなかったスレッドはプロセス終了と共に
-    /// 消える。ハングしたプラグインのために shutdown シーケンス全体を
-    /// 無期限に止めるべきではない)。
+    /// **停止要求は全件へ先に送り、join は 1 つの共有デッドラインで待つ**:
+    /// プラグインの on-stop は互いに独立なので、直列に待つ理由が無い。まず
+    /// 全プラグインへ停止を伝えてから、全スレッドの `is_finished()` を
+    /// `PLUGIN_STOP_JOIN_POLL_INTERVAL` 間隔でまとめてポーリングする。
+    /// これにより最悪ケースが `N × PLUGIN_STOP_JOIN_TIMEOUT` から
+    /// `1 × PLUGIN_STOP_JOIN_TIMEOUT` に縮む(Tauri 側の
+    /// `daemon::STOP_GRACE` はこの最悪ケースを見積もって決まっているので、
+    /// あちらの定数も一桁下げられる)。
+    ///
+    /// 標準ライブラリの `JoinHandle` には `join_timeout` が無いためポーリング
+    /// で代替している。デッドラインを過ぎても終わっていないスレッドは諦める
+    /// (warn ログを出して join しない -- プロセス自体はこの直後に終了するので
+    /// 待ちきれなかったスレッドはプロセス終了と共に消える。ハングしたプラグイン
+    /// のために shutdown シーケンス全体を止めるべきではない)。
     pub fn shutdown_plugins(&self) {
         let handles: Vec<(String, PluginThreadHandle)> = self
             .plugin_threads
@@ -486,7 +492,8 @@ impl Registry {
             .drain()
             .collect();
 
-        for (id, thread_handle) in handles {
+        // 第 1 段: 全プラグインへ停止を伝える。ここでは一切待たない。
+        for (_, thread_handle) in &handles {
             // 主経路: フラグを先に立てる。ランナーループは次の周回で、
             // キューを読む前にこれを見て on-stop へ進む。
             thread_handle.stop_flag.store(true, Ordering::SeqCst);
@@ -502,11 +509,15 @@ impl Registry {
                     // プラグインスレッドは既に(trap などで)終了済み。
                 }
             }
+        }
 
-            let deadline = Instant::now() + PLUGIN_STOP_JOIN_TIMEOUT;
-            while !thread_handle.handle.is_finished() && Instant::now() < deadline {
-                thread::sleep(PLUGIN_STOP_JOIN_POLL_INTERVAL);
-            }
+        // 第 2 段: 1 つの共有デッドラインで、全スレッドの終了を並行に待つ。
+        let deadline = Instant::now() + PLUGIN_STOP_JOIN_TIMEOUT;
+        while handles.iter().any(|(_, h)| !h.handle.is_finished()) && Instant::now() < deadline {
+            thread::sleep(PLUGIN_STOP_JOIN_POLL_INTERVAL);
+        }
+
+        for (id, thread_handle) in handles {
             if thread_handle.handle.is_finished() {
                 let _ = thread_handle.handle.join();
             } else {
