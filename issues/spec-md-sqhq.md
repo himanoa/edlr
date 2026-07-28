@@ -1,10 +1,10 @@
 ---
 id: spec-md-sqhq
 title: spec.mdの未決定事項セクションが実装済み内容のまま陳腐化
-status: open
+status: closed
 labels: docs
 created: 2026-07-28T15:07:27Z
-updated: 2026-07-28T15:09:15Z
+updated: 2026-07-28T15:45:38Z
 ---
 
 ## 問題
