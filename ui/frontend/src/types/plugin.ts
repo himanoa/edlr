@@ -3,7 +3,11 @@ export type SettingField =
   | { type: "boolean"; key: string; label: string; default: boolean }
   | { type: "string"; key: string; label: string; default: string }
   | { type: "number"; key: string; label: string; default: number }
-  | { type: "select"; key: string; label: string; default: string; options: string[] };
+  | { type: "select"; key: string; label: string; default: string; options: string[] }
+  // API キーなどの秘密情報。`default` を持たない(マニフェストに秘密情報を
+  // 書けてしまう余地を作らないため)。値はサーバから返ってこない
+  // (write-only)ので、設定済みかどうかは `PluginInfo.secretsSet` で判断する。
+  | { type: "secret"; key: string; label: string };
 
 export interface CapabilityRequest {
   kind: "http";
@@ -135,7 +139,10 @@ export interface PluginInfo {
   state: "running" | "disabled";
   reason?: string;
   settings: SettingField[];
+  /** `secret` 型のキーは含まれない(サーバが読み出し応答から除外する)。 */
   values: Record<string, unknown>;
+  /** 空でない値が保存済みの `secret` 型設定のキー。 */
+  secretsSet: string[];
   capabilities: Capabilities;
   sidecars: Sidecar[];
   filesystem: FilesystemRoot[];

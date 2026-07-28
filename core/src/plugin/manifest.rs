@@ -28,6 +28,21 @@ pub enum SettingField {
         default: String,
         options: Vec<String>,
     },
+    /// API キーなどの秘密情報。**`default` を持たない**(マニフェストに
+    /// 秘密情報を書けてしまう余地を作らないため)。値は常に空文字列から始まる。
+    ///
+    /// `string` との違いは扱いだけで、保存形式は同じ文字列:
+    ///
+    /// - UI ではマスク入力(`<input type="password">`)になる
+    /// - **RPC の読み出し応答には含まれない**(write-only)。`plugins/list` /
+    ///   `plugins/get-settings` は値の代わりに「設定済みかどうか」だけを返す
+    /// - ログに出さない
+    ///
+    /// プラグイン自身は `host-settings.get-all` で通常どおり値を受け取る
+    /// (受け取れなければ意味が無い)。ここで守っているのは「UI/RPC 越しに
+    /// 秘密情報が読み出せてしまう」経路であって、プラグインからの秘匿では
+    /// ない -- そもそも秘密情報を渡す相手がそのプラグインである。
+    Secret { key: String, label: String },
 }
 
 impl SettingField {
@@ -37,6 +52,7 @@ impl SettingField {
             SettingField::String { key, .. } => key,
             SettingField::Number { key, .. } => key,
             SettingField::Select { key, .. } => key,
+            SettingField::Secret { key, .. } => key,
         }
     }
 
@@ -48,7 +64,14 @@ impl SettingField {
                 serde_json::json!(*default)
             }
             SettingField::Select { default, .. } => serde_json::Value::String(default.clone()),
+            // 秘密情報にマニフェスト由来の初期値はない。
+            SettingField::Secret { .. } => serde_json::Value::String(String::new()),
         }
+    }
+
+    /// 秘密情報として扱うフィールドか(RPC 応答から除外する対象)。
+    pub fn is_secret(&self) -> bool {
+        matches!(self, SettingField::Secret { .. })
     }
 }
 
@@ -1100,6 +1123,67 @@ entry = "plugin.wasm"
 
         let err = load_manifest(&plugin_dir).expect_err("missing entry should be rejected");
         assert!(matches!(err, ManifestError::MissingEntry));
+    }
+
+    /// `secret` は `default` を取らない(マニフェストに秘密情報を書ける
+    /// 余地を作らないため)。値は常に空文字列から始まる。
+    #[test]
+    fn secret_setting_is_parsed_and_defaults_to_an_empty_string() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin_dir = tmp.path().join("secret-plugin");
+        fs::create_dir_all(&plugin_dir).unwrap();
+        write_entry(&plugin_dir, "plugin.wasm");
+        write_manifest(
+            &plugin_dir,
+            r#"
+id = "secret-plugin"
+name = "Secret"
+version = "0.1.0"
+entry = "plugin.wasm"
+
+[[settings]]
+key = "api-key"
+label = "API Key"
+type = "secret"
+"#,
+        );
+
+        let manifest = load_manifest(&plugin_dir).expect("secret settings should parse");
+        assert_eq!(manifest.settings.len(), 1);
+        let field = &manifest.settings[0];
+        assert_eq!(field.key(), "api-key");
+        assert!(field.is_secret());
+        assert_eq!(field.default_value(), serde_json::json!(""));
+    }
+
+    /// 他の型は `secret` 扱いされない(`is_secret` の取り違えを防ぐ)。
+    #[test]
+    fn non_secret_settings_are_not_marked_secret() {
+        for field in [
+            SettingField::Boolean {
+                key: "b".into(),
+                label: "B".into(),
+                default: true,
+            },
+            SettingField::String {
+                key: "s".into(),
+                label: "S".into(),
+                default: "x".into(),
+            },
+            SettingField::Number {
+                key: "n".into(),
+                label: "N".into(),
+                default: 1.0,
+            },
+            SettingField::Select {
+                key: "sel".into(),
+                label: "Sel".into(),
+                default: "a".into(),
+                options: vec!["a".into()],
+            },
+        ] {
+            assert!(!field.is_secret(), "{field:?} must not be treated as secret");
+        }
     }
 
     #[test]

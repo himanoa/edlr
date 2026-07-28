@@ -21,7 +21,7 @@ use crate::plugin::grants::{GrantState, GrantsError, GrantsStore};
 use crate::plugin::host::{capabilities_json_string, parse_capability_hosts, PluginHost};
 use crate::plugin::runner::PluginWork;
 use crate::plugin::schedule::{Clock, ScheduleState, ScheduleView};
-use crate::plugin::settings::SettingsStore;
+use crate::plugin::settings::{split_secrets, SettingsStore};
 use crate::plugin::sidecar::{assign_ports, SidecarConfig, SidecarConfigError, SidecarConfigStore};
 use crate::plugin::sidecar_runtime::{
     implicit_http_hosts, sidecars_json_string, SidecarRuntimeEntry,
@@ -147,7 +147,11 @@ pub struct ScheduleInfo {
 pub struct PluginInfo {
     pub manifest: Manifest,
     pub state: PluginState,
+    /// 設定値。**`secret` 型のキーは含まれない**(write-only なので RPC の
+    /// 読み出し応答には載せない)。設定済みかどうかは `secrets_set` で分かる。
     pub values: serde_json::Map<String, serde_json::Value>,
+    /// 空でない値が保存されている `secret` 型設定のキー(宣言順)。
+    pub secrets_set: Vec<String>,
     pub capability_requests: Vec<CapabilityRequest>,
     pub grant_state: GrantState,
     pub sidecars: Vec<SidecarInfo>,
@@ -613,7 +617,9 @@ impl Registry {
         snapshot
             .into_iter()
             .map(|(manifest, state)| {
-                let values = self.settings_store.effective(&manifest);
+                // 秘密情報は RPC 応答から落とす(設定済みかどうかだけ返す)。
+                let (values, secrets_set) =
+                    split_secrets(&manifest, self.settings_store.effective(&manifest));
                 let grant_state = self.grants_store.state(&manifest);
                 let capability_requests = manifest.capabilities.clone();
                 let sidecars = self.build_sidecar_infos(&manifest);
@@ -625,6 +631,7 @@ impl Registry {
                     manifest,
                     state,
                     values,
+                    secrets_set,
                     capability_requests,
                     grant_state,
                     sidecars,
@@ -964,7 +971,10 @@ impl Registry {
         id: &str,
     ) -> Result<serde_json::Map<String, serde_json::Value>, RegistryError> {
         let manifest = self.find_manifest(id)?;
-        Ok(self.settings_store.effective(&manifest))
+        // 秘密情報は読み出し応答に載せない(`split_secrets` 参照)。
+        let (visible, _secrets_set) =
+            split_secrets(&manifest, self.settings_store.effective(&manifest));
+        Ok(visible)
     }
 
     /// `id` のプラグインの settings を検証・永続化し、稼働中プラグインが参照
@@ -1004,6 +1014,8 @@ impl Registry {
             .update_and_effective(&manifest, values)
             .map_err(RegistryError::Settings)?;
 
+        // プラグインへ渡すバッファには秘密情報も含める -- 渡す相手は
+        // そのプラグイン自身なので、ここで落としたら意味が無い。
         let settings_json_string =
             serde_json::to_string(&serde_json::Value::Object(effective.clone()))
                 .unwrap_or_else(|_| "{}".to_string());
@@ -1011,7 +1023,9 @@ impl Registry {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = settings_json_string;
 
-        Ok(effective)
+        // RPC の応答には載せない。
+        let (visible, _secrets_set) = split_secrets(&manifest, effective);
+        Ok(visible)
     }
 
     /// `id` のプラグインの capability 承認/取消を `GrantsStore` に永続化し、
@@ -1847,6 +1861,7 @@ impl Registry {
 pub(crate) mod tests {
     use super::*;
     use crate::event::Event;
+    use crate::plugin::SettingField;
     use std::sync::atomic::Ordering;
     use std::thread;
     use std::time::Duration;
@@ -2143,6 +2158,117 @@ pub(crate) mod tests {
             bus_json: Arc::new(Mutex::new("[]".to_string())),
         });
         registry
+    }
+
+    /// `secret` 型設定を 1 件だけ持つプラグインを載せた `Registry`。
+    /// `settings_store` は実ディレクトリを使うので、`set_values` で書いた値が
+    /// `list()`/`values()` に効く。
+    fn test_registry_with_secret() -> (Registry, tempfile::TempDir) {
+        let tmp = tempfile::tempdir().unwrap();
+        let host = Arc::new(PluginHost::new().expect("host should start"));
+        let settings_store = Arc::new(SettingsStore::new(tmp.path().join("settings")));
+        let grants_store = Arc::new(GrantsStore::new(tmp.path().join("grants")));
+        let sidecar_config_store = Arc::new(SidecarConfigStore::new(tmp.path().join("settings")));
+        let filesystem_config_store = Arc::new(FilesystemConfigStore::new(
+            tmp.path().join("settings"),
+            Vec::new(),
+        ));
+        let process_driver = host.process_driver();
+        let registry = Registry::new(
+            host,
+            settings_store,
+            grants_store,
+            sidecar_config_store,
+            filesystem_config_store,
+            process_driver,
+            empty_driver_registry(tmp.path()),
+            tmp.path().join("plugins"),
+        );
+
+        let mut manifest = plain_manifest("secret-plugin");
+        manifest.settings = vec![
+            SettingField::String {
+                key: "endpoint".into(),
+                label: "Endpoint".into(),
+                default: "https://example.test".into(),
+            },
+            SettingField::Secret {
+                key: "api-key".into(),
+                label: "API Key".into(),
+            },
+        ];
+        registry.push(PluginEntry {
+            manifest,
+            state: PluginState::Running,
+            settings_json: Arc::new(Mutex::new("{}".to_string())),
+            capabilities_json: Arc::new(Mutex::new(crate::plugin::host::capabilities_json_string(
+                &[],
+            ))),
+            sidecars_json: Arc::new(Mutex::new("[]".to_string())),
+            filesystem_json: Arc::new(Mutex::new("[]".to_string())),
+            bus_json: Arc::new(Mutex::new("[]".to_string())),
+        });
+        (registry, tmp)
+    }
+
+    /// 保存した秘密情報が、どの読み出し経路からも返らないこと
+    /// (`list` / `values` / `set_values` の応答)。一方でプラグインへ渡す
+    /// `settings_json` バッファには入っていること。
+    #[test]
+    fn secret_values_never_appear_in_read_responses() {
+        let (registry, _tmp) = test_registry_with_secret();
+
+        let mut values = serde_json::Map::new();
+        values.insert("api-key".into(), serde_json::json!("sk-live-123"));
+        let returned = registry
+            .set_values("secret-plugin", &values)
+            .expect("storing a secret should succeed");
+
+        assert!(
+            !returned.contains_key("api-key"),
+            "set_values must not echo the secret back"
+        );
+
+        let fetched = registry.values("secret-plugin").expect("values");
+        assert!(
+            !fetched.contains_key("api-key"),
+            "plugins/get-settings must not return the secret"
+        );
+        // 秘密でない設定は普通に返る。
+        assert_eq!(
+            fetched.get("endpoint"),
+            Some(&serde_json::json!("https://example.test"))
+        );
+
+        let infos = registry.list();
+        assert!(
+            !infos[0].values.contains_key("api-key"),
+            "plugins/list must not return the secret"
+        );
+        assert_eq!(
+            infos[0].secrets_set,
+            vec!["api-key".to_string()],
+            "but it must say the secret is configured"
+        );
+
+        // プラグイン自身は受け取れること -- 渡す相手はこのプラグイン。
+        let guard = registry
+            .entries
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let buffer = guard[0].settings_json.lock().unwrap().clone();
+        assert!(
+            buffer.contains("sk-live-123"),
+            "the guest-facing settings buffer must still carry the secret, got {buffer}"
+        );
+    }
+
+    #[test]
+    fn an_unset_secret_is_not_reported_as_configured() {
+        let (registry, _tmp) = test_registry_with_secret();
+        let infos = registry.list();
+        assert!(infos[0].secrets_set.is_empty());
+        assert!(!infos[0].values.contains_key("api-key"));
     }
 
     #[test]

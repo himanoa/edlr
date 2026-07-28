@@ -40,13 +40,14 @@ label = "有効"
 type = "boolean"
 default = true
 
-# 注意: 設定値は <settings-dir>/inara-uploader.json に平文で保存され、
-# Plugins 画面でもそのまま表示される(マスクされない)。
+# `secret` 型: Plugins 画面ではマスク入力になり、`plugins/list` /
+# `plugins/get-settings` の応答には含まれない(write-only)。
+# 保存先の <settings-dir>/inara-uploader.json 上は依然として平文なので、
+# ファイル自体の保護は OS のパーミッションに委ねている。
 [[settings]]
 key = "apiKey"
 label = "INARA API キー"
-type = "string"
-default = ""
+type = "secret"
 
 # 空ならプラグインが Journal の LoadGame / Commander から学習する。
 [[settings]]

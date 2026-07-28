@@ -4,14 +4,71 @@ import type { PluginInfo, SettingField } from "../types/plugin";
 // `PluginInfo` の一部だけを要求する形にしてある。`DriverInfo`(bus を持たない)
 // のようにフィールドの一部が異なる形でも、この 3 つさえ揃っていれば
 // 同じフォームを再利用できるようにするため。
-export type FormPlugin = Pick<PluginInfo, "id" | "settings" | "values">;
+export type FormPlugin = Pick<PluginInfo, "id" | "settings" | "values"> &
+  Partial<Pick<PluginInfo, "secretsSet">>;
 
 function mergedValues(plugin: FormPlugin): Record<string, unknown> {
   const defaults: Record<string, unknown> = {};
   for (const field of plugin.settings) {
-    defaults[field.key] = field.default;
+    // `secret` は `default` を持たず、値もサーバから返ってこない。
+    defaults[field.key] = field.type === "secret" ? "" : field.default;
   }
   return { ...defaults, ...plugin.values };
+}
+
+/**
+ * 秘密情報の入力欄。
+ *
+ * 他のフィールドと違い、**常に空から始まる**: サーバは保存済みの値を返さない
+ * (write-only)ので、埋めようがないし、埋めるべきでもない。空のまま離れても
+ * 保存はしない -- そうしないと、フォームを開いて何もせず閉じるだけで保存済みの
+ * 秘密情報が消えてしまう。意図的に消したい場合の導線は今のところ無い
+ * (プラグインの設定ファイルを直接消す)。
+ */
+function SecretField({
+  field,
+  isSet,
+  disabled,
+  onCommit,
+}: {
+  field: Extract<SettingField, { type: "secret" }>;
+  isSet: boolean;
+  disabled: boolean;
+  onCommit: (v: unknown) => void;
+}) {
+  const id = `field-${field.key}`;
+  const [draft, setDraft] = useState("");
+
+  const commit = () => {
+    if (draft === "") {
+      // 未入力 = 変更なし。保存済みの値を空で上書きしない。
+      return;
+    }
+    onCommit(draft);
+    setDraft("");
+  };
+
+  return (
+    <label htmlFor={id} className="form-row">
+      <span>{field.label}</span>
+      <input
+        id={id}
+        type="password"
+        value={draft}
+        disabled={disabled}
+        placeholder={isSet ? "設定済み(変更する場合のみ入力)" : "未設定"}
+        autoComplete="off"
+        onChange={(e) => setDraft(e.target.value)}
+        onBlur={commit}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") {
+            e.preventDefault();
+            commit();
+          }
+        }}
+      />
+    </label>
+  );
 }
 
 function DraftField({
@@ -70,11 +127,13 @@ function DraftField({
 function Field({
   field,
   value,
+  isSecretSet,
   disabled,
   onChange,
 }: {
   field: SettingField;
   value: unknown;
+  isSecretSet: boolean;
   disabled: boolean;
   onChange: (v: unknown) => void;
 }) {
@@ -96,6 +155,15 @@ function Field({
     case "string":
     case "number":
       return <DraftField field={field} value={value} disabled={disabled} onCommit={onChange} />;
+    case "secret":
+      return (
+        <SecretField
+          field={field}
+          isSet={isSecretSet}
+          disabled={disabled}
+          onCommit={onChange}
+        />
+      );
     case "select":
       return (
         <label htmlFor={id} className="form-row">
@@ -155,6 +223,7 @@ export default function PluginForm({
           key={field.key}
           field={field}
           value={values[field.key]}
+          isSecretSet={(plugin.secretsSet ?? []).includes(field.key)}
           disabled={savingKey === field.key}
           onChange={(v) => update(field.key, v)}
         />

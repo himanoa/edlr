@@ -24,6 +24,7 @@ function makePlugin(overrides: Partial<PluginInfo> = {}): PluginInfo {
     bus: [],
     dashboard: [],
     schedules: [],
+    secretsSet: [],
     dropped: { events: 0, busDeliveries: 0 },
     ...overrides,
   };
@@ -121,6 +122,58 @@ test("a failed save on a string field surfaces the error and reverts the draft",
 
   expect(await screen.findByText("save failed")).toBeInTheDocument();
   expect(input.value).toBe("http://localhost");
+});
+
+function makeSecretPlugin(secretsSet: string[] = []): PluginInfo {
+  return makePlugin({
+    settings: [{ type: "secret", key: "api-key", label: "API Key" }],
+    values: {},
+    secretsSet,
+  });
+}
+
+test("a secret renders as a masked input that is never prefilled", async () => {
+  // サーバは保存済みの値を返さない(write-only)ので、埋めようがない。
+  render(<PluginForm plugin={makeSecretPlugin(["api-key"])} onChange={vi.fn()} />);
+
+  const input = screen.getByLabelText("API Key") as HTMLInputElement;
+  expect(input.type).toBe("password");
+  expect(input.value).toBe("");
+});
+
+test("a secret's placeholder distinguishes configured from unset", async () => {
+  const configured = render(<PluginForm plugin={makeSecretPlugin(["api-key"])} onChange={vi.fn()} />);
+  expect((configured.getByLabelText("API Key") as HTMLInputElement).placeholder).toMatch(/設定済み/);
+  configured.unmount();
+
+  const unset = render(<PluginForm plugin={makeSecretPlugin([])} onChange={vi.fn()} />);
+  expect((unset.getByLabelText("API Key") as HTMLInputElement).placeholder).toMatch(/未設定/);
+});
+
+test("typing a secret and blurring saves it, then clears the input", async () => {
+  const onChange = vi.fn().mockResolvedValue(undefined);
+  render(<PluginForm plugin={makeSecretPlugin([])} onChange={onChange} />);
+
+  const input = screen.getByLabelText("API Key") as HTMLInputElement;
+  await userEvent.type(input, "sk-live-123");
+  await userEvent.tab();
+
+  expect(onChange).toHaveBeenCalledWith("api-key", "sk-live-123");
+  // 入力欄に秘密情報を残さない。
+  expect(input.value).toBe("");
+});
+
+test("leaving a secret field empty does not overwrite the stored value", async () => {
+  // これが無いと、フォームを開いて何もせず閉じるだけで保存済みの
+  // 秘密情報が空文字列で潰れてしまう。
+  const onChange = vi.fn().mockResolvedValue(undefined);
+  render(<PluginForm plugin={makeSecretPlugin(["api-key"])} onChange={onChange} />);
+
+  const input = screen.getByLabelText("API Key");
+  await userEvent.click(input);
+  await userEvent.tab();
+
+  expect(onChange).not.toHaveBeenCalled();
 });
 
 test("blurring a string field without editing does not call onChange", async () => {

@@ -62,7 +62,7 @@ WIT パッケージは `edlr:plugin@0.4.0`。
 | `description` | | 説明文(省略可) |
 | `entry` | ✓ | `plugins-dir/<id>/` からの相対パスで wasm ファイルを指す |
 | `events` | | 購読するイベント名の配列。`"*"` は全 journal イベント、`"status"` は Status.json 更新にマッチ(省略時は空 = 何も受け取らない) |
-| `[[settings]]` | | 設定項目。`type` は `boolean` / `string` / `number` / `select` のいずれかで、それぞれ `key` / `label` / `default`(select はさらに `options`)を持つ |
+| `[[settings]]` | | 設定項目。`type` は `boolean` / `string` / `number` / `select` / `secret` のいずれかで、それぞれ `key` / `label` / `default`(select はさらに `options`)を持つ。`secret` だけは `default` を取らない(下記) |
 | `[[capabilities]]` | | HTTP 通信の要求([capabilities.md](capabilities.md#capabilitydriver-http)) |
 | `[[sidecar]]` | | サイドカープロセスの要求([capabilities.md](capabilities.md#サイドカープロセスdriver-process)) |
 | `[[filesystem]]` | | ファイルアクセスの要求([capabilities.md](capabilities.md#ファイルアクセスdriver-fs)) |
@@ -71,6 +71,32 @@ WIT パッケージは `edlr:plugin@0.4.0`。
 
 設定値は `<settings-dir>/<id>.json` に保存され、未保存キーは manifest の
 `default` にフォールバックする。
+
+### 秘密情報(`type = "secret"`)
+
+API キーのように UI から読み出せてはいけない設定はこの型で宣言する。
+
+    [[settings]]
+    key = "apiKey"
+    label = "INARA API キー"
+    type = "secret"
+
+`string` との違いは扱いだけで、保存形式は同じ文字列:
+
+- **`default` を書けない**(マニフェストに秘密情報を書ける余地を作らないため)。
+  値は常に空文字列から始まる
+- UI ではマスク入力(`<input type="password">`)になる。保存済みでも入力欄は
+  空のままで、プレースホルダが「設定済み」かどうかだけを示す。空のまま離れても
+  保存はしない(開いて閉じるだけで消えてしまわないように)
+- **`plugins/list` / `plugins/get-settings` / `plugins/set-settings` の応答には
+  値が含まれない**(write-only)。代わりに `plugins/list` が `secretsSet` として
+  「空でない値が保存済みのキー」の一覧を返す
+- プラグイン自身は `host-settings.get-all` で通常どおり値を受け取る
+  (渡す相手はそのプラグインなので、ここで隠したら意味が無い)
+
+**ディスク上は平文である**。`<settings-dir>/<id>.json` の保護は OS の
+パーミッションに委ねており、OS のキーリング等との連携は未対応。この型が守るのは
+「UI や RPC 越しに秘密情報が読み出せてしまう」経路。
 
 ## スケジュール(`[[schedule]]`)
 

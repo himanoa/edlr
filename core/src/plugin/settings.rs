@@ -5,6 +5,42 @@ use std::sync::Mutex;
 
 use crate::plugin::{Manifest, SettingField};
 
+/// RPC 応答用に、秘密情報を取り除いた設定値と「設定済みの秘密情報キー」の
+/// 一覧に分ける。
+///
+/// `SettingField::Secret` は write-only(UI から書けるが読み出せない)なので、
+/// 値そのものは応答に載せない。代わりに「空でない値が保存されているか」だけを
+/// 返し、UI が「設定済み」と「未設定」を区別できるようにする。
+///
+/// この分離は**読み出し系 RPC 専用**であって、プラグインへ渡す
+/// `settings_json`(`host-settings.get-all`)には適用しない -- 秘密情報を
+/// 渡す相手はそのプラグイン自身であるため。
+pub fn split_secrets(
+    manifest: &Manifest,
+    values: serde_json::Map<String, serde_json::Value>,
+) -> (serde_json::Map<String, serde_json::Value>, Vec<String>) {
+    let secret_keys: Vec<&str> = manifest
+        .settings
+        .iter()
+        .filter(|field| field.is_secret())
+        .map(|field| field.key())
+        .collect();
+
+    let mut visible = values;
+    let mut configured = Vec::new();
+    for key in secret_keys {
+        let removed = visible.remove(key);
+        let is_set = removed
+            .as_ref()
+            .and_then(|v| v.as_str())
+            .is_some_and(|s| !s.is_empty());
+        if is_set {
+            configured.push(key.to_string());
+        }
+    }
+    (visible, configured)
+}
+
 /// プラグインごとの設定値を `<settings-dir>/<id>.json` に保存するストア。
 ///
 /// 内部に `Mutex<()>` を持ち、`update`/`effective` は常にこのロックを保持した
@@ -79,7 +115,9 @@ impl SettingsStore {
                     });
                 }
             }
-            SettingField::String { key, .. } => {
+            // 秘密情報も保存形式は文字列。違うのは読み出し側の扱いだけ
+            // (`SettingField::Secret` のドキュメントコメント参照)。
+            SettingField::String { key, .. } | SettingField::Secret { key, .. } => {
                 if !value.is_string() {
                     return Err(SettingsError::TypeMismatch {
                         key: key.clone(),
@@ -250,6 +288,98 @@ mod tests {
             dashboard: vec![],
             schedules: vec![],
         }
+    }
+
+    /// `sample_manifest` に `secret` 型を 1 件足したもの。
+    fn manifest_with_secret() -> Manifest {
+        let mut manifest = sample_manifest();
+        manifest.settings.push(SettingField::Secret {
+            key: "api-key".into(),
+            label: "API Key".into(),
+        });
+        manifest
+    }
+
+    #[test]
+    fn secret_values_are_stored_and_handed_to_the_plugin_like_any_string() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = SettingsStore::new(tmp.path().join("settings"));
+        let manifest = manifest_with_secret();
+
+        let mut values = serde_json::Map::new();
+        values.insert("api-key".into(), serde_json::json!("sk-live-123"));
+        store
+            .update(&manifest, &values)
+            .expect("a secret is stored as a plain string");
+
+        // `effective` は生の値を返す -- プラグインへ渡す経路はここを使う。
+        assert_eq!(
+            store.effective(&manifest).get("api-key"),
+            Some(&serde_json::json!("sk-live-123"))
+        );
+    }
+
+    #[test]
+    fn secret_values_must_be_strings() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = SettingsStore::new(tmp.path().join("settings"));
+        let manifest = manifest_with_secret();
+
+        let mut values = serde_json::Map::new();
+        values.insert("api-key".into(), serde_json::json!(42));
+
+        let err = store
+            .update(&manifest, &values)
+            .expect_err("a non-string secret should be rejected");
+        assert!(matches!(
+            err,
+            SettingsError::TypeMismatch { ref key, expected: "string" } if key == "api-key"
+        ));
+    }
+
+    /// **これがこの機能の要点**: 読み出し系の応答から秘密情報が消えること。
+    #[test]
+    fn split_secrets_removes_the_value_and_reports_it_as_configured() {
+        let manifest = manifest_with_secret();
+        let mut values = serde_json::Map::new();
+        values.insert("enabled".into(), serde_json::json!(true));
+        values.insert("api-key".into(), serde_json::json!("sk-live-123"));
+
+        let (visible, configured) = split_secrets(&manifest, values);
+
+        assert!(
+            !visible.contains_key("api-key"),
+            "a secret must never appear in a read response"
+        );
+        assert_eq!(visible.get("enabled"), Some(&serde_json::json!(true)));
+        assert_eq!(configured, vec!["api-key".to_string()]);
+    }
+
+    #[test]
+    fn split_secrets_reports_an_empty_secret_as_not_configured() {
+        let manifest = manifest_with_secret();
+        let mut values = serde_json::Map::new();
+        values.insert("api-key".into(), serde_json::json!(""));
+
+        let (visible, configured) = split_secrets(&manifest, values);
+
+        assert!(!visible.contains_key("api-key"));
+        assert!(
+            configured.is_empty(),
+            "an empty secret means 'not set yet', not 'configured'"
+        );
+    }
+
+    #[test]
+    fn split_secrets_leaves_manifests_without_secrets_untouched() {
+        let manifest = sample_manifest();
+        let mut values = serde_json::Map::new();
+        values.insert("greeting".into(), serde_json::json!("hi"));
+
+        let (visible, configured) = split_secrets(&manifest, values.clone());
+
+        assert_eq!(visible, values);
+        assert!(configured.is_empty());
     }
 
     #[test]

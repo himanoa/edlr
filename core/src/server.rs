@@ -173,6 +173,9 @@ pub fn handle_rpc_with_drivers(
                     value["schedules"] =
                         schedules_result_json(&info.schedules)["schedules"].clone();
                     value["dropped"] = dropped_result_json(&info.dropped);
+                    // `secret` 型設定の値は `values` に含まれない(write-only)。
+                    // 「設定済みかどうか」だけを UI に伝える。
+                    value["secretsSet"] = serde_json::json!(info.secrets_set);
                     match info.state {
                         crate::plugin::PluginState::Running => {
                             value["state"] = serde_json::json!("running");
