@@ -4,7 +4,7 @@ use edlr_core::driver::start_drivers;
 use edlr_core::plugin::filesystem::FilesystemConfigStore;
 use edlr_core::plugin::host::PluginHost;
 use edlr_core::plugin::sidecar::SidecarConfigStore;
-use edlr_core::plugin::{start_plugins, GrantsStore, SettingsStore};
+use edlr_core::plugin::{start_plugins, GrantsStore, ScheduleStore, SettingsStore};
 use edlr_core::{config, monitor, router::Router, server};
 use std::path::PathBuf;
 use std::time::Duration;
@@ -164,6 +164,10 @@ async fn main() {
             let settings_store = SettingsStore::new(settings_dir.clone());
             let grants_store = GrantsStore::new(grants_dir.clone());
             let sidecar_config_store = SidecarConfigStore::new(settings_dir.clone());
+            // `catch-up = true` を宣言したスケジュールの最終発火時刻を残す先。
+            // 設定値とは別ファイル(`<id>.schedule.json`)なので settings_dir を
+            // 共用してよい。
+            let schedule_store = ScheduleStore::new(settings_dir.clone());
             // edlr 自身の状態ディレクトリを承認先に選ばせない。ここでは
             // 既定値ではなく、CLI(`--settings-dir` など)で上書きされた
             // 実際のパスを渡す — そうしないと、既定と違う場所を使っている
@@ -210,6 +214,7 @@ async fn main() {
                     sidecar_config_store,
                     filesystem_config_store,
                     grants_store,
+                    schedule_store,
                     &router_for_plugins,
                     bus,
                     drivers.clone(),

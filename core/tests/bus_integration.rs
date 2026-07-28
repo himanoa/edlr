@@ -225,6 +225,7 @@ fn start_plugins_for_test(
         SidecarConfigStore::new(tmp.join("settings")),
         FilesystemConfigStore::new(tmp.join("settings"), vec![tmp.to_path_buf()]),
         GrantsStore::new(tmp.join("grants")),
+        ScheduleStore::new(tmp.join("settings")),
         router,
         bus,
         drivers,

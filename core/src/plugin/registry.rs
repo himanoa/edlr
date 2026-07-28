@@ -2134,10 +2134,12 @@ pub(crate) mod tests {
                 ScheduleRequest {
                     name: "flush".into(),
                     spec: ScheduleSpec::IntervalSeconds(60),
+                    catch_up: false,
                 },
                 ScheduleRequest {
                     name: "daily".into(),
                     spec: ScheduleSpec::Cron("0 9 * * *".to_string()),
+                    catch_up: false,
                 },
             ],
         }

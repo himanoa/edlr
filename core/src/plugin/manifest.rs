@@ -208,6 +208,18 @@ impl ScheduleSpec {
 pub struct ScheduleRequest {
     pub name: String,
     pub spec: ScheduleSpec,
+    /// 打ち漏らし(デーモンが動いていなかった間に過ぎた定刻)を、次回起動時に
+    /// 1 回だけ追い掛けて実行するか。既定は `false`。
+    ///
+    /// **`cron` にのみ指定できる**。`interval-seconds` は「前回から N 秒後」と
+    /// いう経過時間の宣言であって「何時に実行する」ではないため、追い掛ける
+    /// べき定刻が存在しない(デーモンが止まっていた間の経過時間を後から
+    /// 埋め合わせる意味も無い)。
+    ///
+    /// flush 系のスケジュールには不要だが、`cron = "0 9 * * *"` の日次レポート
+    /// のような用途では、09:00 にデーモンが動いていなかった日が痕跡も無く
+    /// スキップされるのは不適切なので、これを opt-in する。
+    pub catch_up: bool,
 }
 
 /// `[[schedule]]` の生の serde 表現。`interval-seconds` と `cron` は排他
@@ -222,6 +234,8 @@ struct RawSchedule {
     #[serde(rename = "interval-seconds")]
     interval_seconds: Option<u64>,
     cron: Option<String>,
+    #[serde(rename = "catch-up", default)]
+    catch_up: bool,
 }
 
 impl<'de> serde::Deserialize<'de> for ScheduleRequest {
@@ -254,6 +268,16 @@ impl<'de> serde::Deserialize<'de> for ScheduleRequest {
                         raw.name
                     )));
                 }
+                if raw.catch_up {
+                    // interval には追い掛けるべき「定刻」が無い
+                    // (`ScheduleRequest::catch_up` のドキュメント参照)。
+                    // 黙って無視すると、書いた人は効いていると思い込むので拒否する。
+                    return Err(D::Error::custom(format!(
+                        "schedule {} cannot use catch-up with interval-seconds \
+                         (catch-up only makes sense for cron, which has scheduled instants)",
+                        raw.name
+                    )));
+                }
                 ScheduleSpec::IntervalSeconds(interval)
             }
             (None, Some(cron_expr)) => {
@@ -271,6 +295,7 @@ impl<'de> serde::Deserialize<'de> for ScheduleRequest {
         Ok(ScheduleRequest {
             name: raw.name,
             spec,
+            catch_up: raw.catch_up,
         })
     }
 }
@@ -1123,6 +1148,70 @@ entry = "plugin.wasm"
 
         let err = load_manifest(&plugin_dir).expect_err("missing entry should be rejected");
         assert!(matches!(err, ManifestError::MissingEntry));
+    }
+
+    #[test]
+    fn catch_up_is_parsed_for_cron_and_defaults_to_false() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin_dir = tmp.path().join("catch-up-plugin");
+        fs::create_dir_all(&plugin_dir).unwrap();
+        write_entry(&plugin_dir, "plugin.wasm");
+        write_manifest(
+            &plugin_dir,
+            r#"
+id = "catch-up-plugin"
+name = "Catch Up"
+version = "0.1.0"
+entry = "plugin.wasm"
+
+[[schedule]]
+name = "daily"
+cron = "0 9 * * *"
+catch-up = true
+
+[[schedule]]
+name = "hourly"
+cron = "0 * * * *"
+"#,
+        );
+
+        let manifest = load_manifest(&plugin_dir).expect("catch-up should parse");
+        assert!(manifest.schedules[0].catch_up);
+        assert!(
+            !manifest.schedules[1].catch_up,
+            "catch-up must default to false"
+        );
+    }
+
+    /// interval には追い掛けるべき「定刻」が無い。黙って無視すると書いた人が
+    /// 効いていると思い込むので、マニフェストごと拒否する。
+    #[test]
+    fn catch_up_with_interval_seconds_is_rejected() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin_dir = tmp.path().join("bad-catch-up");
+        fs::create_dir_all(&plugin_dir).unwrap();
+        write_entry(&plugin_dir, "plugin.wasm");
+        write_manifest(
+            &plugin_dir,
+            r#"
+id = "bad-catch-up"
+name = "Bad Catch Up"
+version = "0.1.0"
+entry = "plugin.wasm"
+
+[[schedule]]
+name = "flush"
+interval-seconds = 60
+catch-up = true
+"#,
+        );
+
+        let err = load_manifest(&plugin_dir)
+            .expect_err("catch-up with interval-seconds should be rejected");
+        assert!(
+            err.to_string().contains("catch-up"),
+            "the error should name catch-up, got: {err}"
+        );
     }
 
     /// `secret` は `default` を取らない(マニフェストに秘密情報を書ける

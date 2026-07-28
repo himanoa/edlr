@@ -21,6 +21,7 @@
 //! `plugins/list` に載せる `next`(ISO8601 の壁時計時刻)は、`Clock` を
 //! 基準に単調時刻を壁時計へ変換して組み立てる。
 
+use std::collections::BTreeMap;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -165,6 +166,9 @@ struct Entry {
     name: String,
     fire: Fire,
     next: NextFire,
+    /// `catch-up = true` が宣言されているか。発火するたびに最終発火時刻を
+    /// 永続化する必要があるかの判定に使う(`ScheduleState::is_catch_up`)。
+    catch_up: bool,
 }
 
 /// 1 プラグインの全スケジュールの発火状態。
@@ -178,12 +182,69 @@ pub(crate) struct ScheduleState {
 impl ScheduleState {
     /// manifest から構築する。下限未満の interval は 5 秒へ丸めて
     /// warn ログを出した状態にする。
+    ///
+    /// 打ち漏らしの追い掛け実行は行わない(`new_with_catch_up` を使うこと)。
     pub fn new(schedules: &[ScheduleRequest], clock: Clock) -> Self {
+        Self::new_with_catch_up(schedules, clock, &BTreeMap::new())
+    }
+
+    /// `new` に加えて、`catch-up = true` なスケジュールの**打ち漏らし**
+    /// (デーモンが動いていなかった間に過ぎた定刻)を判定する。
+    ///
+    /// `last_fires` は永続化された最終発火時刻(`ScheduleStore`)。ある
+    /// `catch-up` スケジュールについて、**いま以前の直近の定刻**が記録済みの
+    /// 最終発火より後なら、打ち漏らしがあったとみなして直ちに 1 回発火させる
+    /// (`next` を現在時刻に置く)。何回打ち漏らしていても 1 回に集約する
+    /// -- 起動時に日次レポートが何通も飛ぶのは誰も望まない。
+    ///
+    /// 記録が無い場合(初回起動、ファイル破損)は追い掛けない。「起動しただけで
+    /// 過去の定刻が 1 回走る」より「1 回取りこぼす」方が害が小さいため。
+    pub fn new_with_catch_up(
+        schedules: &[ScheduleRequest],
+        clock: Clock,
+        last_fires: &BTreeMap<String, DateTime<Local>>,
+    ) -> Self {
         let entries = schedules
             .iter()
-            .map(|req| Self::build_entry(req, clock))
+            .map(|req| {
+                let mut entry = Self::build_entry(req, clock);
+                if req.catch_up {
+                    if let Some(last) = last_fires.get(&req.name) {
+                        Self::apply_catch_up(&mut entry, req, *last, clock);
+                    }
+                }
+                entry
+            })
             .collect();
         ScheduleState { entries }
+    }
+
+    /// 打ち漏らしがあれば `next` を「いま」に倒す(= 次の評価で直ちに発火)。
+    fn apply_catch_up(
+        entry: &mut Entry,
+        req: &ScheduleRequest,
+        last_fire: DateTime<Local>,
+        clock: Clock,
+    ) {
+        let Fire::Cron { schedule, .. } = &entry.fire else {
+            // `catch-up` は cron 専用(manifest のパース時点で拒否済み)。
+            return;
+        };
+        // 記録済みの最終発火の直後から数えて、いま以前に過ぎた定刻があるか。
+        let missed = schedule
+            .after(&last_fire)
+            .take_while(|instant| *instant <= clock.wall)
+            .count();
+        if missed == 0 {
+            return;
+        }
+        tracing::info!(
+            schedule = %req.name,
+            missed,
+            last_fire = %last_fire.to_rfc3339(),
+            "catching up a schedule missed while the daemon was down (coalesced to one fire)"
+        );
+        entry.next = NextFire::Wall(clock.wall);
     }
 
     fn build_entry(req: &ScheduleRequest, clock: Clock) -> Entry {
@@ -204,6 +265,7 @@ impl ScheduleState {
                     name: req.name.clone(),
                     next: NextFire::Mono(clock.mono + effective),
                     fire: Fire::Interval(effective),
+                    catch_up: req.catch_up,
                 }
             }
             ScheduleSpec::Cron(expr) => {
@@ -232,6 +294,7 @@ impl ScheduleState {
                         clamp_warned,
                     },
                     next: NextFire::Wall(next),
+                    catch_up: req.catch_up,
                 }
             }
         }
@@ -283,6 +346,15 @@ impl ScheduleState {
             .iter()
             .map(|e| (e.name.as_str(), e.next.wall(&clock)))
             .collect()
+    }
+
+    /// `name` のスケジュールが `catch-up = true` を宣言しているか。
+    /// ランナーは発火のたびにこれを見て、最終発火時刻を永続化するか決める
+    /// (`catch-up` でないスケジュールのためにディスクへ書く理由は無い)。
+    pub(crate) fn is_catch_up(&self, name: &str) -> bool {
+        self.entries
+            .iter()
+            .any(|entry| entry.name == name && entry.catch_up)
     }
 
     /// 次の発火までの残り時間(スケジュールが無ければ None)。
@@ -344,6 +416,15 @@ mod tests {
         ScheduleRequest {
             name: name.to_string(),
             spec,
+            catch_up: false,
+        }
+    }
+
+    fn catch_up_req(name: &str, cron: &str) -> ScheduleRequest {
+        ScheduleRequest {
+            name: name.to_string(),
+            spec: ScheduleSpec::Cron(cron.to_string()),
+            catch_up: true,
         }
     }
 
@@ -469,6 +550,116 @@ mod tests {
         // 単調時計は 1 秒しか進んでいないが、壁時計は 09:00 を回った。
         let stepped = c.skewed(secs(1), secs(60));
         assert_eq!(s.take_due(stepped), Some("daily".into()));
+    }
+
+    /// デーモンが止まっていた間に過ぎた定刻を、起動直後に 1 回だけ
+    /// 追い掛けること。
+    #[test]
+    fn a_catch_up_schedule_fires_immediately_for_a_missed_instant() {
+        // いまは 7/28 の 12:00。日次 09:00 の最終発火は 7/27。
+        // つまり 7/28 09:00 を打ち漏らしている。
+        let c = FakeClock::new(Local.with_ymd_and_hms(2026, 7, 28, 12, 0, 0).unwrap());
+        let last_fires = BTreeMap::from([(
+            "daily".to_string(),
+            Local.with_ymd_and_hms(2026, 7, 27, 9, 0, 0).unwrap(),
+        )]);
+
+        let mut s = ScheduleState::new_with_catch_up(
+            &[catch_up_req("daily", "0 9 * * *")],
+            c.at(secs(0)),
+            &last_fires,
+        );
+
+        assert_eq!(s.take_due(c.at(secs(0))), Some("daily".into()));
+        // 打ち漏らしが何日ぶんあっても 1 回に集約する。
+        assert_eq!(s.take_due(c.at(secs(0))), None);
+    }
+
+    /// 何日ぶん打ち漏らしていても発火は 1 回。
+    #[test]
+    fn many_missed_instants_are_coalesced_into_one_catch_up_fire() {
+        let c = FakeClock::new(Local.with_ymd_and_hms(2026, 7, 28, 12, 0, 0).unwrap());
+        let last_fires = BTreeMap::from([(
+            "daily".to_string(),
+            // 3 ヶ月前 = 90 回以上の打ち漏らし。
+            Local.with_ymd_and_hms(2026, 4, 20, 9, 0, 0).unwrap(),
+        )]);
+
+        let mut s = ScheduleState::new_with_catch_up(
+            &[catch_up_req("daily", "0 9 * * *")],
+            c.at(secs(0)),
+            &last_fires,
+        );
+
+        assert_eq!(s.take_due(c.at(secs(0))), Some("daily".into()));
+        assert_eq!(s.take_due(c.at(secs(0))), None);
+    }
+
+    /// 打ち漏らしが無ければ追い掛けない(今日ぶんは既に発火済み)。
+    #[test]
+    fn a_catch_up_schedule_does_not_fire_when_nothing_was_missed() {
+        let c = FakeClock::new(Local.with_ymd_and_hms(2026, 7, 28, 12, 0, 0).unwrap());
+        let last_fires = BTreeMap::from([(
+            "daily".to_string(),
+            Local.with_ymd_and_hms(2026, 7, 28, 9, 0, 0).unwrap(),
+        )]);
+
+        let mut s = ScheduleState::new_with_catch_up(
+            &[catch_up_req("daily", "0 9 * * *")],
+            c.at(secs(0)),
+            &last_fires,
+        );
+
+        assert_eq!(s.take_due(c.at(secs(0))), None);
+    }
+
+    /// 記録が無い(初回起動・ファイル破損)場合は追い掛けない。「起動しただけで
+    /// 過去の定刻が走る」より「1 回取りこぼす」方が害が小さい。
+    #[test]
+    fn a_catch_up_schedule_does_not_fire_without_a_recorded_last_fire() {
+        let c = FakeClock::new(Local.with_ymd_and_hms(2026, 7, 28, 12, 0, 0).unwrap());
+
+        let mut s = ScheduleState::new_with_catch_up(
+            &[catch_up_req("daily", "0 9 * * *")],
+            c.at(secs(0)),
+            &BTreeMap::new(),
+        );
+
+        assert_eq!(s.take_due(c.at(secs(0))), None);
+    }
+
+    /// `catch-up` を宣言していないスケジュールは、記録があっても追い掛けない。
+    #[test]
+    fn a_schedule_without_catch_up_ignores_recorded_last_fires() {
+        let c = FakeClock::new(Local.with_ymd_and_hms(2026, 7, 28, 12, 0, 0).unwrap());
+        let last_fires = BTreeMap::from([(
+            "daily".to_string(),
+            Local.with_ymd_and_hms(2026, 7, 27, 9, 0, 0).unwrap(),
+        )]);
+
+        let mut s = ScheduleState::new_with_catch_up(
+            &[req("daily", ScheduleSpec::Cron("0 9 * * *".to_string()))],
+            c.at(secs(0)),
+            &last_fires,
+        );
+
+        assert_eq!(s.take_due(c.at(secs(0))), None);
+    }
+
+    #[test]
+    fn is_catch_up_reports_only_the_declared_schedules() {
+        let c = FakeClock::new(Local.with_ymd_and_hms(2026, 7, 28, 12, 0, 0).unwrap());
+        let s = ScheduleState::new(
+            &[
+                catch_up_req("daily", "0 9 * * *"),
+                req("flush", ScheduleSpec::IntervalSeconds(60)),
+            ],
+            c.at(secs(0)),
+        );
+
+        assert!(s.is_catch_up("daily"));
+        assert!(!s.is_catch_up("flush"));
+        assert!(!s.is_catch_up("nonexistent"));
     }
 
     #[test]

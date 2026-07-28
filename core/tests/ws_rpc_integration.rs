@@ -3,6 +3,7 @@ use edlr_core::plugin::filesystem::FilesystemConfigStore;
 use edlr_core::plugin::grants::GrantsStore;
 use edlr_core::plugin::host::PluginHost;
 use edlr_core::plugin::runner::start_plugins;
+use edlr_core::plugin::schedule_store::ScheduleStore;
 use edlr_core::plugin::settings::SettingsStore;
 use edlr_core::plugin::sidecar::SidecarConfigStore;
 use edlr_core::plugin::Registry;
@@ -85,6 +86,7 @@ fn hello_logger_registry() -> (tempfile::TempDir, Registry) {
         sidecar_config_store,
         filesystem_config_store,
         grants_store,
+        ScheduleStore::new(tmp.path().join("settings")),
         &router,
         edlr_driver_channel::Bus::new(),
         support::empty_driver_registry(tmp.path()),
@@ -155,6 +157,7 @@ fn http_caller_registry() -> (tempfile::TempDir, Registry) {
         sidecar_config_store,
         filesystem_config_store,
         grants_store,
+        ScheduleStore::new(tmp.path().join("settings")),
         &router,
         edlr_driver_channel::Bus::new(),
         support::empty_driver_registry(tmp.path()),

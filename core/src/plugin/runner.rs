@@ -126,6 +126,7 @@ use crate::plugin::host::{
 use crate::plugin::manifest::{load_manifest, matches_event};
 use crate::plugin::registry::{PluginEntry, PluginState, Registry};
 use crate::plugin::schedule::{Clock, ScheduleState, ScheduleView};
+use crate::plugin::schedule_store::ScheduleStore;
 use crate::plugin::settings::SettingsStore;
 use crate::plugin::sidecar::{assign_ports, SidecarConfig, SidecarConfigStore};
 use crate::plugin::sidecar_runtime::{
@@ -186,6 +187,7 @@ pub fn start_plugins(
     sidecar_config_store: SidecarConfigStore,
     filesystem_config_store: FilesystemConfigStore,
     grants_store: GrantsStore,
+    schedule_store: ScheduleStore,
     router: &Router,
     bus: Bus,
     drivers: DriverRegistry,
@@ -193,6 +195,7 @@ pub fn start_plugins(
 ) -> Registry {
     let host = Arc::new(host);
     let settings_store = Arc::new(settings_store);
+    let schedule_store = Arc::new(schedule_store);
     let grants_store = Arc::new(grants_store);
     let sidecar_config_store = Arc::new(sidecar_config_store);
     let filesystem_config_store = Arc::new(filesystem_config_store);
@@ -246,6 +249,7 @@ pub fn start_plugins(
             &grants_store,
             &sidecar_config_store,
             &filesystem_config_store,
+            &schedule_store,
             router,
             &bus,
             &host,
@@ -266,6 +270,7 @@ fn load_and_run_plugin(
     grants_store: &GrantsStore,
     sidecar_config_store: &SidecarConfigStore,
     filesystem_config_store: &FilesystemConfigStore,
+    schedule_store: &Arc<ScheduleStore>,
     router: &Router,
     bus: &Bus,
     host: &Arc<PluginHost>,
@@ -386,6 +391,7 @@ fn load_and_run_plugin(
         let bus = bus.clone();
         let registry = registry.clone();
         let stop_flag = stop_flag.clone();
+        let schedule_store = schedule_store.clone();
         move || {
             run_plugin_thread(
                 host,
@@ -401,6 +407,7 @@ fn load_and_run_plugin(
                 work_rx,
                 ready_tx,
                 stop_flag,
+                schedule_store,
             );
         }
     });
@@ -501,6 +508,7 @@ fn run_plugin_thread(
     work_rx: std_mpsc::Receiver<PluginWork>,
     ready_tx: std_mpsc::Sender<PluginState>,
     stop_flag: Arc<AtomicBool>,
+    schedule_store: Arc<ScheduleStore>,
 ) {
     // trap 時にこのプラグインの購読を `Bus` の購読表から取り除くために手元に
     // 残しておく(`ctx` へ渡す方は `HostCtx::new` に move する)。
@@ -552,7 +560,13 @@ fn run_plugin_thread(
     // 引数でしか受け取らない(`schedule` モジュールのドキュメントコメント
     // 参照、テストで時刻を固定するため)。interval は `Clock` の単調時計、
     // cron は壁時計で評価される。
-    let mut schedule_state = ScheduleState::new(&manifest.schedules, Clock::now());
+    // `catch-up = true` を宣言したスケジュールについては、デーモンが動いて
+    // いなかった間に過ぎた定刻を 1 回だけ追い掛ける(`new_with_catch_up`)。
+    let mut schedule_state = ScheduleState::new_with_catch_up(
+        &manifest.schedules,
+        Clock::now(),
+        &schedule_store.last_fires(&manifest.id),
+    );
 
     // このスレッドが実際に予定している発火時刻を `plugins/list` から読める
     // ようにする。`ScheduleState` 自体はここから出さない(`take_due` が状態を
@@ -715,11 +729,22 @@ fn run_plugin_thread(
                     ),
                 };
                 handle_call_result!(result);
-                handle_call_result!(fire_all_due(&mut schedule_state, &mut instance));
+                handle_call_result!(fire_all_due(
+                    &mut schedule_state,
+                    &mut instance,
+                    &manifest.id,
+                    &schedule_store,
+                ));
             }
             LoopAction::Fire(name) => {
                 handle_call_result!(instance.call_on_schedule(&name));
-                handle_call_result!(fire_all_due(&mut schedule_state, &mut instance));
+                record_fire(&schedule_state, &manifest.id, &name, &schedule_store);
+                handle_call_result!(fire_all_due(
+                    &mut schedule_state,
+                    &mut instance,
+                    &manifest.id,
+                    &schedule_store,
+                ));
             }
             LoopAction::Idle => {}
             LoopAction::Exit => break,
@@ -741,12 +766,31 @@ fn run_plugin_thread(
 fn fire_all_due(
     state: &mut ScheduleState,
     instance: &mut PluginInstance,
+    plugin_id: &str,
+    schedule_store: &ScheduleStore,
 ) -> Result<(), PluginCallError> {
     loop {
         let Some(name) = state.take_due(Clock::now()) else {
             return Ok(());
         };
         instance.call_on_schedule(&name)?;
+        record_fire(state, plugin_id, &name, schedule_store);
+    }
+}
+
+/// 発火した時刻を永続化する。`catch-up` を宣言したスケジュールだけが対象
+/// (他のスケジュールのために毎分ディスクへ書く理由は無い)。
+///
+/// **wasm 呼び出しが成功した後に呼ぶこと**: 失敗した発火を「実行済み」として
+/// 記録すると、次回起動時にその打ち漏らしを追い掛けられなくなる。
+fn record_fire(
+    state: &ScheduleState,
+    plugin_id: &str,
+    name: &str,
+    schedule_store: &ScheduleStore,
+) {
+    if state.is_catch_up(name) {
+        schedule_store.record_fire(plugin_id, name, chrono::Local::now());
     }
 }
 

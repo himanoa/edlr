@@ -9,6 +9,7 @@ pub mod manifest;
 pub mod registry;
 pub mod runner;
 pub(crate) mod schedule;
+pub mod schedule_store;
 pub mod settings;
 pub mod sidecar;
 pub mod sidecar_runtime;
@@ -28,6 +29,7 @@ pub use registry::{
     SidecarAction, SidecarInfo,
 };
 pub use runner::start_plugins;
+pub use schedule_store::ScheduleStore;
 pub use settings::{SettingsError, SettingsStore};
 pub use sidecar::{assign_ports, SidecarConfig, SidecarConfigError, SidecarConfigStore};
 pub use sidecar_runtime::{

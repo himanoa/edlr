@@ -6,6 +6,7 @@ use edlr_core::plugin::grants::GrantsStore;
 use edlr_core::plugin::host::PluginHost;
 use edlr_core::plugin::registry::PluginState;
 use edlr_core::plugin::runner::start_plugins;
+use edlr_core::plugin::schedule_store::ScheduleStore;
 use edlr_core::plugin::settings::SettingsStore;
 use edlr_core::plugin::sidecar::SidecarConfigStore;
 use edlr_core::router::Router;
@@ -143,6 +144,7 @@ async fn hello_logger_stays_running_and_busy_loop_gets_disabled_after_publish() 
         sidecar_config_store,
         filesystem_config_store,
         grants_store,
+        ScheduleStore::new(tmp.path().join("settings")),
         &router,
         edlr_driver_channel::Bus::new(),
         empty_driver_registry(tmp.path()),
@@ -254,6 +256,7 @@ async fn broken_manifest_directory_is_skipped_but_others_still_load() {
         sidecar_config_store,
         filesystem_config_store,
         grants_store,
+        ScheduleStore::new(tmp.path().join("settings")),
         &router,
         edlr_driver_channel::Bus::new(),
         empty_driver_registry(tmp.path()),
@@ -289,6 +292,7 @@ async fn nonexistent_plugins_dir_yields_empty_registry() {
         sidecar_config_store,
         filesystem_config_store,
         grants_store,
+        ScheduleStore::new(tmp.path().join("settings")),
         &router,
         edlr_driver_channel::Bus::new(),
         empty_driver_registry(tmp.path()),
@@ -325,6 +329,7 @@ async fn init_failure_registers_disabled_and_starts_no_event_task() {
         sidecar_config_store,
         filesystem_config_store,
         grants_store,
+        ScheduleStore::new(tmp.path().join("settings")),
         &router,
         edlr_driver_channel::Bus::new(),
         empty_driver_registry(tmp.path()),
@@ -405,6 +410,7 @@ async fn list_returns_plugin_info_with_effective_values_matching_manifest_defaul
         sidecar_config_store,
         filesystem_config_store,
         grants_store,
+        ScheduleStore::new(tmp.path().join("settings")),
         &router,
         edlr_driver_channel::Bus::new(),
         empty_driver_registry(tmp.path()),
@@ -454,6 +460,7 @@ async fn set_values_persists_validates_and_updates_shared_settings_json() {
         sidecar_config_store,
         filesystem_config_store,
         grants_store,
+        ScheduleStore::new(tmp.path().join("settings")),
         &router,
         edlr_driver_channel::Bus::new(),
         empty_driver_registry(tmp.path()),
@@ -516,6 +523,7 @@ async fn set_values_with_unknown_key_returns_err_and_leaves_values_unchanged() {
         sidecar_config_store,
         filesystem_config_store,
         grants_store,
+        ScheduleStore::new(tmp.path().join("settings")),
         &router,
         edlr_driver_channel::Bus::new(),
         empty_driver_registry(tmp.path()),
