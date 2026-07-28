@@ -4,6 +4,7 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 
 use edlr_driver_process::{InstanceStatus, ProcessDriver, ProcessSpec};
@@ -268,6 +269,11 @@ pub struct Registry {
     /// ドキュメント参照)。
     driver_registry: DriverRegistry,
     plugins_dir: PathBuf,
+    /// `crate::plugin::runner::spawn_bus_subscriber` の各インスタンスが共有
+    /// する shutdown フラグ。`shutdown_bus_subscribers` が立て、各購読タスクは
+    /// `BUS_SUBSCRIBER_SHUTDOWN_POLL_INTERVAL` ごとにこれを見に行く。詳しい
+    /// 経緯は `shutdown_bus_subscribers` のドキュメントコメント参照。
+    bus_subscriber_shutdown: Arc<AtomicBool>,
 }
 
 impl Registry {
@@ -296,7 +302,15 @@ impl Registry {
             bus_runtime_locks: Arc::new(Mutex::new(HashMap::new())),
             driver_registry,
             plugins_dir,
+            bus_subscriber_shutdown: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// `crate::plugin::runner::spawn_bus_subscriber` が共有する shutdown
+    /// フラグの `Arc` を返す。`runner.rs` がプラグインごとの購読タスクを
+    /// 起動する際にこれを渡す(crate 内部専用: `pub(crate)`)。
+    pub(crate) fn bus_subscriber_shutdown_flag(&self) -> Arc<AtomicBool> {
+        self.bus_subscriber_shutdown.clone()
     }
 
     pub(crate) fn push(&self, entry: PluginEntry) {
@@ -1309,6 +1323,30 @@ impl Registry {
     /// 観測することはない)。
     pub fn stop_all_sidecars(&self) {
         self.process_driver.stop_all();
+    }
+
+    /// 全プラグインの `spawn_bus_subscriber` タスクへ shutdown を通知する
+    /// (デーモン shutdown 用)。
+    ///
+    /// **これを `main()` が戻る(= `Runtime::drop` される)前に呼ばないと
+    /// デーモンは正常終了できない。** `[[bus]] subscribe` を宣言するプラグ
+    /// インが 1 つでもあれば、その `spawn_bus_subscriber` タスクは
+    /// `tokio::task::spawn_blocking` の中でブロッキング受信をしており、送信側
+    /// (`Bus::subscribe` に渡した `Sender<Delivery>`)はそのプラグインの購読
+    /// エントリとして `Bus` の購読表に居座り続けるため、明示的に知らせない
+    /// 限り自然には終了しない。`Runtime::drop` は実行中の `spawn_blocking`
+    /// タスクの完了を待つため、これを呼ばずに `main` を抜けようとすると
+    /// **プロセスが `Runtime::drop` の中で無期限にハングする**(実際に踏んだ
+    /// Critical バグ。詳細は `crate::plugin::runner::
+    /// BUS_SUBSCRIBER_SHUTDOWN_POLL_INTERVAL` のドキュメントコメント参照)。
+    ///
+    /// `stop_all_sidecars` と同じくデーモンの shutdown シーケンスの一部として
+    /// 呼ぶことを想定している(`core/src/bin/edlr.rs` を参照)。フラグを立てる
+    /// だけの軽い呼び出しなので、`stop_all_sidecars` のように `spawn_blocking`
+    /// へ逃がす必要はない。
+    pub fn shutdown_bus_subscribers(&self) {
+        self.bus_subscriber_shutdown
+            .store(true, std::sync::atomic::Ordering::Release);
     }
 
     /// `id` のプラグインが持つ settings JSON の共有ハンドルを返す。

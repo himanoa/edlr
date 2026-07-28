@@ -207,7 +207,14 @@ impl Bus {
             slot.retained.insert(topic.to_string(), payload.clone());
         }
 
-        for subscription in &state.subscriptions {
+        // 切断済み(受信側が既に消えた)購読を検出したらここで刈り取る。
+        // `unsubscribe_plugin` の呼び忘れ・呼べない経路(プラグインが
+        // `set_disabled` を経由せず単に応答しなくなった場合など)があっても、
+        // 次にこの driver/topic へ `emit` されたタイミングで自己修復する
+        // (`unsubscribe_plugin` のドキュメントコメント参照: 主経路はそちらで、
+        // これは保険)。
+        let mut stale_indices = Vec::new();
+        for (index, subscription) in state.subscriptions.iter().enumerate() {
             if subscription.driver_id != driver_id || subscription.topic != topic {
                 continue;
             }
@@ -217,13 +224,56 @@ impl Bus {
                 topic: topic.to_string(),
                 payload: payload.clone(),
             };
-            // 遅いプラグイン 1 個がドライバ全体を止めないよう、満杯なら
-            // 捨てる(publish 方向と非対称。設計書参照)。
-            if let Err(TrySendError::Full(_)) = subscription.sender.try_send(delivery) {
-                // 呼び出し側(core)が warn ログを出せるよう、ここでは黙って捨てる。
+            match subscription.sender.try_send(delivery) {
+                Ok(()) => {}
+                Err(TrySendError::Full(_)) => {
+                    // 遅いプラグイン 1 個がドライバ全体を止めないよう、満杯
+                    // なら捨てる(publish 方向と非対称。設計書参照)。
+                    // 呼び出し側(core)が warn ログを出せるよう、ここでは
+                    // 黙って捨てる。
+                }
+                Err(TrySendError::Disconnected(_)) => {
+                    stale_indices.push(index);
+                }
             }
         }
+        if !stale_indices.is_empty() {
+            let stale_indices: std::collections::HashSet<usize> =
+                stale_indices.into_iter().collect();
+            let mut index = 0usize;
+            state.subscriptions.retain(|_| {
+                let keep = !stale_indices.contains(&index);
+                index += 1;
+                keep
+            });
+        }
         Ok(())
+    }
+
+    /// `plugin_id` の全購読を購読表から取り除く。プラグインが無効化される
+    /// (`crate::plugin::runner` の `run_plugin_thread` が trap を検出して
+    /// `Registry::set_disabled` を呼ぶ)などして「消える」タイミングで
+    /// 呼ぶことを想定した主経路。
+    ///
+    /// **なぜ必要か**: 購読の送信側(`Sender<Delivery>`、
+    /// `crate::plugin::runner::spawn_bus_subscriber` が保持する受信側と対)は
+    /// `subscribe` を呼んだ時点でこの `Bus` の購読表に永久にクローンされて
+    /// 残る。プラグイン側の受信タスクが自発的に終了しても、送信側の
+    /// `Sender` はこの購読表からは見えない別の場所(プラグイン専用スレッドの
+    /// ローカル変数)にあり、この `Bus` からはそれが消えたことを知りようが
+    /// ない。呼び出しを怠ると、無効化されたプラグインの購読エントリが
+    /// プロセスの生存期間中ずっと購読表に残り続け、`emit` のたびに無駄な
+    /// `try_send` を試みることになる(実害は限定的だが、蓄積すれば `emit`
+    /// の 1 回あたりコストが線形に増える)。
+    ///
+    /// `emit` 自身も `TrySendError::Disconnected` を見つけた購読を刈り取る
+    /// (上のコメント参照)が、それはその driver/topic へ次に `emit` される
+    /// までの間は効かない保険であり、こちらが主経路。
+    pub fn unsubscribe_plugin(&self, plugin_id: &str) {
+        let mut state = self.state.lock().expect("bus state poisoned");
+        state
+            .subscriptions
+            .retain(|subscription| subscription.plugin_id != plugin_id);
     }
 
     pub fn disable_driver(&self, driver_id: &str) {
@@ -339,6 +389,68 @@ mod tests {
         // 受信側には 1 通しか残っていない(古い方が残るか新しい方かは問わない)。
         assert!(drx.try_recv().is_ok());
         assert!(drx.try_recv().is_err());
+    }
+
+    #[test]
+    fn emit_prunes_a_disconnected_subscription_from_the_table() {
+        let (bus, _rx) = bus_with_driver(4);
+        {
+            // 受信側を drop してすぐ切断させる。
+            let (tx, _drx) = sync_channel::<Delivery>(4);
+            bus.subscribe("gone", "ed-state", "current-system", tx);
+        }
+        let (tx, drx) = sync_channel::<Delivery>(4);
+        bus.subscribe("alive", "ed-state", "current-system", tx);
+
+        // 切断済みの購読が混ざっていても emit 自体は失敗しない。
+        bus.emit("ed-state", "current-system", b"Sol".to_vec())
+            .unwrap();
+        assert_eq!(
+            drx.try_recv().map(|d| d.plugin_id),
+            Ok("alive".to_string()),
+            "the still-connected subscriber must still receive the delivery"
+        );
+
+        // 内部状態を直接検査する術は無いので、2 回目の emit がまだ落ちない
+        // ことと、生きている購読への配信が壊れていないことで間接的に確認する
+        // (`unsubscribe_plugin_removes_only_the_matching_plugins_subscriptions`
+        // が購読表からの実際の削除を直接検証する)。
+        bus.emit("ed-state", "current-system", b"Jameson".to_vec())
+            .unwrap();
+        assert_eq!(
+            drx.try_recv().map(|d| d.payload),
+            Ok(b"Jameson".to_vec())
+        );
+    }
+
+    #[test]
+    fn unsubscribe_plugin_removes_only_the_matching_plugins_subscriptions() {
+        let (bus, _rx) = bus_with_driver(4);
+        let (tx_a, drx_a) = sync_channel::<Delivery>(4);
+        let (tx_b, drx_b) = sync_channel::<Delivery>(4);
+        bus.subscribe("plugin-a", "ed-state", "current-system", tx_a);
+        bus.subscribe("plugin-b", "ed-state", "current-system", tx_b);
+
+        bus.unsubscribe_plugin("plugin-a");
+
+        bus.emit("ed-state", "current-system", b"Sol".to_vec())
+            .unwrap();
+        assert!(
+            drx_a.try_recv().is_err(),
+            "plugin-a was unsubscribed and must not receive further deliveries"
+        );
+        assert_eq!(
+            drx_b.try_recv().map(|d| d.plugin_id),
+            Ok("plugin-b".to_string()),
+            "plugin-b's subscription must be unaffected"
+        );
+    }
+
+    #[test]
+    fn unsubscribe_plugin_with_no_matching_subscriptions_is_a_no_op() {
+        let (bus, _rx) = bus_with_driver(4);
+        // 何も購読していない状態で呼んでもパニックしない。
+        bus.unsubscribe_plugin("nobody");
     }
 
     #[test]

@@ -6,41 +6,42 @@
 //! 無い環境でも `cargo test` を壊さないため)。
 //!
 //! `start_plugins` が内部で `tokio::spawn`(イベント購読タスク)を使うため、
-//! tokio ランタイムの中で走らせる必要がある。**ただし `#[tokio::test]` は
-//! 使わない**: このファイルのプラグイン(`state-reader`)は `[[bus]]` の
-//! `subscribe` を宣言しており、`start_plugins` はその購読を
-//! `tokio::task::spawn_blocking(move || for delivery in delivery_rx { .. })`
-//! (`crate::plugin::runner::spawn_bus_subscriber`)で転送する。この
-//! `delivery_rx` の送信側(`Sender`)は `Bus` の購読表(`state.subscriptions`)
-//! に永久に保持されるため、テスト側で `Bus` を drop しない限りチャンネルは
-//! 閉じず、`spawn_blocking` のループは終了しない。`#[tokio::test]` が生成
-//! する `Runtime` はテスト関数から戻った直後に drop され、その drop は
-//! (ドキュメント化されてはいないが実測で確認した挙動として)実行中の
-//! blocking タスクの完了を待ち続けるため、**テスト自体は成功しているのに
-//! プロセスが `Runtime::drop` の中で無期限にハングする**(cargo test の
-//! `has been running for over 60 seconds` 警告だけが出続ける)。
+//! tokio ランタイムの中で走らせる必要があり、通常の `#[tokio::test]` を使う。
 //!
-//! 対策として、ここでは手動で `Runtime` を組み立て、テスト本体を
-//! `block_on` した後に **drop せず `mem::forget` で明示的にリークする**。
-//! テストプロセスはこの関数を最後にすぐ終了するので、リークした
-//! ワーカースレッド/blocking スレッドは(未回収のまま)プロセス終了時に
-//! まとめて破棄される。パニック(アサート失敗)は `catch_unwind` で捕まえて
-//! from `mem::forget` の後に再送出し、Runtime のリークはテスト結果の
-//! pass/fail に関わらず必ず行う。
+//! **`Registry::shutdown_bus_subscribers` を必ず呼んでからテスト関数を
+//! 抜けること**: このファイルのプラグイン(`state-reader`)は `[[bus]]` の
+//! `subscribe` を宣言しており、`start_plugins` はその購読を
+//! `spawn_bus_subscriber`(`tokio::task::spawn_blocking` で動く)で転送する。
+//! かつてはこのタスクを止める手段が無く、`#[tokio::test]` が生成する
+//! `Runtime` がテスト関数から戻った直後に drop される際、`Runtime::drop` が
+//! そのタスクの完了を無期限に待ってプロセスごとハングする Critical バグが
+//! あった(`core/src/plugin/registry.rs` の `Registry::shutdown_bus_subscribers`
+//! と `core/src/plugin/runner.rs` の `BUS_SUBSCRIBER_SHUTDOWN_POLL_INTERVAL`
+//! のドキュメントコメント参照)。今は `core/src/bin/edlr.rs` の shutdown
+//! シーケンスと同じように、`Registry` を使い終えたら明示的に
+//! `shutdown_bus_subscribers()` を呼ぶ必要がある。ここでは `ShutdownGuard` の
+//! `Drop` で行うことで、アサート失敗による早期リターン(パニック)でも確実に
+//! 呼ばれるようにしている。
 
-use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use edlr_core::event::Event;
-use edlr_core::plugin::PluginState;
+use edlr_core::plugin::{PluginState, Registry};
 
-#[test]
-fn a_publish_round_trips_through_the_driver_to_a_subscriber() {
-    run_leaking_runtime(a_publish_round_trips_through_the_driver_to_a_subscriber_body);
+/// スコープを抜けるとき(正常終了・パニックのどちらでも)
+/// `Registry::shutdown_bus_subscribers` を呼ぶ。`Registry` は `Clone`
+/// (内部は `Arc` 共有)で安価に持ち回れるので、ここに渡す分は複製で構わない。
+struct ShutdownGuard(Registry);
+
+impl Drop for ShutdownGuard {
+    fn drop(&mut self) {
+        self.0.shutdown_bus_subscribers();
+    }
 }
 
-async fn a_publish_round_trips_through_the_driver_to_a_subscriber_body() {
+#[tokio::test(flavor = "multi_thread")]
+async fn a_publish_round_trips_through_the_driver_to_a_subscriber() {
     let Some(driver_wasm) = built_example("examples/drivers/ed-state", "ed_state.wasm") else {
         eprintln!("skipping: build the example driver first");
         return;
@@ -73,6 +74,7 @@ async fn a_publish_round_trips_through_the_driver_to_a_subscriber_body() {
 
     let router = edlr_core::router::Router::new(16);
     let registry = start_plugins_for_test(&plugins_dir, tmp.path(), &router, bus.clone(), drivers);
+    let _shutdown_guard = ShutdownGuard(registry.clone());
     let plugin_infos = registry.list();
     assert_eq!(
         plugin_infos.len(),
@@ -125,12 +127,8 @@ async fn a_publish_round_trips_through_the_driver_to_a_subscriber_body() {
     }
 }
 
-#[test]
-fn an_unresolved_bus_reference_does_not_stop_the_plugin() {
-    run_leaking_runtime(an_unresolved_bus_reference_does_not_stop_the_plugin_body);
-}
-
-async fn an_unresolved_bus_reference_does_not_stop_the_plugin_body() {
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unresolved_bus_reference_does_not_stop_the_plugin() {
     let Some(plugin_wasm) = built_example("examples/plugins/state-reader", "state_reader.wasm")
     else {
         eprintln!("skipping: build the example plugin first");
@@ -147,37 +145,10 @@ async fn an_unresolved_bus_reference_does_not_stop_the_plugin_body() {
     let bus = edlr_driver_channel::Bus::new();
     let drivers = start_drivers_for_test(&tmp.path().join("drivers"), tmp.path(), bus.clone());
     let registry = start_plugins_for_test(&plugins_dir, tmp.path(), &router, bus, drivers);
+    let _shutdown_guard = ShutdownGuard(registry.clone());
     let info = registry.list();
     assert_eq!(info.len(), 1);
     assert!(matches!(info[0].state, PluginState::Running));
-}
-
-/// `body` を専用の multi-thread tokio `Runtime` の上で走らせ、完了したら
-/// その `Runtime` を(drop せず)リークする。理由はファイル先頭のドキュメント
-/// コメント参照(`spawn_bus_subscriber` の `spawn_blocking` ループが
-/// `Runtime::drop` を無期限にブロックするため)。`body` 内のパニック
-/// (アサート失敗)は正しくこの関数の呼び出し元(テスト関数)まで伝播する。
-fn run_leaking_runtime<F, Fut>(body: F)
-where
-    F: FnOnce() -> Fut,
-    Fut: Future<Output = ()>,
-{
-    let rt = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .expect("tokio runtime should build");
-
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| rt.block_on(body())));
-
-    // `body` が正常終了・パニックのどちらであっても、この時点で `rt` を
-    // drop すると `spawn_blocking` のバス購読タスクが待ち続けて永久に
-    // ハングする。drop を回避してリークすることで、テストプロセス終了時に
-    // 未回収のままスレッドごと破棄させる。
-    std::mem::forget(rt);
-
-    if let Err(payload) = result {
-        std::panic::resume_unwind(payload);
-    }
 }
 
 fn built_example(dir: &str, file: &str) -> Option<PathBuf> {

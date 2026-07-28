@@ -26,8 +26,10 @@
 //! `spawn_event_subscriber` と対称の形で存在する。
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc as std_mpsc, Arc, Mutex};
 use std::thread;
+use std::time::Duration;
 
 /// プラグイン専用の作業キュー(下記 `work_tx`/`work_rx`)の容量。journal
 /// イベント(`PluginWork::Event`)とドライバからのバス配信
@@ -68,6 +70,31 @@ use std::thread;
 /// 何か捨てられているかも分からないままこの数値だけをチューニングするのは
 /// 当て推量でしかないため。
 const PLUGIN_WORK_QUEUE_CAPACITY: usize = 64;
+
+/// `spawn_bus_subscriber` のブロッキング受信を区切る間隔。
+///
+/// **これが無いとデーモンの正常終了がハングする(実際に踏んだ Critical
+/// バグの修正)**: `spawn_bus_subscriber` は `tokio::task::spawn_blocking` の
+/// 中で `delivery_rx` を読み続けるが、その送信側(`Bus::subscribe` に渡した
+/// `Sender<Delivery>`)は `edlr_driver_channel::Bus` の購読表に居座り続け、
+/// 明示的に `unsubscribe`(`run_plugin_thread` の trap 分岐、あるいはプロセス
+/// 終了)されない限り閉じない。素朴な `for delivery in delivery_rx`(かつての
+/// 実装)は「送信側が全部閉じるまで無期限に待つ」ブロッキング呼び出しであり、
+/// `core/src/bin/edlr.rs` の `main` が(`Runtime::drop` を伴って)戻ろうとする
+/// 際、`Runtime` はこの `spawn_blocking` タスクの完了を待ち続けるため、
+/// **デーモンが SIGTERM/SIGINT を受けても `main` から永久に戻れない**
+/// (Tauri アプリの「デーモン未起動なら自動 spawn し、終了時に道連れで止める」
+/// が `STOP_GRACE` を使い切って最後は SIGKILL する羽目になる、という形で
+/// 顕在化した)。`[[bus]] subscribe` を宣言するプラグインが 1 つでもあれば
+/// 再現する。
+///
+/// 対策として、`delivery_rx.recv_timeout(..)` でブロッキング時間をこの間隔に
+/// 区切り、タイムアウトのたびに `shutdown` フラグ(`bin/edlr.rs` の shutdown
+/// シーケンスが `Registry::shutdown_bus_subscribers` 経由で `Runtime` を drop
+/// する**前**に立てる)を確認する。200ms は「シグナル受信からタスク終了までの
+/// 体感の遅延」と「アイドル時に無駄にウェイクアップする頻度」のバランスを
+/// 取った値で、他に強い制約は無い。
+const BUS_SUBSCRIBER_SHUTDOWN_POLL_INTERVAL: Duration = Duration::from_millis(200);
 
 use tokio::sync::broadcast;
 
@@ -375,7 +402,13 @@ fn load_and_run_plugin(
                 );
             }
             drop(delivery_tx);
-            spawn_bus_subscriber(manifest.clone(), bus_json, delivery_rx, work_tx);
+            spawn_bus_subscriber(
+                manifest.clone(),
+                bus_json,
+                delivery_rx,
+                work_tx,
+                registry.bus_subscriber_shutdown_flag(),
+            );
         }
     }
     // Disabled の場合、work_tx はここで drop される。プラグインスレッドは
@@ -399,6 +432,12 @@ fn run_plugin_thread(
     work_rx: std_mpsc::Receiver<PluginWork>,
     ready_tx: std_mpsc::Sender<PluginState>,
 ) {
+    // trap 時にこのプラグインの購読を `Bus` の購読表から取り除くために手元に
+    // 残しておく(`ctx` へ渡す方は `HostCtx::new` に move する)。
+    // `edlr_driver_channel::Bus::unsubscribe_plugin` のドキュメントコメント
+    // 参照: 呼ばないと、このプラグインが二度と読まない購読エントリが
+    // プロセスの生存期間中ずっと購読表に残り続ける。
+    let bus_for_unsubscribe = bus.clone();
     let ctx = HostCtx::new(
         manifest.id.clone(),
         settings_json,
@@ -451,6 +490,7 @@ fn run_plugin_thread(
                 "wasm call failed, disabling plugin: {reason}"
             );
             registry.set_disabled(&manifest.id, reason);
+            bus_for_unsubscribe.unsubscribe_plugin(&manifest.id);
             break;
         }
     }
@@ -574,42 +614,56 @@ pub(crate) fn subscribe_with_initial_value(
 /// `bus_json` を読み直し、`granted` かつ当該トピックが `subscribe` に
 /// 含まれている場合だけ転送する(`HostCtx::check_bus` と同じ判定材料・
 /// 同じ判定規則)。
+///
+/// **`shutdown` を定期的に確認しながらブロックする**(`for delivery in
+/// delivery_rx` ではなく `delivery_rx.recv_timeout(..)` を使う理由は
+/// `BUS_SUBSCRIBER_SHUTDOWN_POLL_INTERVAL` のドキュメントコメント参照)。
+/// `shutdown` が立っていれば、キューに残りがあってもそこで打ち切って戻る --
+/// デーモン終了シーケンスの一部として呼ばれるので、残りを律儀に配り切る
+/// より `Runtime::drop` を進められる方を優先する。
 fn spawn_bus_subscriber(
     manifest: Manifest,
     bus_json: Arc<Mutex<String>>,
     delivery_rx: std_mpsc::Receiver<Delivery>,
     work_tx: std_mpsc::SyncSender<PluginWork>,
+    shutdown: Arc<AtomicBool>,
 ) {
-    tokio::task::spawn_blocking(move || {
-        for delivery in delivery_rx {
-            let raw = bus_json
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .clone();
-            let entries = parse_bus(&raw);
-            let still_granted = entries
-                .get(&delivery.driver_id)
-                .is_some_and(|entry| entry.granted && entry.subscribe.contains(&delivery.topic));
-            if !still_granted {
-                // 承認が取り消された(か、そもそも一度も承認されていない)。
-                // 黙って捨てる -- `check_bus` が publish/get 側で同じ状況を
-                // `permission-denied` として扱うのと違い、こちらはドライバ
-                // 起点のプッシュ配信なので呼び出し元に返すエラーが無い。
-                continue;
+    tokio::task::spawn_blocking(move || loop {
+        if shutdown.load(Ordering::Acquire) {
+            break;
+        }
+        let delivery = match delivery_rx.recv_timeout(BUS_SUBSCRIBER_SHUTDOWN_POLL_INTERVAL) {
+            Ok(delivery) => delivery,
+            Err(std_mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(std_mpsc::RecvTimeoutError::Disconnected) => break,
+        };
+        let raw = bus_json
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        let entries = parse_bus(&raw);
+        let still_granted = entries
+            .get(&delivery.driver_id)
+            .is_some_and(|entry| entry.granted && entry.subscribe.contains(&delivery.topic));
+        if !still_granted {
+            // 承認が取り消された(か、そもそも一度も承認されていない)。
+            // 黙って捨てる -- `check_bus` が publish/get 側で同じ状況を
+            // `permission-denied` として扱うのと違い、こちらはドライバ
+            // 起点のプッシュ配信なので呼び出し元に返すエラーが無い。
+            continue;
+        }
+        match work_tx.try_send(PluginWork::Message(delivery)) {
+            Ok(()) => {}
+            Err(std_mpsc::TrySendError::Full(_)) => {
+                tracing::warn!(
+                    plugin_id = %manifest.id,
+                    "work queue full ({PLUGIN_WORK_QUEUE_CAPACITY} pending), \
+                     dropping a bus delivery for a slow/blocked plugin"
+                );
             }
-            match work_tx.try_send(PluginWork::Message(delivery)) {
-                Ok(()) => {}
-                Err(std_mpsc::TrySendError::Full(_)) => {
-                    tracing::warn!(
-                        plugin_id = %manifest.id,
-                        "work queue full ({PLUGIN_WORK_QUEUE_CAPACITY} pending), \
-                         dropping a bus delivery for a slow/blocked plugin"
-                    );
-                }
-                Err(std_mpsc::TrySendError::Disconnected(_)) => {
-                    // プラグインスレッドが終了(disabled)済み。
-                    break;
-                }
+            Err(std_mpsc::TrySendError::Disconnected(_)) => {
+                // プラグインスレッドが終了(disabled)済み。
+                break;
             }
         }
     });
@@ -819,7 +873,13 @@ mod tests {
         let (delivery_tx, delivery_rx) = std_mpsc::sync_channel(4);
         let (work_tx, work_rx) = std_mpsc::sync_channel::<PluginWork>(4);
         bus.subscribe("translator", "ed-state", "current-system", delivery_tx);
-        spawn_bus_subscriber(test_manifest(), bus_json.clone(), delivery_rx, work_tx);
+        spawn_bus_subscriber(
+            test_manifest(),
+            bus_json.clone(),
+            delivery_rx,
+            work_tx,
+            Arc::new(AtomicBool::new(false)),
+        );
 
         bus.emit("ed-state", "current-system", b"Sol".to_vec())
             .unwrap();
@@ -841,6 +901,73 @@ mod tests {
             work_rx.try_recv().is_err(),
             "revoking the grant on the same running subscriber must stop further \
              deliveries immediately, without re-subscribing"
+        );
+    }
+
+    /// Regression test for a Critical bug found in review of this task: a
+    /// live `spawn_bus_subscriber` task used to prevent its owning
+    /// `tokio::Runtime` from ever finishing shutdown, because it blocked
+    /// forever on `delivery_rx.recv()` and the `Sender` half (held by
+    /// `edlr_driver_channel::Bus`'s subscription table, exactly as
+    /// `Bus::subscribe` leaves it for the whole process's lifetime) never
+    /// closes on its own. This reproduces the real shutdown shape end to
+    /// end: build a `Runtime`, spawn a `spawn_bus_subscriber` task on it with
+    /// its `delivery_tx` kept alive (the same shape `Bus::subscribe`
+    /// produces), signal shutdown the same way
+    /// `Registry::shutdown_bus_subscribers` does, then drop the `Runtime` and
+    /// assert the drop completes within a bounded deadline.
+    ///
+    /// `Runtime::drop` is itself the call that can hang, so it's performed on
+    /// a dedicated thread and observed through a bounded channel receive --
+    /// this test fails via a timed-out assertion (not a real, unbounded
+    /// process hang) if the fix regresses.
+    #[test]
+    fn spawn_bus_subscriber_lets_the_runtime_shut_down_once_signaled() {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("tokio runtime should build");
+
+        let (delivery_tx, delivery_rx) = std_mpsc::sync_channel::<Delivery>(4);
+        let (work_tx, _work_rx) = std_mpsc::sync_channel::<PluginWork>(4);
+        let shutdown = Arc::new(AtomicBool::new(false));
+
+        rt.block_on(async {
+            spawn_bus_subscriber(
+                test_manifest(),
+                Arc::new(Mutex::new("{}".to_string())),
+                delivery_rx,
+                work_tx,
+                shutdown.clone(),
+            );
+        });
+
+        // Keep the sender alive, exactly like `Bus`'s subscription table
+        // does for as long as the plugin stays subscribed -- if this were
+        // dropped instead, the subscriber would detect `Disconnected` and
+        // exit on its own, and this test would no longer be exercising the
+        // shutdown-signal path at all.
+        let _keep_delivery_tx_alive = delivery_tx;
+
+        // Signal shutdown *before* dropping the runtime, exactly as
+        // `core/src/bin/edlr.rs` now calls
+        // `registry.shutdown_bus_subscribers()` before letting `main` return
+        // (and its implicit `Runtime` drop).
+        shutdown.store(true, Ordering::Release);
+
+        let (done_tx, done_rx) = std_mpsc::channel();
+        thread::spawn(move || {
+            drop(rt);
+            let _ = done_tx.send(());
+        });
+
+        done_rx.recv_timeout(Duration::from_secs(5)).expect(
+            "Runtime::drop must complete promptly once the shutdown flag was set \
+             before the drop; a timeout here means the spawn_blocking task in \
+             spawn_bus_subscriber is still blocking on delivery_rx.recv() instead \
+             of observing the shutdown flag (this is the exact daemon shutdown \
+             hang the fix addresses)",
         );
     }
 }

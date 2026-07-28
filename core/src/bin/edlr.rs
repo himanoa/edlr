@@ -276,7 +276,21 @@ async fn main() {
         }
     }
 
-    // デーモン終了経路: 生きているサイドカーを確実に停止してから抜ける。
+    // デーモン終了経路: 生きているサイドカーを確実に停止し、バス購読タスクに
+    // shutdown を知らせてから抜ける。
+    //
+    // **`shutdown_bus_subscribers` を `main` が返る(= `#[tokio::main]` が
+    // 暗黙の `Runtime` を drop する)前に呼ぶことが必須**: `[[bus]] subscribe`
+    // を宣言するプラグインが 1 つでもあれば、その購読転送タスク
+    // (`crate::plugin::runner::spawn_bus_subscriber`)は `spawn_blocking` の
+    // 中でブロッキング受信をしており、これを呼ばずに `Runtime` を drop する
+    // と `Runtime::drop` がそのタスクの完了を無期限に待ち、プロセスが
+    // SIGTERM/SIGINT を受けても終了できなくなる(実際に踏んだ Critical
+    // バグ。`Registry::shutdown_bus_subscribers` のドキュメントコメント参照)。
+    // `stop_all_sidecars` より先に呼ぶ必要はない(両者は独立)が、どのみち
+    // 同じ `registry` を消費する `spawn_blocking` 呼び出しより前に、軽い
+    // 同期呼び出しとして済ませておく。
+    //
     // `ProcessDriver::stop_all`(`PluginHost::drop` 経由でも最後の砦として
     // 呼ばれる)は、まだ稼働中の `Registry`/`PluginHost` を保持したままの
     // 明示的な shutdown シーケンスの一部として、ここでも呼んでおく。
@@ -286,6 +300,7 @@ async fn main() {
     // ブロックしうる。ここは非同期ランタイムの最後の一手なので tokio の
     // ワーカースレッドを塞がないよう `spawn_blocking` に逃がしてから待つ。
     if let Some(registry) = registry {
+        registry.shutdown_bus_subscribers();
         let _ = tokio::task::spawn_blocking(move || registry.stop_all_sidecars()).await;
     }
 }
