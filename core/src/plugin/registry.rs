@@ -21,7 +21,8 @@ use crate::plugin::sidecar_runtime::{
     implicit_http_hosts, sidecars_json_string, SidecarRuntimeEntry,
 };
 use crate::plugin::{
-    BusRequest, CapabilityRequest, FilesystemRequest, Manifest, SettingsError, SidecarRequest,
+    BusRequest, CapabilityRequest, DashboardWidget, FilesystemRequest, Manifest, SettingsError,
+    SidecarRequest,
 };
 
 /// プラグイン 1 件の現在の駆動状態。
@@ -93,6 +94,17 @@ pub struct BusInfo {
     pub resolved: bool,
 }
 
+/// ダッシュボードウィジェット 1 件の RPC 応答用スナップショット
+/// (`BusInfo` と同じ流儀)。`resolved` は entry ファイルが plugins_dir 内に
+/// 実在するかどうか。承認とは独立(未解決でも承認自体は妨げない -- entry を
+/// 後から置けば、承認済みのまま解決される)。
+#[derive(Debug)]
+pub struct DashboardInfo {
+    pub request: DashboardWidget,
+    pub grant: GrantState,
+    pub resolved: bool,
+}
+
 /// RPC 応答用のプラグイン情報スナップショット。
 pub struct PluginInfo {
     pub manifest: Manifest,
@@ -102,6 +114,7 @@ pub struct PluginInfo {
     pub grant_state: GrantState,
     pub sidecars: Vec<SidecarInfo>,
     pub filesystem: Vec<FilesystemInfo>,
+    pub dashboard: Vec<DashboardInfo>,
 }
 
 /// `control_sidecar` が指定できる操作。
@@ -135,6 +148,10 @@ pub enum RegistryError {
     Filesystem(String),
     /// 指定された `driver` のバス接続要求が manifest に無い。
     UnknownBus(String),
+    /// 指定された `id` のダッシュボードウィジェットが manifest に無い。
+    UnknownDashboard(String),
+    /// 未承認のダッシュボードウィジェットのアセットが要求された。
+    DashboardNotGranted(String),
     /// 指定された `id` のドライバが登録されていない。`UnknownPlugin` とは
     /// 別の variant にしてある: `crate::driver::registry::DriverRegistry` の
     /// サイドカー/ファイルアクセス系メソッド(`find_manifest_for_shared` /
@@ -161,6 +178,10 @@ impl fmt::Display for RegistryError {
             RegistryError::UnknownFilesystem(name) => write!(f, "unknown filesystem root: {name}"),
             RegistryError::Filesystem(msg) => write!(f, "{msg}"),
             RegistryError::UnknownBus(driver) => write!(f, "unknown bus connection: {driver}"),
+            RegistryError::UnknownDashboard(id) => write!(f, "unknown dashboard widget: {id}"),
+            RegistryError::DashboardNotGranted(id) => {
+                write!(f, "dashboard widget not granted: {id}")
+            }
             RegistryError::UnknownDriver(id) => write!(f, "unknown driver: {id}"),
         }
     }
@@ -360,6 +381,7 @@ impl Registry {
                 let capability_requests = manifest.capabilities.clone();
                 let sidecars = self.build_sidecar_infos(&manifest);
                 let filesystem = self.build_filesystem_infos(&manifest);
+                let dashboard = self.build_dashboard_infos(&manifest);
                 PluginInfo {
                     manifest,
                     state,
@@ -368,6 +390,7 @@ impl Registry {
                     grant_state,
                     sidecars,
                     filesystem,
+                    dashboard,
                 }
             })
             .collect()
@@ -491,6 +514,117 @@ impl Registry {
                 }
             })
             .collect()
+    }
+
+    fn build_dashboard_infos(&self, manifest: &Manifest) -> Vec<DashboardInfo> {
+        manifest
+            .dashboard
+            .iter()
+            .map(|widget| {
+                let grant = self.grants_store.dashboard_state(manifest, &widget.id);
+                let resolved = self
+                    .plugins_dir
+                    .join(&manifest.id)
+                    .join(&widget.entry)
+                    .is_file();
+                DashboardInfo {
+                    request: widget.clone(),
+                    grant,
+                    resolved,
+                }
+            })
+            .collect()
+    }
+
+    /// `id` のダッシュボードウィジェット一覧(UI 表示用)。
+    pub fn dashboard(&self, id: &str) -> Result<Vec<DashboardInfo>, RegistryError> {
+        let manifest = self.find_manifest(id)?;
+        Ok(self.build_dashboard_infos(&manifest))
+    }
+
+    /// ダッシュボードウィジェット 1 件の承認/取消。`set_bus_grant` と同じ
+    /// 流儀で、更新後のウィジェット一覧全体を返す(UI が 1 往復で
+    /// リスト全体を更新できるように)。
+    pub fn set_dashboard_grant(
+        &self,
+        id: &str,
+        widget: &str,
+        granted: bool,
+    ) -> Result<Vec<DashboardInfo>, RegistryError> {
+        let manifest = self.find_manifest(id)?;
+        if manifest.dashboard_widget(widget).is_none() {
+            return Err(RegistryError::UnknownDashboard(widget.to_string()));
+        }
+        self.grants_store
+            .set_dashboard(&manifest, widget, granted)
+            .map_err(RegistryError::Grants)?;
+        Ok(self.build_dashboard_infos(&manifest))
+    }
+
+    /// `dashboard/list` 用: 全プラグインの全ウィジェット
+    /// (`(plugin_id, plugin_name, state, info)`)。grant の有無での絞り込みは
+    /// 呼び出し側(server.rs)の責務。
+    pub fn dashboard_widgets_for_ui(&self) -> Vec<(String, String, PluginState, DashboardInfo)> {
+        let snapshot: Vec<(Manifest, PluginState)> = self
+            .entries
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .iter()
+            .map(|entry| (entry.manifest.clone(), entry.state.clone()))
+            .collect();
+
+        snapshot
+            .into_iter()
+            .flat_map(|(manifest, state)| {
+                self.build_dashboard_infos(&manifest)
+                    .into_iter()
+                    .map(|info| {
+                        (
+                            manifest.id.clone(),
+                            manifest.name.clone(),
+                            state.clone(),
+                            info,
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    }
+
+    /// ウィジェットアセットの実ファイルパスを解決する。grant 必須・entry の
+    /// ディレクトリ外へのトラバーサルは拒否(`/plugin-ui/...` ハンドラの
+    /// 心臓部。HTTP 層は薄く保ち、判定はここで単体テストする)。
+    /// `rel_path` が空のときは entry ファイル自身を返す。
+    pub fn dashboard_asset_path(
+        &self,
+        plugin: &str,
+        widget: &str,
+        rel_path: &str,
+    ) -> Result<PathBuf, RegistryError> {
+        use std::path::Component;
+        let manifest = self.find_manifest(plugin)?;
+        let spec = manifest
+            .dashboard_widget(widget)
+            .ok_or_else(|| RegistryError::UnknownDashboard(widget.to_string()))?;
+        let grant = self.grants_store.dashboard_state(&manifest, widget);
+        if !grant.granted {
+            return Err(RegistryError::DashboardNotGranted(widget.to_string()));
+        }
+        let entry = self.plugins_dir.join(&manifest.id).join(&spec.entry);
+        if rel_path.is_empty() {
+            return Ok(entry);
+        }
+        let base = entry
+            .parent()
+            .ok_or_else(|| RegistryError::UnknownDashboard(widget.to_string()))?;
+        let rel = Path::new(rel_path);
+        if rel
+            .components()
+            .any(|c| !matches!(c, Component::Normal(_)))
+        {
+            return Err(RegistryError::UnknownDashboard(widget.to_string()));
+        }
+        Ok(base.join(rel))
     }
 
     /// `id` 用のサイドカー実行時ロック(`sidecar_runtime_locks`)を引く。
@@ -1607,6 +1741,164 @@ pub(crate) mod tests {
             bus_json: Arc::new(Mutex::new("[]".to_string())),
         });
         registry
+    }
+
+    /// `[[dashboard]]` を 1 件持つプラグイン `widgety`(widget id "status"、
+    /// entry "ui/index.html")だけを載せた `Registry`。plugins_dir は
+    /// 返り値の `TempDir` 配下(`<tmp>/plugins`)なので、entry ファイルの
+    /// 有無を呼び出し元が操作できる(fixture が `TempDir` を drop すると
+    /// ディレクトリごと消えるため、所有権ごと返す)。
+    pub(crate) fn test_registry_with_dashboard() -> (Registry, tempfile::TempDir) {
+        let host = Arc::new(PluginHost::new().expect("host should start"));
+        let tmp = tempfile::tempdir().unwrap();
+        let settings_store = Arc::new(SettingsStore::new(tmp.path().join("settings")));
+        let grants_store = Arc::new(GrantsStore::new(tmp.path().join("grants")));
+        let sidecar_config_store = Arc::new(SidecarConfigStore::new(tmp.path().join("settings")));
+        let filesystem_config_store = Arc::new(FilesystemConfigStore::new(
+            tmp.path().join("settings"),
+            Vec::new(),
+        ));
+        let process_driver = Arc::new(ProcessDriver::new(
+            Duration::from_millis(200),
+            Duration::from_millis(0),
+        ));
+        let driver_registry = empty_driver_registry(tmp.path());
+        let registry = Registry::new(
+            host,
+            settings_store,
+            grants_store,
+            sidecar_config_store,
+            filesystem_config_store,
+            process_driver,
+            driver_registry,
+            tmp.path().join("plugins"),
+        );
+        registry.push(PluginEntry {
+            manifest: manifest_with_dashboard("widgety"),
+            state: PluginState::Running,
+            settings_json: Arc::new(Mutex::new("{}".to_string())),
+            capabilities_json: Arc::new(Mutex::new(crate::plugin::host::capabilities_json_string(
+                &[],
+            ))),
+            sidecars_json: Arc::new(Mutex::new("[]".to_string())),
+            filesystem_json: Arc::new(Mutex::new("[]".to_string())),
+            bus_json: Arc::new(Mutex::new("[]".to_string())),
+        });
+        (registry, tmp)
+    }
+
+    fn manifest_with_dashboard(id: &str) -> Manifest {
+        use crate::plugin::manifest::{DashboardWidget, WidgetSize};
+        Manifest {
+            id: id.to_string(),
+            name: id.to_string(),
+            version: "0.1.0".into(),
+            description: String::new(),
+            entry: "plugin.wasm".into(),
+            events: vec!["FSDJump".into()],
+            settings: vec![],
+            capabilities: vec![],
+            sidecars: vec![],
+            filesystem: vec![],
+            bus: vec![],
+            dashboard: vec![DashboardWidget {
+                id: "status".into(),
+                title: "Status".into(),
+                entry: "ui/index.html".into(),
+                size: WidgetSize::Small,
+            }],
+        }
+    }
+
+    #[test]
+    fn dashboard_reports_resolved_only_when_entry_file_exists() {
+        let (registry, tmp) = test_registry_with_dashboard();
+        let plugins_dir = tmp.path().join("plugins");
+        // entry 不在 → resolved: false
+        let infos = registry.dashboard("widgety").unwrap();
+        assert_eq!(infos.len(), 1);
+        assert!(!infos[0].resolved);
+        // entry を置く → resolved: true
+        let ui_dir = plugins_dir.join("widgety").join("ui");
+        std::fs::create_dir_all(&ui_dir).unwrap();
+        std::fs::write(ui_dir.join("index.html"), "<html></html>").unwrap();
+        assert!(registry.dashboard("widgety").unwrap()[0].resolved);
+    }
+
+    #[test]
+    fn set_dashboard_grant_round_trips_and_rejects_unknown_widget() {
+        let (registry, _tmp) = test_registry_with_dashboard();
+
+        let infos = registry
+            .set_dashboard_grant("widgety", "status", true)
+            .unwrap();
+        assert!(infos[0].grant.granted);
+        let infos = registry
+            .set_dashboard_grant("widgety", "status", false)
+            .unwrap();
+        assert!(!infos[0].grant.granted);
+        let err = registry
+            .set_dashboard_grant("widgety", "nope", true)
+            .unwrap_err();
+        assert!(matches!(err, RegistryError::UnknownDashboard(w) if w == "nope"));
+    }
+
+    #[test]
+    fn dashboard_widgets_for_ui_lists_every_declared_widget() {
+        let (registry, _tmp) = test_registry_with_dashboard();
+        let widgets = registry.dashboard_widgets_for_ui();
+        assert_eq!(widgets.len(), 1);
+        let (plugin_id, plugin_name, _state, info) = &widgets[0];
+        assert_eq!(plugin_id, "widgety");
+        assert_eq!(plugin_name, "widgety");
+        assert_eq!(info.request.id, "status");
+        assert!(!info.grant.granted);
+    }
+
+    #[test]
+    fn dashboard_asset_path_requires_grant_and_rejects_traversal() {
+        let (registry, tmp) = test_registry_with_dashboard();
+        let ui_dir = tmp.path().join("plugins").join("widgety").join("ui");
+        std::fs::create_dir_all(&ui_dir).unwrap();
+        std::fs::write(ui_dir.join("index.html"), "<html></html>").unwrap();
+        std::fs::write(ui_dir.join("app.js"), "//").unwrap();
+
+        // 未 grant → エラー
+        let err = registry
+            .dashboard_asset_path("widgety", "status", "index.html")
+            .unwrap_err();
+        assert!(matches!(err, RegistryError::DashboardNotGranted(_)));
+
+        registry
+            .set_dashboard_grant("widgety", "status", true)
+            .unwrap();
+        // 正常系: entry ディレクトリ配下のファイル
+        let path = registry
+            .dashboard_asset_path("widgety", "status", "app.js")
+            .unwrap();
+        assert!(path.ends_with("widgety/ui/app.js"));
+        // 空パスは entry ファイル自身
+        let path = registry
+            .dashboard_asset_path("widgety", "status", "")
+            .unwrap();
+        assert!(path.ends_with("widgety/ui/index.html"));
+        // トラバーサルは拒否
+        assert!(registry
+            .dashboard_asset_path("widgety", "status", "../manifest.toml")
+            .is_err());
+        assert!(registry
+            .dashboard_asset_path("widgety", "status", "a/../../manifest.toml")
+            .is_err());
+        assert!(registry
+            .dashboard_asset_path("widgety", "status", "/etc/passwd")
+            .is_err());
+        // 未知 widget / plugin も拒否
+        assert!(registry
+            .dashboard_asset_path("widgety", "nope", "index.html")
+            .is_err());
+        assert!(registry
+            .dashboard_asset_path("nope", "status", "index.html")
+            .is_err());
     }
 
     #[test]
