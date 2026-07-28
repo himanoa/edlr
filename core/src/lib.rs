@@ -2,6 +2,7 @@ pub use edlr_config as config;
 pub mod driver;
 pub mod event;
 pub mod journal;
+pub mod logs;
 pub mod monitor;
 pub mod plugin;
 pub mod router;
