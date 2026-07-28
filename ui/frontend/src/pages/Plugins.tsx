@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { BusSection } from "../components/BusSection";
 import CapabilitySection from "../components/CapabilitySection";
 import { DashboardSection } from "../components/DashboardSection";
+import { DroppedSection } from "../components/DroppedSection";
 import FilesystemSection from "../components/FilesystemSection";
 import PluginForm from "../components/PluginForm";
 import { ScheduleSection } from "../components/ScheduleSection";
@@ -227,6 +228,7 @@ export default function Plugins() {
               onSetGrant={handleDashboardGrant}
             />
             <ScheduleSection schedules={p.schedules} />
+            <DroppedSection dropped={p.dropped} />
           </article>
         ))}
     </section>

@@ -73,13 +73,15 @@ use std::time::Duration;
 /// おおよそ元の数が想定していた「1 ストリームあたりの余裕」を両ストリームに
 /// 復元する(ドライバ側 `DRIVER_MESSAGE_QUEUE_CAPACITY` の 64 とも揃う)。
 ///
-/// **既知の限界(このタスクでは未解決)**: これは緩和策であって解決策では
-/// ない。2 プロデューサ間の公平性は依然として無く、十分におしゃべりな
-/// ドライバがあれば journal イベント側が捨てられることは今も起こりうる。
-/// この計画で意図的にスコープ外としている次の一手は、破棄をプラグインごとに
-/// 観測可能にすること(`plugins/list` 経由で見えるカウンタなど)-- 実際に
-/// 何か捨てられているかも分からないままこの数値だけをチューニングするのは
-/// 当て推量でしかないため。
+/// **既知の限界**: これは緩和策であって解決策ではない。2 プロデューサ間の
+/// 公平性は依然として無く、十分におしゃべりなドライバがあれば journal
+/// イベント側が捨てられることは今も起こりうる。
+///
+/// ただし破棄は**観測可能**になった: `plugin::dropped::DropCounters` が
+/// プラグインごとに数え、`plugins/list` の `dropped` として返す(UI にも
+/// 非ゼロのときだけ表示される)。この数値をチューニングする際は、まず
+/// そのカウンタを見ること -- 実際に何か捨てられているかも分からないまま
+/// 容量だけをいじるのは当て推量でしかない。
 const PLUGIN_WORK_QUEUE_CAPACITY: usize = 64;
 
 /// `spawn_bus_subscriber` のブロッキング受信を区切る間隔。
@@ -114,6 +116,7 @@ use edlr_driver_channel::{Bus, Delivery};
 use crate::driver::registry::DriverRegistry;
 use crate::event::Event;
 use crate::plugin::bus_runtime::{bus_json_string, parse_bus, BusRuntimeEntry};
+use crate::plugin::dropped::DropCounters;
 use crate::plugin::filesystem::FilesystemConfigStore;
 use crate::plugin::fs_runtime::{filesystem_json_string, FsRuntimeEntry};
 use crate::plugin::grants::GrantsStore;
@@ -410,7 +413,17 @@ fn load_and_run_plugin(
         // 自体はもう終了しているか、終了する寸前でしかない。
         registry.register_plugin_thread(&manifest.id, work_tx.clone(), thread_handle, stop_flag);
 
-        spawn_event_subscriber(manifest.clone(), router.subscribe(), work_tx.clone());
+        // 作業キュー満杯で捨てた件数を数える窓口。両方の購読タスク(書き手)と
+        // `plugins/list`(読み手)が共有する。
+        let drops = DropCounters::new();
+        registry.register_drop_counters(&manifest.id, drops.clone());
+
+        spawn_event_subscriber(
+            manifest.clone(),
+            router.subscribe(),
+            work_tx.clone(),
+            drops.clone(),
+        );
 
         // `[[bus]]` の `subscribe` トピックがあれば、購読を登録して配信を
         // このプラグインの作業キューへ流し込む(`spawn_bus_subscriber` の
@@ -446,6 +459,7 @@ fn load_and_run_plugin(
                 delivery_rx,
                 work_tx,
                 registry.bus_subscriber_shutdown_flag(),
+                drops,
             );
         }
     }
@@ -741,6 +755,7 @@ fn spawn_event_subscriber(
     manifest: Manifest,
     mut rx: broadcast::Receiver<Arc<Event>>,
     work_tx: std_mpsc::SyncSender<PluginWork>,
+    drops: Arc<DropCounters>,
 ) {
     tokio::spawn(async move {
         loop {
@@ -752,6 +767,10 @@ fn spawn_event_subscriber(
                     match work_tx.try_send(PluginWork::Event(event)) {
                         Ok(()) => {}
                         Err(std_mpsc::TrySendError::Full(_)) => {
+                            // journal の読み取り位置は配送の成否と独立に進むので、
+                            // ここで捨てたイベントは replay でも戻らない。
+                            // `plugins/list` に出すために数えておく。
+                            drops.record_event_drop();
                             tracing::warn!(
                                 plugin_id = %manifest.id,
                                 "event queue full ({PLUGIN_WORK_QUEUE_CAPACITY} pending), \
@@ -848,6 +867,7 @@ fn spawn_bus_subscriber(
     delivery_rx: std_mpsc::Receiver<Delivery>,
     work_tx: std_mpsc::SyncSender<PluginWork>,
     shutdown: Arc<AtomicBool>,
+    drops: Arc<DropCounters>,
 ) {
     tokio::task::spawn_blocking(move || loop {
         if shutdown.load(Ordering::Acquire) {
@@ -876,6 +896,8 @@ fn spawn_bus_subscriber(
         match work_tx.try_send(PluginWork::Message(delivery)) {
             Ok(()) => {}
             Err(std_mpsc::TrySendError::Full(_)) => {
+                // バス配信は再送されないので、ここで捨てた分は失われる。
+                drops.record_bus_delivery_drop();
                 tracing::warn!(
                     plugin_id = %manifest.id,
                     "work queue full ({PLUGIN_WORK_QUEUE_CAPACITY} pending), \
@@ -964,7 +986,8 @@ mod tests {
         let (work_tx, work_rx) =
             std_mpsc::sync_channel::<PluginWork>(PLUGIN_WORK_QUEUE_CAPACITY);
 
-        spawn_event_subscriber(test_manifest(), broadcast_rx, work_tx);
+        let drops = DropCounters::new();
+        spawn_event_subscriber(test_manifest(), broadcast_rx, work_tx, drops.clone());
 
         // Simulate a plugin thread that's blocked in `driver-http.send`:
         // never drain `work_rx` while publishing far more events than the
@@ -996,6 +1019,20 @@ mod tests {
             "queued {queued} events, expected at most {PLUGIN_WORK_QUEUE_CAPACITY} \
              (publishing {published} events to a never-drained receiver must not \
              grow the queue past its bound)"
+        );
+
+        // 溢れた分は黙って消えるのではなく、`plugins/list` から見える形で
+        // 数えられていること。
+        let dropped = drops.snapshot().events;
+        assert!(
+            dropped > 0,
+            "publishing {published} events into a {PLUGIN_WORK_QUEUE_CAPACITY}-slot \
+             queue must record the overflow as dropped events, got {dropped}"
+        );
+        assert_eq!(
+            dropped as usize + queued,
+            published,
+            "every published event must be either queued or counted as dropped"
         );
     }
 
@@ -1102,6 +1139,7 @@ mod tests {
             delivery_rx,
             work_tx,
             Arc::new(AtomicBool::new(false)),
+            DropCounters::new(),
         );
 
         bus.emit("ed-state", "current-system", b"Sol".to_vec())
@@ -1163,6 +1201,7 @@ mod tests {
                 delivery_rx,
                 work_tx,
                 shutdown.clone(),
+                DropCounters::new(),
             );
         });
 

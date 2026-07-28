@@ -15,6 +15,7 @@ use edlr_driver_process::{InstanceStatus, ProcessDriver, ProcessSpec};
 use crate::driver::registry::DriverRegistry;
 use crate::plugin::bus_runtime::{bus_json_string, BusRuntimeEntry};
 use crate::plugin::filesystem::{FilesystemConfig, FilesystemConfigError, FilesystemConfigStore};
+use crate::plugin::dropped::{DropCounters, DroppedCounts};
 use crate::plugin::fs_runtime::{filesystem_json_string, FsRuntimeEntry};
 use crate::plugin::grants::{GrantState, GrantsError, GrantsStore};
 use crate::plugin::host::{capabilities_json_string, parse_capability_hosts, PluginHost};
@@ -153,6 +154,9 @@ pub struct PluginInfo {
     pub filesystem: Vec<FilesystemInfo>,
     pub dashboard: Vec<DashboardInfo>,
     pub schedules: Vec<ScheduleInfo>,
+    /// 作業キュー満杯で捨てた件数(デーモン起動時からの累計)。
+    /// `plugin::dropped` のモジュールドキュメント参照。
+    pub dropped: DroppedCounts,
 }
 
 /// `control_sidecar` が指定できる操作。
@@ -350,6 +354,15 @@ pub struct Registry {
     /// 「now + interval」になり、スレッドの実際の発火時点と無関係だった
     /// (UI のカウントダウンが意味を持たなかった)。
     schedule_views: Arc<Mutex<HashMap<String, ScheduleView>>>,
+    /// 各プラグインの「作業キュー満杯で捨てた件数」を id で引けるようにした
+    /// マップ(`plugins/list` 用)。`register_drop_counters` が
+    /// `runner::start_plugins` から呼ばれて登録する。
+    ///
+    /// 取りこぼしを黙って捨てるのは設計判断(遅いだけのプラグインを殺さない)
+    /// だが、何がどれだけ失われているか分からないままではキュー容量の
+    /// チューニングが当て推量になる。`plugin::dropped` のモジュールドキュメント
+    /// を参照。
+    drop_counters: Arc<Mutex<HashMap<String, Arc<DropCounters>>>>,
 }
 
 /// `Registry::plugin_threads` の 1 エントリ。`shutdown_plugins` 専用。
@@ -392,6 +405,7 @@ impl Registry {
             bus_subscriber_shutdown: Arc::new(AtomicBool::new(false)),
             plugin_threads: Arc::new(Mutex::new(HashMap::new())),
             schedule_views: Arc::new(Mutex::new(HashMap::new())),
+            drop_counters: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -437,6 +451,26 @@ impl Registry {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .insert(id.to_string(), view);
+    }
+
+    /// プラグインの取りこぼしカウンタを登録する(`plugins/list` から読まれる)。
+    /// 購読タスクを起動する `runner::start_plugins` が呼ぶ。
+    pub(crate) fn register_drop_counters(&self, id: &str, counters: Arc<DropCounters>) {
+        self.drop_counters
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(id.to_string(), counters);
+    }
+
+    /// `id` のプラグインの取りこぼし件数。カウンタが未登録(Disabled で
+    /// 購読タスクが起動していない)なら 0 件。
+    fn dropped_counts(&self, id: &str) -> DroppedCounts {
+        self.drop_counters
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(id)
+            .map(|counters| counters.snapshot())
+            .unwrap_or_default()
     }
 
     /// Running な全プラグインへ `PluginWork::Stop` を送り、それぞれの専用
@@ -586,6 +620,7 @@ impl Registry {
                 let filesystem = self.build_filesystem_infos(&manifest);
                 let dashboard = self.build_dashboard_infos(&manifest);
                 let schedules = self.build_schedule_infos(&manifest);
+                let dropped = self.dropped_counts(&manifest.id);
                 PluginInfo {
                     manifest,
                     state,
@@ -596,6 +631,7 @@ impl Registry {
                     filesystem,
                     dashboard,
                     schedules,
+                    dropped,
                 }
             })
             .collect()

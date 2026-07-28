@@ -78,6 +78,7 @@ function makePlugin(overrides: Partial<PluginInfo> = {}): PluginInfo {
     bus: [],
     dashboard: [],
     schedules: [],
+    dropped: { events: 0, busDeliveries: 0 },
     ...overrides,
   };
 }

@@ -104,14 +104,27 @@ export interface DashboardListEntry {
  * `plugins/list` が返すスケジュール宣言 1 件(`[[schedule]]`)。
  *
  * `spec` は表示用に整形済みの文字列("every 60s" / "cron: 0 9 * * *")。
- * `next` は ISO8601(ローカル時刻)の次回発火時刻の**近似値**
- * (interval 系はサーバがこの応答を組み立てた瞬間からの相対計算 -- 詳細は
- * `core/src/plugin/registry.rs` の `ScheduleInfo` のドキュメントコメント参照)。
+ * `next` は ISO8601(ローカル時刻)の次回発火時刻。プラグインスレッドが
+ * 実際に予定している時刻で、起動途中や Disabled のときだけサーバ側の推定値へ
+ * フォールバックする(詳細は `core/src/plugin/registry.rs` の `ScheduleInfo`
+ * のドキュメントコメント参照)。
  */
 export interface Schedule {
   name: string;
   spec: string;
   next: string;
+}
+
+/**
+ * プラグインの作業キューが満杯だったために捨てられた件数
+ * (デーモン起動時からの累計)。
+ *
+ * journal イベントは読み取り位置が配送と独立に進むため replay でも戻らず、
+ * バス配信も再送されない。つまりこの数はそのまま**失われたイベント数**。
+ */
+export interface DroppedCounts {
+  events: number;
+  busDeliveries: number;
 }
 
 export interface PluginInfo {
@@ -129,6 +142,7 @@ export interface PluginInfo {
   bus: BusRequest[];
   dashboard: DashboardWidget[];
   schedules: Schedule[];
+  dropped: DroppedCounts;
 }
 
 export interface PluginsList {

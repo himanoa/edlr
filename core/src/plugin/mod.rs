@@ -1,5 +1,6 @@
 pub mod allowlist;
 pub mod bus_runtime;
+pub mod dropped;
 pub mod filesystem;
 pub mod fs_runtime;
 pub mod grants;

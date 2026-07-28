@@ -172,6 +172,7 @@ pub fn handle_rpc_with_drivers(
                     value["dashboard"] = dashboard_result_json(&info.dashboard)["dashboard"].clone();
                     value["schedules"] =
                         schedules_result_json(&info.schedules)["schedules"].clone();
+                    value["dropped"] = dropped_result_json(&info.dropped);
                     match info.state {
                         crate::plugin::PluginState::Running => {
                             value["state"] = serde_json::json!("running");
@@ -600,6 +601,20 @@ fn bus_result_json(bus: &[crate::plugin::registry::BusInfo]) -> serde_json::Valu
 /// `next` は `Registry::ScheduleInfo` のドキュメントコメントが説明する
 /// とおり、プラグインスレッドが `ScheduleView` へ公開した実際の発火予定時刻
 /// (未公開・Disabled のときだけその場の推定値へフォールバックする)。
+/// `plugins/list` の各要素の `dropped` フィールドに使う JSON:
+/// `{ "events": n, "busDeliveries": n }`。
+///
+/// 作業キューが満杯だったために捨てた件数(デーモン起動時からの累計)。
+/// journal イベントは読み取り位置が配送と独立に進むため replay でも戻らず、
+/// バス配信も再送されない -- つまりこの数はそのまま**失われたイベント数**で
+/// ある(`plugin::dropped` のモジュールドキュメント参照)。
+fn dropped_result_json(dropped: &crate::plugin::dropped::DroppedCounts) -> serde_json::Value {
+    serde_json::json!({
+        "events": dropped.events,
+        "busDeliveries": dropped.bus_deliveries,
+    })
+}
+
 fn schedules_result_json(schedules: &[crate::plugin::registry::ScheduleInfo]) -> serde_json::Value {
     let items: Vec<serde_json::Value> = schedules
         .iter()
@@ -1051,6 +1066,20 @@ mod tests {
         // 自体をテスト済み)。
         assert!(chrono::DateTime::parse_from_rfc3339(schedules[0]["next"].as_str().unwrap())
             .is_ok());
+    }
+
+    /// 取りこぼしは黙って失われるのではなく `plugins/list` から見えること。
+    /// 何も捨てていないプラグインでもフィールドは常に存在する(UI 側で
+    /// 「まだ数えていない」と「0 件」を区別する必要が無いように)。
+    #[test]
+    fn plugins_list_reports_dropped_counts() {
+        let (registry, _drivers) = test_registries();
+        let result =
+            handle_rpc_with_drivers(Some(&registry), None, "plugins/list", &serde_json::json!({}))
+                .unwrap();
+        let dropped = &result["plugins"][0]["dropped"];
+        assert_eq!(dropped["events"], 0);
+        assert_eq!(dropped["busDeliveries"], 0);
     }
 
     #[test]
