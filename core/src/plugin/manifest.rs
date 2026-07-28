@@ -167,6 +167,19 @@ pub enum ScheduleSpec {
     Cron(String),
 }
 
+impl ScheduleSpec {
+    /// RPC 応答(`plugins/list` の `schedules[].spec`)・UI 表示に使う安定した
+    /// 文字列表現。`IntervalSeconds(n)` は `"every {n}s"`、`Cron(expr)` は
+    /// `"cron: {expr}"`(元の 5 欄形式のまま、正規化前の文字列を使う --
+    /// ユーザーが manifest.toml に書いた表現と一致させるため)。
+    pub fn display_string(&self) -> String {
+        match self {
+            ScheduleSpec::IntervalSeconds(secs) => format!("every {secs}s"),
+            ScheduleSpec::Cron(expr) => format!("cron: {expr}"),
+        }
+    }
+}
+
 /// プラグインが宣言する定期実行 1 件(`[[schedule]]`)。
 #[derive(Debug, Clone, PartialEq)]
 pub struct ScheduleRequest {
@@ -1176,6 +1189,18 @@ default = "x"
         let events: Vec<String> = vec![];
         assert!(!matches_event(&events, &journal_event("FSDJump")));
         assert!(!matches_event(&events, &status_event()));
+    }
+
+    #[test]
+    fn schedule_spec_display_string_matches_expected_format() {
+        assert_eq!(
+            ScheduleSpec::IntervalSeconds(60).display_string(),
+            "every 60s"
+        );
+        assert_eq!(
+            ScheduleSpec::Cron("0 9 * * *".to_string()).display_string(),
+            "cron: 0 9 * * *"
+        );
     }
 
     #[test]

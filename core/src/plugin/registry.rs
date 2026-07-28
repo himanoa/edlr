@@ -19,14 +19,15 @@ use crate::plugin::fs_runtime::{filesystem_json_string, FsRuntimeEntry};
 use crate::plugin::grants::{GrantState, GrantsError, GrantsStore};
 use crate::plugin::host::{capabilities_json_string, parse_capability_hosts, PluginHost};
 use crate::plugin::runner::PluginWork;
+use crate::plugin::schedule::ScheduleState;
 use crate::plugin::settings::SettingsStore;
 use crate::plugin::sidecar::{assign_ports, SidecarConfig, SidecarConfigError, SidecarConfigStore};
 use crate::plugin::sidecar_runtime::{
     implicit_http_hosts, sidecars_json_string, SidecarRuntimeEntry,
 };
 use crate::plugin::{
-    BusRequest, CapabilityRequest, DashboardWidget, FilesystemRequest, Manifest, SettingsError,
-    SidecarRequest,
+    BusRequest, CapabilityRequest, DashboardWidget, FilesystemRequest, Manifest, ScheduleSpec,
+    SettingsError, SidecarRequest,
 };
 
 /// `Registry::shutdown_plugins` が 1 プラグインの `JoinHandle` を待つ上限。
@@ -121,6 +122,23 @@ pub struct DashboardInfo {
     pub resolved: bool,
 }
 
+/// スケジュール 1 件の RPC 応答用スナップショット(`PluginInfo::schedules` 用)。
+///
+/// `next` は表示用の**近似値**である点に注意: 真の発火スケジュール
+/// (`ScheduleState`)はプラグイン専用スレッドが所有しており、ここへは共有
+/// しない(タスクブリーフの設計判断: スレッドをまたいで `ScheduleState` を
+/// 共有する複雑さを避ける)。代わりに `plugins/list` が呼ばれるたびに
+/// `ScheduleState::new(&manifest.schedules, Local::now())` で**独立に作り
+/// 直し**、そこから「今から」の次回発火時刻を求める。cron 系は壁時計から
+/// 一意に決まるため厳密に一致するが、interval 系はプラグインスレッド側の
+/// 実際の発火起点(スレッド開始時刻起点)とはズレうる近似値になる。
+#[derive(Debug, Clone)]
+pub struct ScheduleInfo {
+    pub name: String,
+    pub spec: ScheduleSpec,
+    pub next: chrono::DateTime<chrono::Local>,
+}
+
 /// RPC 応答用のプラグイン情報スナップショット。
 pub struct PluginInfo {
     pub manifest: Manifest,
@@ -131,6 +149,7 @@ pub struct PluginInfo {
     pub sidecars: Vec<SidecarInfo>,
     pub filesystem: Vec<FilesystemInfo>,
     pub dashboard: Vec<DashboardInfo>,
+    pub schedules: Vec<ScheduleInfo>,
 }
 
 /// `control_sidecar` が指定できる操作。
@@ -507,6 +526,7 @@ impl Registry {
                 let sidecars = self.build_sidecar_infos(&manifest);
                 let filesystem = self.build_filesystem_infos(&manifest);
                 let dashboard = self.build_dashboard_infos(&manifest);
+                let schedules = Self::build_schedule_infos(&manifest);
                 PluginInfo {
                     manifest,
                     state,
@@ -516,6 +536,7 @@ impl Registry {
                     sidecars,
                     filesystem,
                     dashboard,
+                    schedules,
                 }
             })
             .collect()
@@ -656,6 +677,33 @@ impl Registry {
                     request: widget.clone(),
                     grant,
                     resolved,
+                }
+            })
+            .collect()
+    }
+
+    /// `manifest.schedules` から `ScheduleInfo` の一覧を組み立てる(宣言順)。
+    ///
+    /// ディスク I/O もロックも不要な純粋計算(`ScheduleInfo` のドキュメント
+    /// コメント参照): `ScheduleState::new` をこの場で作り直して壁時計
+    /// (`Local::now()`)からの次回発火時刻を求めるだけなので、`&self` すら
+    /// 使わない関連関数にしてある。
+    fn build_schedule_infos(manifest: &Manifest) -> Vec<ScheduleInfo> {
+        let state = ScheduleState::new(&manifest.schedules, chrono::Local::now());
+        state
+            .next_times()
+            .into_iter()
+            .map(|(name, next)| {
+                let spec = manifest
+                    .schedules
+                    .iter()
+                    .find(|s| s.name == name)
+                    .map(|s| s.spec.clone())
+                    .expect("next_times names must come from manifest.schedules");
+                ScheduleInfo {
+                    name: name.to_string(),
+                    spec,
+                    next,
                 }
             })
             .collect()
@@ -1944,6 +1992,92 @@ pub(crate) mod tests {
             }],
             schedules: vec![],
         }
+    }
+
+    /// `[[schedule]]` を 2 件(interval・cron)持つプラグイン `scheduler-plugin`。
+    fn manifest_with_schedule(id: &str) -> Manifest {
+        use crate::plugin::manifest::ScheduleRequest;
+        Manifest {
+            id: id.to_string(),
+            name: id.to_string(),
+            version: "0.1.0".into(),
+            description: String::new(),
+            entry: "plugin.wasm".into(),
+            events: vec![],
+            settings: vec![],
+            capabilities: vec![],
+            sidecars: vec![],
+            filesystem: vec![],
+            bus: vec![],
+            dashboard: vec![],
+            schedules: vec![
+                ScheduleRequest {
+                    name: "flush".into(),
+                    spec: ScheduleSpec::IntervalSeconds(60),
+                },
+                ScheduleRequest {
+                    name: "daily".into(),
+                    spec: ScheduleSpec::Cron("0 9 * * *".to_string()),
+                },
+            ],
+        }
+    }
+
+    /// `[[schedule]]` を 2 件持つプラグインだけを載せた `Registry`。
+    pub(crate) fn test_registry_with_schedule() -> Registry {
+        let registry = empty_registry();
+        registry.push(PluginEntry {
+            manifest: manifest_with_schedule("scheduler-plugin"),
+            state: PluginState::Running,
+            settings_json: Arc::new(Mutex::new("{}".to_string())),
+            capabilities_json: Arc::new(Mutex::new(crate::plugin::host::capabilities_json_string(
+                &[],
+            ))),
+            sidecars_json: Arc::new(Mutex::new("[]".to_string())),
+            filesystem_json: Arc::new(Mutex::new("[]".to_string())),
+            bus_json: Arc::new(Mutex::new("[]".to_string())),
+        });
+        registry
+    }
+
+    #[test]
+    fn list_reports_schedules_with_name_spec_and_next() {
+        let registry = test_registry_with_schedule();
+        let infos = registry.list();
+        assert_eq!(infos.len(), 1);
+        let schedules = &infos[0].schedules;
+        assert_eq!(schedules.len(), 2);
+
+        assert_eq!(schedules[0].name, "flush");
+        assert_eq!(schedules[0].spec, ScheduleSpec::IntervalSeconds(60));
+        assert!(schedules[0].next > chrono::Local::now());
+
+        assert_eq!(schedules[1].name, "daily");
+        assert_eq!(
+            schedules[1].spec,
+            ScheduleSpec::Cron("0 9 * * *".to_string())
+        );
+        assert!(schedules[1].next > chrono::Local::now());
+    }
+
+    #[test]
+    fn list_reports_empty_schedules_array_when_none_declared() {
+        let registry = empty_registry();
+        registry.push(PluginEntry {
+            manifest: manifest_with_dashboard("no-schedule-plugin"),
+            state: PluginState::Running,
+            settings_json: Arc::new(Mutex::new("{}".to_string())),
+            capabilities_json: Arc::new(Mutex::new(crate::plugin::host::capabilities_json_string(
+                &[],
+            ))),
+            sidecars_json: Arc::new(Mutex::new("[]".to_string())),
+            filesystem_json: Arc::new(Mutex::new("[]".to_string())),
+            bus_json: Arc::new(Mutex::new("[]".to_string())),
+        });
+
+        let infos = registry.list();
+        assert_eq!(infos.len(), 1);
+        assert!(infos[0].schedules.is_empty());
     }
 
     #[test]

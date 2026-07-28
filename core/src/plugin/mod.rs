@@ -19,11 +19,12 @@ pub use grants::{GrantState, GrantsError, GrantsStore};
 pub use host::PluginHost;
 pub use manifest::{
     load_manifest, matches_event, BusRequest, CapabilityRequest, DashboardWidget, FilesystemMode,
-    FilesystemRequest, Manifest, ManifestError, SettingField, SidecarRequest, WidgetSize,
+    FilesystemRequest, Manifest, ManifestError, ScheduleRequest, ScheduleSpec, SettingField,
+    SidecarRequest, WidgetSize,
 };
 pub use registry::{
-    FilesystemInfo, PluginEntry, PluginInfo, PluginState, Registry, RegistryError, SidecarAction,
-    SidecarInfo,
+    FilesystemInfo, PluginEntry, PluginInfo, PluginState, Registry, RegistryError, ScheduleInfo,
+    SidecarAction, SidecarInfo,
 };
 pub use runner::start_plugins;
 pub use settings::{SettingsError, SettingsStore};

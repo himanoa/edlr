@@ -170,6 +170,8 @@ pub fn handle_rpc_with_drivers(
                     let bus = registry.bus(&info.manifest.id).unwrap_or_default();
                     value["bus"] = bus_result_json(&bus)["bus"].clone();
                     value["dashboard"] = dashboard_result_json(&info.dashboard)["dashboard"].clone();
+                    value["schedules"] =
+                        schedules_result_json(&info.schedules)["schedules"].clone();
                     match info.state {
                         crate::plugin::PluginState::Running => {
                             value["state"] = serde_json::json!("running");
@@ -590,6 +592,28 @@ fn bus_result_json(bus: &[crate::plugin::registry::BusInfo]) -> serde_json::Valu
     serde_json::json!({ "bus": items })
 }
 
+/// `plugins/list` の各要素の `schedules` フィールドに使う JSON:
+/// `{ "schedules": [...] }`(他の `*_result_json` と同じ流儀)。
+///
+/// `spec` は `ScheduleSpec::display_string()`(`"every {n}s"` /
+/// `"cron: {expr}"`)、`next` は ISO8601(ローカル時刻・オフセット付き)。
+/// `next` は `Registry::ScheduleInfo` のドキュメントコメントが説明する
+/// とおり表示用の近似値であり、真のスケジュール状態(プラグインスレッドの
+/// `ScheduleState`)そのものではない。
+fn schedules_result_json(schedules: &[crate::plugin::registry::ScheduleInfo]) -> serde_json::Value {
+    let items: Vec<serde_json::Value> = schedules
+        .iter()
+        .map(|info| {
+            serde_json::json!({
+                "name": info.name,
+                "spec": info.spec.display_string(),
+                "next": info.next.to_rfc3339(),
+            })
+        })
+        .collect();
+    serde_json::json!({ "schedules": items })
+}
+
 /// `params` から `key` の文字列値を取り出す。無い・文字列でない場合は
 /// `Err`(RPC 層の流儀どおり panic しない)。
 fn param_str<'a>(params: &'a serde_json::Value, key: &str) -> Result<&'a str, String> {
@@ -1008,6 +1032,34 @@ mod tests {
         assert_eq!(bus["subscribe"][0], "current-system");
         assert_eq!(bus["granted"], false);
         assert_eq!(bus["resolved"], true);
+    }
+
+    #[test]
+    fn plugins_list_includes_schedules_with_spec_strings_and_next() {
+        let registry = crate::plugin::registry::tests::test_registry_with_schedule();
+        let result =
+            handle_rpc_with_drivers(Some(&registry), None, "plugins/list", &serde_json::json!({}))
+                .unwrap();
+        let schedules = &result["plugins"][0]["schedules"];
+        assert_eq!(schedules[0]["name"], "flush");
+        assert_eq!(schedules[0]["spec"], "every 60s");
+        assert_eq!(schedules[1]["name"], "daily");
+        assert_eq!(schedules[1]["spec"], "cron: 0 9 * * *");
+        // `next` は ISO8601 文字列としてパースできること(具体的な時刻値は
+        // 呼び出しごとの `Local::now()` に依存するのでここでは検証しない --
+        // `plugin::schedule::tests` / `plugin::registry::tests` が発火計算
+        // 自体をテスト済み)。
+        assert!(chrono::DateTime::parse_from_rfc3339(schedules[0]["next"].as_str().unwrap())
+            .is_ok());
+    }
+
+    #[test]
+    fn plugins_list_reports_empty_schedules_array_when_none_declared() {
+        let (registry, _drivers) = test_registries();
+        let result =
+            handle_rpc_with_drivers(Some(&registry), None, "plugins/list", &serde_json::json!({}))
+                .unwrap();
+        assert_eq!(result["plugins"][0]["schedules"], serde_json::json!([]));
     }
 
     /// 上のテストの裏付け: `registry` 自身が保持する `DriverRegistry`

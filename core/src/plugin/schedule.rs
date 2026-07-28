@@ -145,6 +145,19 @@ impl ScheduleState {
         }
     }
 
+    /// 各スケジュールの `(name, 次回発火時刻)` を宣言順に返す。
+    ///
+    /// `plugins/list` の RPC 応答(`registry.rs`)が「表示用の次回発火時刻」を
+    /// 組み立てるための純粋な読み取り専用アクセサ。この型自身は壁時計を
+    /// 読まないので、呼び出し側が現在時刻を渡す(`until_next`/`take_due` と
+    /// 同じ流儀)。
+    pub(crate) fn next_times(&self) -> Vec<(&str, DateTime<Local>)> {
+        self.entries
+            .iter()
+            .map(|e| (e.name.as_str(), e.next))
+            .collect()
+    }
+
     /// 次の発火までの残り時間(スケジュールが無ければ None)。
     pub fn until_next(&self, now: DateTime<Local>) -> Option<Duration> {
         self.entries
@@ -298,6 +311,28 @@ mod tests {
         assert_eq!(s.take_due(t1), Some("a".into()));
         assert_eq!(s.take_due(t1), Some("b".into()));
         assert_eq!(s.take_due(t1), None);
+    }
+
+    #[test]
+    fn next_times_reports_each_schedules_next_fire_in_declaration_order() {
+        let t0 = Local.with_ymd_and_hms(2026, 7, 28, 8, 58, 0).unwrap();
+        let s = ScheduleState::new(
+            &[
+                req("flush", ScheduleSpec::IntervalSeconds(60)),
+                req("daily", ScheduleSpec::Cron("0 9 * * *".to_string())),
+            ],
+            t0,
+        );
+
+        let next = s.next_times();
+        assert_eq!(next.len(), 2);
+        assert_eq!(next[0].0, "flush");
+        assert_eq!(next[0].1, t0 + chrono::Duration::seconds(60));
+        assert_eq!(next[1].0, "daily");
+        assert_eq!(
+            next[1].1,
+            Local.with_ymd_and_hms(2026, 7, 28, 9, 0, 0).unwrap()
+        );
     }
 
     #[test]
