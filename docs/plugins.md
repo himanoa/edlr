@@ -1,0 +1,157 @@
+# プラグイン
+
+`edlr` は起動時に `--plugins-dir` 配下を走査し、見つかった各プラグイン(WASM
+コンポーネント)をロードして専用スレッドで駆動する。プラグインホスト
+(wasmtime エンジン)の初期化に失敗した場合はその旨を warn ログに出し、
+プラグイン機能なしでデーモン本体は動き続ける。
+
+capability(HTTP 通信・サイドカープロセス・ファイルアクセス)については
+[capabilities.md](capabilities.md)、ドライバとのバス連携については
+[drivers.md](drivers.md) を参照。
+
+## WIT インターフェース
+
+インターフェースは `core/wit/plugin.wit` の 2 つの world:
+
+- **`plugin`** — ホスト側(`bindgen!`)が使う。edlr が提供する 4 インターフェース
+  (`host-log` / `host-settings` / `driver-http` / `driver-process`)と、プラグインが
+  export する `init` / `on-event` だけを宣言する
+- **`plugin-guest`** — **プラグイン(ゲスト)がビルド時に対象にする world**。
+  `plugin` に WASI の import 一式(`wasi:cli/imports@0.2.0`)を足したもの。Go/TinyGo の
+  標準ライブラリはプラグインが何も呼ばなくても WASI を import するため、`plugin` を
+  直接対象にするとコンポーネント化が失敗する。Rust の `wasm32-wasip2` ターゲットは
+  リンカが WASI import を自動で足すのでどちらでもビルドできる
+
+WASI 自体はホストが `wasmtime_wasi` の `add_to_linker_sync` で提供するため、
+`plugin-guest` でビルドしたコンポーネントはそのままロードできる。
+
+### WIT パッケージのバージョン
+
+WIT パッケージは `edlr:plugin@0.3.0`。
+
+- `0.1.0` → `0.2.0`: Journal 読み取り位置の永続化に伴い、`event` レコードへ
+  `replay: bool` を追加した ABI 破壊的変更
+- `0.2.0` → `0.3.0`: ドライバ機能の追加(`bus` / `bus-host` / `bus-types`
+  インターフェースと `driver` / `driver-guest` world の新設、`plugin` world への
+  `bus` import 追加)に伴う ABI 破壊的変更
+
+**旧 world でビルド済みのプラグインは新しいホストへのロードに失敗する**。
+プラグインを新しい `core/wit` に対して再ビルドすること(Rust は
+`wit_bindgen::generate!` がパス指定なら自動追随、Go/TinyGo は
+`wit-bindgen-go generate` での `gen/` 再生成が必要)。
+
+## plugins-dir のレイアウト
+
+    <plugins-dir>/
+      <id>/
+        manifest.toml
+        plugin.wasm   (manifest.toml の entry で指すファイル名。任意の名前でよい)
+
+- ディレクトリ名(`<id>`)は `manifest.toml` の `id` と一致していなければならない
+- `id` は `[a-z0-9-]+` にマッチする必要がある
+
+`manifest.toml` の主なフィールド:
+
+| フィールド | 必須 | 説明 |
+| --- | --- | --- |
+| `id` | ✓ | プラグイン ID。ディレクトリ名と一致必須 |
+| `name` | ✓ | 表示名 |
+| `version` | ✓ | バージョン文字列 |
+| `description` | | 説明文(省略可) |
+| `entry` | ✓ | `plugins-dir/<id>/` からの相対パスで wasm ファイルを指す |
+| `events` | | 購読するイベント名の配列。`"*"` は全 journal イベント、`"status"` は Status.json 更新にマッチ(省略時は空 = 何も受け取らない) |
+| `[[settings]]` | | 設定項目。`type` は `boolean` / `string` / `number` / `select` のいずれかで、それぞれ `key` / `label` / `default`(select はさらに `options`)を持つ |
+| `[[capabilities]]` | | HTTP 通信の要求([capabilities.md](capabilities.md#capabilitydriver-http)) |
+| `[[sidecar]]` | | サイドカープロセスの要求([capabilities.md](capabilities.md#サイドカープロセスdriver-process)) |
+| `[[filesystem]]` | | ファイルアクセスの要求([capabilities.md](capabilities.md#ファイルアクセスdriver-fs)) |
+| `[[bus]]` | | ドライバとのバス接続の要求([drivers.md](drivers.md#プラグイン側の-bus-書式と承認フロー)) |
+
+設定値は `<settings-dir>/<id>.json` に保存され、未保存キーは manifest の
+`default` にフォールバックする。
+
+## hello-logger サンプルのビルドと配置
+
+`examples/plugins/hello-logger` は購読したイベントをそのまま `host-log` へ
+ログ出力するサンプルプラグイン。
+
+    rustup target add wasm32-wasip2   # 未追加なら
+    cd examples/plugins/hello-logger
+    cargo build --release --target wasm32-wasip2
+
+    # plugins-dir に配置する
+    mkdir -p ~/.config/edlr/plugins/hello-logger
+    cp target/wasm32-wasip2/release/hello_logger.wasm \
+       ~/.config/edlr/plugins/hello-logger/plugin.wasm
+    cat > ~/.config/edlr/plugins/hello-logger/manifest.toml <<'EOF'
+    id = "hello-logger"
+    name = "Hello Logger"
+    version = "0.1.0"
+    entry = "plugin.wasm"
+    events = ["FSDJump"]
+
+    [[settings]]
+    key = "enabled"
+    label = "Enabled"
+    type = "boolean"
+    default = true
+    EOF
+
+    cargo run -p edlr-core --bin edlr -- --journal-dir <PATH>
+
+`--plugins-dir` / `--settings-dir` を省略した場合、既定はそれぞれ
+`$XDG_CONFIG_HOME/edlr/plugins` / `$XDG_CONFIG_HOME/edlr/settings`
+(`XDG_CONFIG_HOME` 未設定なら `~/.config/edlr/...`)。`--plugins-dir` が
+指すディレクトリが存在しなくてもエラーにはならず、プラグイン 0 件で起動する。
+
+    cargo run -p edlr-core --bin edlr -- \
+      --journal-dir <PATH> \
+      --plugins-dir <PATH> \
+      --settings-dir <PATH>
+
+## プラグイン設定 RPC
+
+`/ws` は journal/status イベントの配信と同じ WebSocket 接続上で、プラグイン
+一覧取得・設定の読み書きを行う RPC を多重化している。
+
+リクエストは次の形式で送る:
+
+    {"type": "rpc", "id": <数値>, "method": "<method>", "params": {...}}
+
+レスポンスは成功時 `rpc-result`、失敗時 `rpc-error`(`error` は文字列)で、
+`id` はリクエストの値をそのまま返す:
+
+    {"type": "rpc-result", "id": <同じ id>, "result": {...}}
+    {"type": "rpc-error", "id": <同じ id>, "error": "<message>"}
+
+不正な JSON や `type: "rpc"` 以外のメッセージは黙って無視され、接続は切れない。
+
+サポートするメソッド:
+
+- **`plugins/list`**(`params` 不要) — `plugins-dir` のパスと、ロード済み全プラグインの
+  状態を返す。
+
+      result: {
+        "pluginsDir": "<path>",
+        "plugins": [
+          {
+            "id": "hello-logger", "name": "Hello Logger", "version": "0.1.0",
+            "description": "...",
+            "state": "running" | "disabled",
+            "reason": "<disabled のときのみ>",
+            "settings": [ /* manifest.toml の [[settings]] 定義 */ ],
+            "values": { "enabled": true, ... }  /* 現在の設定値 */
+          }
+        ]
+      }
+
+- **`plugins/get-settings`** `{"plugin": "<id>"}` → 現在の設定値オブジェクト
+  (`{"enabled": true, ...}`)。未知の `plugin` は `rpc-error`。
+- **`plugins/set-settings`** `{"plugin": "<id>", "values": {"<key>": <value>, ...}}`
+  → 更新後の設定値オブジェクト。未知の `plugin` / 未知の `key` は
+  `rpc-error` になり、値は変更されない。設定は `<settings-dir>/<id>.json`
+  に永続化され、稼働中のプラグインは次に受け取るイベントから新しい値を
+  読み取る(再起動不要)。
+
+UI の Plugins 画面はこの 3 メソッドのみでプラグイン一覧・設定フォームを
+描画しており、localStorage やモックデータには依存していない。設定変更は
+即座にデーモンへ送られ、`<settings-dir>/<id>.json` に反映される。

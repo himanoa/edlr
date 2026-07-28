@@ -243,8 +243,8 @@ impl Bus {
                     // 単純な実装になっている。`retain = false` のトピックは
                     // `get` に読み出しのフォールバックが無いため、詰まった
                     // 購読プラグインはこの間の更新を(古いものだけでなく)
-                    // 一切受け取れない。詳細は README「キュー方針の非対称」
-                    // 節を参照。
+                    // 一切受け取れない。詳細は docs/drivers.md
+                    // 「キュー方針の非対称」節を参照。
                 }
                 Err(TrySendError::Disconnected(_)) => {
                     stale_indices.push(index);
