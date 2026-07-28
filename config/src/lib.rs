@@ -41,6 +41,22 @@ pub const SIDECAR_SHUTDOWN_WORST_CASE_INSTANCES: u64 = 20;
 /// ため、`SIDECAR_SHUTDOWN_GRACE_SECS` と同じくここで共有する。
 pub const DRIVER_CALL_DEADLINE_SECS: u64 = 30;
 
+/// プラグインスレッドが `PluginWork::Stop` を受け取ってから
+/// `PluginInstance::call_on_stop` を呼び終えるまでを `Registry::shutdown_plugins`
+/// が 1 プラグインあたり待つ上限(秒)。
+///
+/// `edlr-core` の `PluginInstance::CALL_DEADLINE`(2 秒)に、スレッドが
+/// `work_rx` からメッセージを受け取ってから実際に呼び出しに入るまでの
+/// スケジューリング遅延分の余裕(3 秒)を足した値。`CALL_DEADLINE` を
+/// 変更した場合はここも合わせて見直すこと(値そのものを共有定数にして
+/// いないのは、`edlr_config` を `edlr-core` に依存させたくないため --
+/// `SIDECAR_SHUTDOWN_GRACE_SECS` と同じ理由)。
+///
+/// `edlr-core`(`plugin::registry::Registry::shutdown_plugins` の join
+/// タイムアウト)と `edlr-ui`(`daemon::STOP_GRACE` のアサーション)の両方が
+/// 参照する。
+pub const PLUGIN_ON_STOP_GRACE_SECS: u64 = 5;
+
 /// 既知の Journal ディレクトリを探す。現状は Proton 既定パスのみ。
 pub fn default_journal_dir(home: &Path) -> Option<PathBuf> {
     let candidate = home.join(PROTON_JOURNAL_DIR);

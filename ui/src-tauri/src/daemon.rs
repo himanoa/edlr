@@ -31,22 +31,39 @@ pub const DAEMON_ADDR: &str = "127.0.0.1:8137";
 /// 呼び出しが `DriverInstance::CALL_DEADLINE`(= `DRIVER_CALL_DEADLINE_SECS`)
 /// に達して戻るまで、次のシャットダウン処理へ進めない。したがってデーモン
 /// 全体の後始末にかかる最悪時間は「サイドカーの逐次後始末」だけでなく、この
-/// ドライバの呼び出し期限 1 回分も上乗せして見積もる必要がある。この関係は
-/// 下のコンパイル時アサーションで固定してある: いずれかの定数だけが将来
-/// 変更されても、この関係が崩れればビルドが失敗する。デーモンが早く終了した
-/// 場合、`stop_child_gracefully` は `try_wait` のポーリングで即座に戻る
+/// ドライバの呼び出し期限 1 回分も上乗せして見積もる必要がある。
+///
+/// **Task 5 で `Registry::shutdown_plugins` 分を追加**: デーモンの shutdown
+/// シーケンスは(`stop_all_sidecars`/ドライバの後始末に加えて)全 Running
+/// プラグインへ `PluginWork::Stop` を送り、それぞれのスレッドの終了(=
+/// on-stop 呼び出しの完了)を 1 件あたり `PLUGIN_ON_STOP_GRACE_SECS` 秒を
+/// 上限に**逐次**待つ(`Registry::shutdown_plugins` は `JoinHandle` を
+/// 1 つずつポーリングする実装で、並行には待たない)。したがってこちらも
+/// サイドカーの後始末と同じ形("1 件あたりの猶予" ×
+/// "想定インスタンス数上限")で見積もり、`SIDECAR_SHUTDOWN_WORST_CASE_INSTANCES`
+/// をプラグイン数の上限としても使い回す(edlr は小規模なローカルプラグイン
+/// 向けという前提はサイドカーもプラグイン自体も同じであるため、別の定数を
+/// 新設するより既存の想定を再利用する方が一貫している)。
+///
+/// この関係は下のコンパイル時アサーションで固定してある: いずれかの定数だけが
+/// 将来変更されても、この関係が崩れればビルドが失敗する。デーモンが早く終了
+/// した場合、`stop_child_gracefully` は `try_wait` のポーリングで即座に戻る
 /// (この猶予いっぱい待つのは、デーモンが本当にハングしている最悪ケースのみ)。
-pub const STOP_GRACE: Duration = Duration::from_secs(95);
+pub const STOP_GRACE: Duration = Duration::from_secs(200);
 
 const _: () = assert!(
     STOP_GRACE.as_secs()
         > edlr_config::SIDECAR_SHUTDOWN_GRACE_SECS
             * edlr_config::SIDECAR_SHUTDOWN_WORST_CASE_INSTANCES
-            + edlr_config::DRIVER_CALL_DEADLINE_SECS,
+            + edlr_config::DRIVER_CALL_DEADLINE_SECS
+            + edlr_config::PLUGIN_ON_STOP_GRACE_SECS
+                * edlr_config::SIDECAR_SHUTDOWN_WORST_CASE_INSTANCES,
     "STOP_GRACE must strictly exceed the daemon's worst-case sequential sidecar \
-     shutdown time plus one driver call deadline (a driver blocked in an HTTP call \
-     cannot answer a stop request until its deadline elapses) -- see STOP_GRACE's \
-     doc comment."
+     shutdown time, plus one driver call deadline (a driver blocked in an HTTP call \
+     cannot answer a stop request until its deadline elapses), plus the worst-case \
+     sequential plugin on-stop shutdown time (Registry::shutdown_plugins joins one \
+     plugin thread at a time, up to PLUGIN_ON_STOP_GRACE_SECS each) -- see \
+     STOP_GRACE's doc comment."
 );
 
 /// 子プロセスを SIGTERM で止め、`grace` 待って死ななければ SIGKILL に
@@ -147,20 +164,30 @@ mod tests {
     /// compile-time assertion next to `STOP_GRACE` in a form that shows up in
     /// the test suite too, and pins the actual numbers rather than just the
     /// relation, so a change to either shared constant is visible here.
+    ///
+    /// Task 5 extends the worst case with `Registry::shutdown_plugins`'s
+    /// sequential per-plugin on-stop join (`PLUGIN_ON_STOP_GRACE_SECS` ×
+    /// `SIDECAR_SHUTDOWN_WORST_CASE_INSTANCES`, reusing the same instance
+    /// ceiling as the sidecar term -- see `STOP_GRACE`'s doc comment for why).
     #[test]
     fn stop_grace_exceeds_the_daemons_worst_case_sequential_shutdown_time() {
         let daemon_worst_case_secs = edlr_config::SIDECAR_SHUTDOWN_GRACE_SECS
             * edlr_config::SIDECAR_SHUTDOWN_WORST_CASE_INSTANCES
-            + edlr_config::DRIVER_CALL_DEADLINE_SECS;
+            + edlr_config::DRIVER_CALL_DEADLINE_SECS
+            + edlr_config::PLUGIN_ON_STOP_GRACE_SECS
+                * edlr_config::SIDECAR_SHUTDOWN_WORST_CASE_INSTANCES;
         assert!(
             STOP_GRACE.as_secs() > daemon_worst_case_secs,
             "STOP_GRACE ({STOP_GRACE:?}) must strictly exceed the daemon's worst-case \
-             sequential sidecar shutdown time plus one driver call deadline \
+             sequential sidecar shutdown time plus one driver call deadline plus the \
+             worst-case sequential plugin on-stop shutdown time \
              ({daemon_worst_case_secs}s = SIDECAR_SHUTDOWN_GRACE_SECS * \
-             SIDECAR_SHUTDOWN_WORST_CASE_INSTANCES + DRIVER_CALL_DEADLINE_SECS); \
+             SIDECAR_SHUTDOWN_WORST_CASE_INSTANCES + DRIVER_CALL_DEADLINE_SECS + \
+             PLUGIN_ON_STOP_GRACE_SECS * SIDECAR_SHUTDOWN_WORST_CASE_INSTANCES); \
              otherwise Tauri can SIGKILL the daemon before it has finished stopping \
-             every sidecar (or before a driver blocked in a call can respond), \
-             orphaning any that ignore SIGTERM"
+             every sidecar (or before a driver blocked in a call can respond, or \
+             before every plugin's on-stop hook has run), orphaning any sidecars \
+             that ignore SIGTERM"
         );
     }
 

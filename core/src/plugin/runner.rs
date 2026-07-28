@@ -351,7 +351,7 @@ fn load_and_run_plugin(
     let (work_tx, work_rx) = std_mpsc::sync_channel::<PluginWork>(PLUGIN_WORK_QUEUE_CAPACITY);
     let (ready_tx, ready_rx) = std_mpsc::channel::<PluginState>();
 
-    thread::spawn({
+    let thread_handle = thread::spawn({
         let host = host.clone();
         let manifest = manifest.clone();
         let settings_json = settings_json.clone();
@@ -395,6 +395,15 @@ fn load_and_run_plugin(
     });
 
     if running {
+        // `shutdown_plugins`(デーモンの正常終了)がこのプラグインへ
+        // `PluginWork::Stop` を送り、スレッドの終了を待てるように、送信側の
+        // 複製とスレッドの `JoinHandle` を registry に登録する。Disabled
+        // (=このブロックに入らない)プラグインのスレッドは、この時点で既に
+        // `init` 失敗を `ready_tx` へ送って return 済みなので、登録せずに
+        // `thread_handle` を(join せずに)そのまま drop してよい -- スレッド
+        // 自体はもう終了しているか、終了する寸前でしかない。
+        registry.register_plugin_thread(&manifest.id, work_tx.clone(), thread_handle);
+
         spawn_event_subscriber(manifest.clone(), router.subscribe(), work_tx.clone());
 
         // `[[bus]]` の `subscribe` トピックがあれば、購読を登録して配信を
@@ -552,6 +561,12 @@ fn run_plugin_thread(
                     PluginWork::Message(delivery) => instance
                         .call_on_message(&delivery.driver_id, &delivery.topic, &delivery.payload)
                         .map_err(|e| format!("on-message call failed: {e}")),
+                    // `next_action` は `PluginWork::Stop` を `LoopAction::Handle`
+                    // ではなく専用の `LoopAction::Stop` に振り分けるので、ここに
+                    // 来ることはない。
+                    PluginWork::Stop => unreachable!(
+                        "next_action routes PluginWork::Stop to LoopAction::Stop, not Handle"
+                    ),
                 };
                 if let Err(reason) = result {
                     disable_and_break!(reason);
@@ -570,6 +585,19 @@ fn run_plugin_thread(
             }
             LoopAction::Idle => {}
             LoopAction::Exit => break,
+            LoopAction::Stop => {
+                // デーモンの正常終了シーケンス(`Registry::shutdown_plugins`)
+                // から送られた `PluginWork::Stop`。もう止まる以上、失敗しても
+                // disable する意味が無いので warn ログのみに留め、trap 用の
+                // `disable_and_break!` は使わない。
+                if let Err(e) = instance.call_on_stop() {
+                    tracing::warn!(
+                        plugin_id = %manifest.id,
+                        "on-stop call failed during shutdown: {e}"
+                    );
+                }
+                break;
+            }
         }
     }
 }
@@ -596,10 +624,19 @@ fn fire_all_due(state: &mut ScheduleState, instance: &mut PluginInstance) -> Res
 /// プラグイン専用スレッドが処理する仕事。journal イベントとバスの配信を
 /// 1 本のキューに混ぜることで、wasm 呼び出しが 1 スレッドに直列化される
 /// 性質(`PluginInstance` が `Send` を気にしなくてよい根拠)を保つ。
+///
+/// `Stop`(Task 5)はデーモンの正常終了シーケンス
+/// (`Registry::shutdown_plugins`)専用で、`Event`/`Message` と同じ 1 本の
+/// キューに混ぜることで「仕事を全部処理し終えてから止める」のではなく
+/// 「今の仕事のあとに来た Stop で速やかに止める」という程度の順序保証を
+/// 得る(`work_tx` は有界なので、詰まっている間は他の仕事同様 Stop も
+/// 送れないことがある -- `Registry::shutdown_plugins` が `try_send` の
+/// 失敗を warn ログにして諦める理由)。
 #[derive(Debug)]
-enum PluginWork {
+pub(crate) enum PluginWork {
     Event(Arc<Event>),
     Message(Delivery),
+    Stop,
 }
 
 /// `run_plugin_thread` のメインループが「次に何をするか」を決めるテスト
@@ -608,14 +645,18 @@ enum PluginWork {
 /// そのまま受け取って純粋に判定するだけの関数として切り出す。
 ///
 /// **仕事が発火より優先**: `Ok(work)` は `due` の値に関わらず常に
-/// `Handle` になる。期限超過分の発火はループ側が各 wasm 呼び出しの直後に
-/// 改めて `take_due` を呼んで拾う(このタスクの仕様「ブロック中に過ぎた
-/// 発火は後で 1 回」)。
+/// `Handle`(`work` が `Stop` なら `Stop`)になる。期限超過分の発火は
+/// ループ側が各 wasm 呼び出しの直後に改めて `take_due` を呼んで拾う
+/// (このタスクの仕様「ブロック中に過ぎた発火は後で 1 回」)。
 ///
-/// **`Timeout` + due なし**: まだ `Stop`(Task 5)が無いこのタスクの時点
-/// では、単に「何もせずループを継続する(次の待ちへ)」ことを表す
-/// `Idle` を返す。Task 5 で `PluginWork::Stop` が増えたら、この関数の
-/// シグネチャ・分岐に `Stop` ケースを足すだけで済む形にしてある。
+/// **`Timeout` + due なし**: 単に「何もせずループを継続する(次の待ちへ)」
+/// ことを表す `Idle` を返す。
+///
+/// **`Ok(PluginWork::Stop)` → `LoopAction::Stop`**(Task 5): `Handle` に
+/// 混ぜず専用の分岐にしてあるのは、ループ側が「on-stop を呼んでスレッドを
+/// 終了する」という `Handle`/`Fire` とは異なる後始末をする必要があるため
+/// (`disable_and_break!` の trap 分岐とも別 -- on-stop の失敗は disable
+/// する意味が無い。もう止まるので)。
 #[derive(Debug)]
 enum LoopAction {
     /// 通常の作業(journal イベント / バス配信)を処理する。
@@ -626,6 +667,8 @@ enum LoopAction {
     Idle,
     /// `work_rx` の送信側が全て閉じた。スレッドを終了する。
     Exit,
+    /// `PluginWork::Stop` を受け取った。on-stop を呼んでスレッドを終了する。
+    Stop,
 }
 
 fn next_action(
@@ -633,6 +676,7 @@ fn next_action(
     due: Option<String>,
 ) -> LoopAction {
     match recv {
+        Ok(PluginWork::Stop) => LoopAction::Stop,
         Ok(work) => LoopAction::Handle(work),
         Err(std_mpsc::RecvTimeoutError::Timeout) => match due {
             Some(name) => LoopAction::Fire(name),
@@ -1150,6 +1194,18 @@ mod tests {
         fn disconnected_exits() {
             let action = next_action(Err(std_mpsc::RecvTimeoutError::Disconnected), None);
             assert!(matches!(action, LoopAction::Exit));
+        }
+
+        /// Task 5: `PluginWork::Stop` は `Handle` に混ぜず専用の `Stop` へ
+        /// 振り分けられる(`due` が同時に立っていても優先度は変わらない --
+        /// そもそも `Stop` はスレッド終了そのものなので優先度の概念が無い)。
+        #[test]
+        fn stop_work_is_routed_to_loop_action_stop() {
+            let action = next_action(Ok(PluginWork::Stop), None);
+            assert!(matches!(action, LoopAction::Stop));
+
+            let action_with_due = next_action(Ok(PluginWork::Stop), Some("flush".to_string()));
+            assert!(matches!(action_with_due, LoopAction::Stop));
         }
     }
 }
