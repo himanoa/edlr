@@ -21,7 +21,15 @@ enum Fire {
     Interval(chrono::Duration),
     /// cron 式(正規化前の 5 欄形式)。`cron::Schedule` は大きいため
     /// `Interval` とのサイズ差を抑えるべく Box で包む。
-    Cron(Box<cron::Schedule>),
+    ///
+    /// `clamp_warned` は「この cron の間隔クランプについて、既に
+    /// warn ログを出したか」を追跡する。間隔の詰まった cron 式は
+    /// 発火のたびにクランプされ得るため、毎回 warn すると発火のたびに
+    /// ログが出てスパムになる。スケジュールごとに 1 回だけ warn する。
+    Cron {
+        schedule: Box<cron::Schedule>,
+        clamp_warned: bool,
+    },
 }
 
 /// 1 スケジュールの実行時状態。
@@ -88,10 +96,14 @@ impl ScheduleState {
                     // 実質的に発火しない(パースできる無害なダミー式)。
                     cron::Schedule::from_str("0 0 0 1 1 * 2999").expect("dummy cron must parse")
                 });
-                let next = Self::next_cron_fire(&schedule, now);
+                let mut clamp_warned = false;
+                let next = Self::next_cron_fire(&req.name, &schedule, now, &mut clamp_warned);
                 Entry {
                     name: req.name.clone(),
-                    fire: Fire::Cron(Box::new(schedule)),
+                    fire: Fire::Cron {
+                        schedule: Box::new(schedule),
+                        clamp_warned,
+                    },
                     next,
                 }
             }
@@ -100,7 +112,16 @@ impl ScheduleState {
 
     /// cron の次回発火時刻を求め、`MIN_FIRE_INTERVAL` 未満なら
     /// `now + MIN_FIRE_INTERVAL` まで遅らせる(5 秒間隔へのクランプ)。
-    fn next_cron_fire(schedule: &cron::Schedule, now: DateTime<Local>) -> DateTime<Local> {
+    ///
+    /// クランプが発生した場合、`clamp_warned` がまだ false のときだけ
+    /// `tracing::warn!` を出し、以降は `clamp_warned` を true にして
+    /// 同じスケジュールでの毎発火の warn(ログスパム)を防ぐ。
+    fn next_cron_fire(
+        name: &str,
+        schedule: &cron::Schedule,
+        now: DateTime<Local>,
+        clamp_warned: &mut bool,
+    ) -> DateTime<Local> {
         let candidate = schedule.after(&now).next().unwrap_or_else(|| {
             // cron クレートの実装上まず起こらないが、念のため防御する。
             now + chrono::Duration::from_std(MIN_FIRE_INTERVAL).unwrap()
@@ -109,6 +130,15 @@ impl ScheduleState {
             + chrono::Duration::from_std(MIN_FIRE_INTERVAL)
                 .unwrap_or_else(|_| chrono::Duration::seconds(5));
         if candidate < min_next {
+            if !*clamp_warned {
+                tracing::warn!(
+                    schedule = %name,
+                    "cron-produced gap below the minimum fire interval; clamped to {}s \
+                     (further clamps for this schedule will not be logged)",
+                    MIN_FIRE_INTERVAL.as_secs()
+                );
+                *clamp_warned = true;
+            }
             min_next
         } else {
             candidate
@@ -134,13 +164,18 @@ impl ScheduleState {
         let idx = self.entries.iter().position(|e| e.next <= now)?;
         let entry = &mut self.entries[idx];
         let name = entry.name.clone();
-        entry.next = Self::advance_to_future(&entry.fire, entry.next, now);
+        entry.next = Self::advance_to_future(&name, &mut entry.fire, entry.next, now);
         Some(name)
     }
 
     /// どれだけ遅れていても、`next` を「now より未来の直近の発火時刻」まで
     /// 一気に進める(見逃した発火は 1 回に集約される)。
-    fn advance_to_future(fire: &Fire, next: DateTime<Local>, now: DateTime<Local>) -> DateTime<Local> {
+    fn advance_to_future(
+        name: &str,
+        fire: &mut Fire,
+        next: DateTime<Local>,
+        now: DateTime<Local>,
+    ) -> DateTime<Local> {
         match fire {
             Fire::Interval(interval) => {
                 let mut next = next;
@@ -150,7 +185,10 @@ impl ScheduleState {
                 }
                 next
             }
-            Fire::Cron(schedule) => Self::next_cron_fire(schedule, now),
+            Fire::Cron {
+                schedule,
+                clamp_warned,
+            } => Self::next_cron_fire(name, schedule, now, clamp_warned),
         }
     }
 }
@@ -241,5 +279,51 @@ mod tests {
         let t2 = Local.with_ymd_and_hms(2026, 7, 28, 9, 0, 0).unwrap();
         assert_eq!(s.take_due(t2), Some("daily".into()));
         assert_eq!(s.take_due(t2), None);
+    }
+
+    #[test]
+    fn take_due_returns_simultaneous_schedules_in_declaration_order() {
+        // 同一 interval の 2 件を用意し、同時に期限切れになるようにする。
+        // take_due は 1 回の呼び出しで 1 件だけ返すため、宣言順(a → b)で
+        // 決定的に返ることを確認する。
+        let t0 = Local.with_ymd_and_hms(2026, 7, 28, 0, 0, 0).unwrap();
+        let mut s = ScheduleState::new(
+            &[
+                req("a", ScheduleSpec::IntervalSeconds(60)),
+                req("b", ScheduleSpec::IntervalSeconds(60)),
+            ],
+            t0,
+        );
+        let t1 = t0 + chrono::Duration::seconds(60);
+        assert_eq!(s.take_due(t1), Some("a".into()));
+        assert_eq!(s.take_due(t1), Some("b".into()));
+        assert_eq!(s.take_due(t1), None);
+    }
+
+    #[test]
+    fn cron_gap_below_minimum_is_clamped_and_warns_once() {
+        // `ScheduleSpec::Cron` は 5 欄形式(分単位)のみを保持するため、
+        // 公開 API 経由では秒単位の詰まった間隔を作れない。ここでは
+        // `next_cron_fire` を直接呼び、7 欄形式(秒単位)で「毎秒発火」の
+        // cron を渡してクランプ経路を検証する。
+        let now = Local.with_ymd_and_hms(2026, 7, 28, 0, 0, 0).unwrap();
+        let schedule = cron::Schedule::from_str("* * * * * * *").expect("valid cron");
+        let mut clamp_warned = false;
+
+        let next1 = ScheduleState::next_cron_fire("tight-cron", &schedule, now, &mut clamp_warned);
+        // 毎秒発火(1 秒間隔)は MIN_FIRE_INTERVAL(5 秒)未満なのでクランプされる。
+        assert_eq!(
+            next1,
+            now + chrono::Duration::from_std(MIN_FIRE_INTERVAL).unwrap()
+        );
+        assert!(clamp_warned, "first clamp should mark clamp_warned");
+
+        // Fire::Cron は clamp_warned を発火状態として保持し続けるため
+        // (advance_to_future 経由で同じ &mut フラグに書き戻される)、
+        // 2 回目以降の呼び出しでは同じ結果へ変わらずクランプされつつ、
+        // フラグは true のまま(false に戻らない = 再度 warn しない)。
+        let next2 = ScheduleState::next_cron_fire("tight-cron", &schedule, now, &mut clamp_warned);
+        assert_eq!(next2, next1);
+        assert!(clamp_warned);
     }
 }
