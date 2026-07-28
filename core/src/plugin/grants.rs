@@ -66,6 +66,11 @@ struct SavedGrant {
     /// grant ファイルにはこのキーが無いため `default` で空マップになる。
     #[serde(default)]
     bus: std::collections::BTreeMap<String, SavedSidecarGrant>,
+    /// ダッシュボードウィジェット ID → その 1 件の承認状態。既存
+    /// (ダッシュボード導入前)の grant ファイルにはこのキーが無いため
+    /// `default` で空マップになる。
+    #[serde(default)]
+    dashboard: std::collections::BTreeMap<String, SavedSidecarGrant>,
 }
 
 /// サイドカー 1 件分の保存済み承認状態。
@@ -372,6 +377,74 @@ impl GrantsStore {
         self.write_saved(manifest, &saved)?;
 
         Ok(self.bus_state_locked(manifest, driver))
+    }
+
+    /// ダッシュボードウィジェット 1 件の承認状態。判定規則は `state()` と
+    /// 同じ(未保存 → 未承認 / fingerprint 不一致 → stale / 一致 → 保存値)。
+    pub fn dashboard_state(&self, manifest: &Manifest, widget: &str) -> GrantState {
+        let _guard = self.lock.lock().unwrap_or_else(|p| p.into_inner());
+        self.dashboard_state_locked(manifest, widget)
+    }
+
+    fn dashboard_state_locked(&self, manifest: &Manifest, widget: &str) -> GrantState {
+        let Some(current) = manifest.dashboard_fingerprint(widget) else {
+            return GrantState {
+                granted: false,
+                stale: false,
+            };
+        };
+        let Some(saved) = self.read_saved(manifest) else {
+            return GrantState {
+                granted: false,
+                stale: false,
+            };
+        };
+        let Some(entry) = saved.dashboard.get(widget) else {
+            return GrantState {
+                granted: false,
+                stale: false,
+            };
+        };
+        if entry.fingerprint != current {
+            return GrantState {
+                granted: false,
+                stale: true,
+            };
+        }
+        GrantState {
+            granted: entry.granted,
+            stale: false,
+        }
+    }
+
+    /// ダッシュボードウィジェット 1 件の承認/取消を保存する。manifest に
+    /// ない `widget` は no-op。
+    pub fn set_dashboard(
+        &self,
+        manifest: &Manifest,
+        widget: &str,
+        granted: bool,
+    ) -> Result<GrantState, GrantsError> {
+        let _guard = self.lock.lock().unwrap_or_else(|p| p.into_inner());
+
+        let Some(current) = manifest.dashboard_fingerprint(widget) else {
+            return Ok(GrantState {
+                granted: false,
+                stale: false,
+            });
+        };
+
+        let mut saved = self.read_saved(manifest).unwrap_or_default();
+        saved.dashboard.insert(
+            widget.to_string(),
+            SavedSidecarGrant {
+                granted,
+                fingerprint: current,
+            },
+        );
+        self.write_saved(manifest, &saved)?;
+
+        Ok(self.dashboard_state_locked(manifest, widget))
     }
 
     /// ドライバ用の grants ストア。ID 空間がプラグインと別なので、
@@ -1030,6 +1103,62 @@ mod tests {
         store.set_bus(&manifest, "ed-state", true).unwrap();
         assert!(tmp.path().join("drivers").join("bus-plugin.json").is_file());
         assert!(!tmp.path().join("bus-plugin.json").exists());
+    }
+
+    fn manifest_with_dashboard() -> Manifest {
+        use crate::plugin::manifest::{DashboardWidget, WidgetSize};
+        Manifest {
+            id: "widgety".into(),
+            name: "Widgety".into(),
+            version: "0.1.0".into(),
+            description: String::new(),
+            entry: "plugin.wasm".into(),
+            events: vec![],
+            settings: vec![],
+            capabilities: vec![],
+            sidecars: vec![],
+            filesystem: vec![],
+            bus: vec![],
+            dashboard: vec![DashboardWidget {
+                id: "status".into(),
+                title: "S".into(),
+                entry: "ui/index.html".into(),
+                size: WidgetSize::Small,
+            }],
+        }
+    }
+
+    #[test]
+    fn dashboard_grant_persists_and_goes_stale_on_fingerprint_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = GrantsStore::new(dir.path().to_path_buf());
+        let manifest = manifest_with_dashboard();
+
+        // 初期状態: 未承認・stale でない
+        let initial = store.dashboard_state(&manifest, "status");
+        assert!(!initial.granted);
+        assert!(!initial.stale);
+
+        // 承認 → granted
+        let granted = store.set_dashboard(&manifest, "status", true).unwrap();
+        assert!(granted.granted);
+        assert!(store.dashboard_state(&manifest, "status").granted);
+
+        // manifest 側の宣言が変わる → staleGrant
+        let mut changed = manifest.clone();
+        changed.dashboard[0].entry = "ui/other.html".into();
+        let state = store.dashboard_state(&changed, "status");
+        assert!(!state.granted);
+        assert!(state.stale);
+
+        // 取消も永続化される
+        let revoked = store.set_dashboard(&manifest, "status", false).unwrap();
+        assert!(!revoked.granted);
+        assert!(!store.dashboard_state(&manifest, "status").granted);
+
+        // 未宣言 widget は常に false/false
+        let unknown = store.dashboard_state(&manifest, "nope");
+        assert!(!unknown.granted && !unknown.stale);
     }
 
     #[test]
