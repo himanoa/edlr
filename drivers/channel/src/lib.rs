@@ -15,7 +15,7 @@ pub const BUS_MAX_PAYLOAD: usize = 256 * 1024;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::mpsc::{SyncSender, TrySendError};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 /// バスの呼び出しが返しうるエラー。WIT の `bus-error` variant と 1 対 1 で対応する。
 #[derive(Debug, Clone, PartialEq)]
@@ -95,13 +95,24 @@ impl Bus {
         Bus::default()
     }
 
+    /// バス状態のロックを取る。poison からは中身を取り出して回復する。
+    ///
+    /// `expect` で panic すると、ロック下で一度でも panic した以降は
+    /// **全てのバス操作**が呼び出し元のスレッドを道連れに abort する。
+    /// バスは縮退動作(取りこぼした購読があっても他は動く)であるべきなので、
+    /// `core` 側(`plugin/registry.rs` の `plugin_threads` など)と同じく
+    /// `into_inner()` で回復する。
+    fn lock_state(&self) -> MutexGuard<'_, BusState> {
+        self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     pub fn register_driver(
         &self,
         driver_id: &str,
         topics: Vec<TopicSpec>,
         sender: SyncSender<Message>,
     ) {
-        let mut state = self.state.lock().expect("bus state poisoned");
+        let mut state = self.lock_state();
         state.drivers.insert(
             driver_id.to_string(),
             DriverSlot { topics, sender, retained: BTreeMap::new(), available: true },
@@ -115,7 +126,7 @@ impl Bus {
         topic: &str,
         sender: SyncSender<Delivery>,
     ) {
-        let mut state = self.state.lock().expect("bus state poisoned");
+        let mut state = self.lock_state();
         state.subscriptions.push(Subscription {
             plugin_id: plugin_id.to_string(),
             driver_id: driver_id.to_string(),
@@ -137,7 +148,7 @@ impl Bus {
                 payload.len()
             )));
         }
-        let state = self.state.lock().expect("bus state poisoned");
+        let state = self.lock_state();
         let slot = state
             .drivers
             .get(driver_id)
@@ -167,7 +178,7 @@ impl Bus {
     }
 
     pub fn get(&self, driver_id: &str, topic: &str) -> Result<Option<Vec<u8>>, BusError> {
-        let state = self.state.lock().expect("bus state poisoned");
+        let state = self.lock_state();
         let slot = state
             .drivers
             .get(driver_id)
@@ -188,7 +199,7 @@ impl Bus {
                 payload.len()
             )));
         }
-        let mut state = self.state.lock().expect("bus state poisoned");
+        let mut state = self.lock_state();
         let slot = state
             .drivers
             .get_mut(driver_id)
@@ -284,14 +295,14 @@ impl Bus {
     /// (上のコメント参照)が、それはその driver/topic へ次に `emit` される
     /// までの間は効かない保険であり、こちらが主経路。
     pub fn unsubscribe_plugin(&self, plugin_id: &str) {
-        let mut state = self.state.lock().expect("bus state poisoned");
+        let mut state = self.lock_state();
         state
             .subscriptions
             .retain(|subscription| subscription.plugin_id != plugin_id);
     }
 
     pub fn disable_driver(&self, driver_id: &str) {
-        let mut state = self.state.lock().expect("bus state poisoned");
+        let mut state = self.lock_state();
         if let Some(slot) = state.drivers.get_mut(driver_id) {
             slot.available = false;
             // 死んだドライバの古い状態を `get` が返し続けると、プラグイン側が
@@ -301,7 +312,7 @@ impl Bus {
     }
 
     pub fn retained_for(&self, driver_id: &str, topic: &str) -> Option<Vec<u8>> {
-        let state = self.state.lock().expect("bus state poisoned");
+        let state = self.lock_state();
         state.drivers.get(driver_id)?.retained.get(topic).cloned()
     }
 }
@@ -323,6 +334,25 @@ mod tests {
         let (tx, rx) = sync_channel::<Message>(capacity);
         bus.register_driver("ed-state", topics(), tx);
         (bus, rx)
+    }
+
+    /// ロック下で panic した後もバスが使えること。`expect` だと以後の
+    /// 全操作が panic の連鎖になり、縮退動作にならない。
+    #[test]
+    fn bus_keeps_working_after_a_poisoned_lock() {
+        let (bus, rx) = bus_with_driver(4);
+
+        let poisoner = bus.clone();
+        let result = std::thread::spawn(move || {
+            let _guard = poisoner.lock_state();
+            panic!("poison the bus lock");
+        })
+        .join();
+        assert!(result.is_err(), "スレッドは panic しているはず");
+
+        bus.publish("plugin-a", "ed-state", "ship-status", b"still alive".to_vec())
+            .expect("poison 後も publish できること");
+        assert_eq!(rx.recv().unwrap().payload, b"still alive".to_vec());
     }
 
     #[test]
