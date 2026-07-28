@@ -498,3 +498,48 @@ func TestOversizedBatchSizeStillFlushes(t *testing.T) {
 		t.Error("an oversized batchSize must not wedge the queue")
 	}
 }
+
+// Attempted は実際に HTTP 送信へ進んだときだけ立つ(開発モードの
+// 「送信を試みた」ログの根拠になる)。成功・失敗を問わず、試行が
+// あればバッチ件数が入る。
+func TestAttemptedCountsRealSendAttempts(t *testing.T) {
+	sender := &stubSender{err: errors.New("timeout")}
+	u := New(newClock().now, sender)
+	openLiveSession(u)
+	cfg := testSettings()
+
+	u.Handle(cfg, jump("Sol", false))
+	out := u.Handle(cfg, Event{Kind: "journal", Name: "Shutdown", Payload: `{}`})
+	if out.Attempted != 1 {
+		t.Errorf("a failed send is still an attempt, got %+v", out)
+	}
+}
+
+func TestAttemptedStaysZeroWithoutASend(t *testing.T) {
+	sender := okSender()
+	u := New(newClock().now, sender)
+	openLiveSession(u)
+
+	// キューに積んだだけ(フラッシュ条件を満たさない)。
+	cfg := testSettings()
+	if out := u.Handle(cfg, jump("Sol", false)); out.Attempted != 0 {
+		t.Errorf("queueing is not an attempt, got %+v", out)
+	}
+
+	// apiKey 未設定の Held。
+	held := testSettings()
+	held.APIKey = ""
+	if out := u.Handle(held, Event{Kind: "journal", Name: "Shutdown", Payload: `{}`}); out.Attempted != 0 {
+		t.Errorf("holding is not an attempt, got %+v", out)
+	}
+
+	// dry run は送信しない。
+	dry := testSettings()
+	dry.DryRun = true
+	if out := u.Handle(dry, Event{Kind: "journal", Name: "Shutdown", Payload: `{}`}); out.Attempted != 0 {
+		t.Errorf("dry run is not an attempt, got %+v", out)
+	}
+	if len(sender.calls) != 0 {
+		t.Fatalf("no real send may happen in this test, got %d", len(sender.calls))
+	}
+}

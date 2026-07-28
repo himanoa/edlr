@@ -53,7 +53,7 @@ func onInit() {
 
 func onEvent(ev plugin.Event) {
 	cfg := settings.Parse(hostsettings.GetAll())
-	report(up.Handle(cfg, uploader.Event{
+	report(cfg, up.Handle(cfg, uploader.Event{
 		Kind:      ev.Kind,
 		Name:      option(ev.Name),
 		Timestamp: option(ev.Timestamp),
@@ -111,7 +111,13 @@ func driverErrorMessage(err *driverhttp.DriverError) string {
 }
 
 // report は Outcome をログへ落とす。判断はせず、起きたことをそのまま出す。
-func report(out uploader.Outcome) {
+func report(cfg settings.Settings, out uploader.Outcome) {
+	// 開発モード中は、送信を試みたこと自体を残す。結果のログ(uploaded /
+	// rejected / Err)だけだと「そもそも送信が走ったのか」が追えないため。
+	if cfg.IsBeingDeveloped && out.Attempted > 0 {
+		logf(hostlog.LevelInfo,
+			"developer mode: sending %d event(s) to inara", out.Attempted)
+	}
 	if out.Skipped > 0 {
 		logf(hostlog.LevelInfo,
 			"skipped %d event(s) from the replayed backlog (set uploadHistorical to send them)",

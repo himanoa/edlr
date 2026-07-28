@@ -55,6 +55,10 @@ type Outcome struct {
 	Skipped int
 	// Pending はキューに残っている件数
 	Pending int
+	// Attempted は実際に HTTP 送信を試みたバッチの件数。送信の成否は
+	// 問わない(成功なら Sent、失敗なら Err に現れる)。Held・dryRun・
+	// キューに積んだだけの場合は 0
+	Attempted int
 	// Held は送信を見送った理由。空なら見送っていない
 	Held string
 	// DryRun は dryRun のときに組み立てた JSON
@@ -245,6 +249,7 @@ func (u *Uploader) flush(cfg settings.Settings, out *Outcome) {
 		return
 	}
 
+	out.Attempted = len(batch)
 	status, respBody, err := u.sender.Send(body)
 	if err != nil {
 		// 送信そのものの失敗(ネットワーク・タイムアウト・未承認)。
