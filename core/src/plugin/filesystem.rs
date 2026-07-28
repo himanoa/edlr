@@ -329,6 +329,7 @@ mod tests {
             filesystem: requests,
             bus: vec![],
             dashboard: vec![],
+            schedules: vec![],
         }
     }
 

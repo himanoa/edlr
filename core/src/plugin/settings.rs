@@ -248,6 +248,7 @@ mod tests {
             filesystem: vec![],
             bus: vec![],
             dashboard: vec![],
+            schedules: vec![],
         }
     }
 
@@ -498,6 +499,7 @@ mod tests {
             filesystem: vec![],
             bus: vec![],
             dashboard: vec![],
+            schedules: vec![],
         }
     }
 
