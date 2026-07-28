@@ -1,3 +1,6 @@
 [workspace]
 resolver = "2"
 members = ["config", "core", "drivers/http", "drivers/process", "drivers/fs", "drivers/channel", "ui/src-tauri"]
+
+[workspace.package]
+license = "MIT OR Apache-2.0"

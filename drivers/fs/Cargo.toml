@@ -2,6 +2,7 @@
 name = "edlr-driver-fs"
 version = "0.1.0"
 edition = "2021"
+license.workspace = true
 
 [dependencies]
 rustix = { version = "1", features = ["fs"] }
