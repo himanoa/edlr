@@ -16,6 +16,38 @@ test("parses journal and status events", () => {
   expect(s).toMatchObject({ type: "event", kind: "status" });
 });
 
+test("parses log frames", () => {
+  const msg = parseWsMessage(
+    JSON.stringify({
+      type: "event",
+      kind: "log",
+      timestamp: "2026-07-28T00:00:00.000Z",
+      level: "warn",
+      target: "edlr_core::x",
+      message: "watch out",
+    }),
+  );
+  expect(msg).toEqual({
+    type: "event",
+    kind: "log",
+    timestamp: "2026-07-28T00:00:00.000Z",
+    level: "warn",
+    target: "edlr_core::x",
+    message: "watch out",
+  });
+});
+
+test("rejects log frames without level or message", () => {
+  expect(
+    parseWsMessage(JSON.stringify({ type: "event", kind: "log", timestamp: "t" })),
+  ).toBeNull();
+  expect(
+    parseWsMessage(
+      JSON.stringify({ type: "event", kind: "log", timestamp: "t", level: "info" }),
+    ),
+  ).toBeNull();
+});
+
 test("returns null for garbage or unknown types", () => {
   expect(parseWsMessage("not json")).toBeNull();
   expect(parseWsMessage('{"type":"mystery"}')).toBeNull();

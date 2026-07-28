@@ -4,7 +4,15 @@ import type { LogEntry } from "./lib/filter";
 export type WsMessage =
   | { type: "hello"; protocol: number }
   | { type: "event"; kind: "journal"; timestamp: string; event: string; raw: unknown }
-  | { type: "event"; kind: "status"; raw: unknown };
+  | { type: "event"; kind: "status"; raw: unknown }
+  | {
+      type: "event";
+      kind: "log";
+      timestamp: string;
+      level: string;
+      target?: string;
+      message: string;
+    };
 
 export type ConnectionState = "connecting" | "open" | "closed";
 
@@ -31,6 +39,23 @@ export function parseWsMessage(data: string): WsMessage | null {
   }
   if (msg.type === "event" && msg.kind === "status") {
     return { type: "event", kind: "status", raw: msg.raw };
+  }
+  if (msg.type === "event" && msg.kind === "log") {
+    if (
+      typeof msg.timestamp === "string" &&
+      typeof msg.level === "string" &&
+      typeof msg.message === "string"
+    ) {
+      return {
+        type: "event",
+        kind: "log",
+        timestamp: msg.timestamp,
+        level: msg.level,
+        ...(typeof msg.target === "string" ? { target: msg.target } : {}),
+        message: msg.message,
+      };
+    }
+    return null;
   }
   return null;
 }
@@ -86,7 +111,18 @@ export function useEventStream(url: string): {
         const entry: LogEntry =
           msg.kind === "journal"
             ? { id: nextId.current++, kind: "journal", timestamp: msg.timestamp, event: msg.event, raw: msg.raw }
-            : { id: nextId.current++, kind: "status", raw: msg.raw };
+            : msg.kind === "log"
+              ? {
+                  id: nextId.current++,
+                  kind: "log",
+                  timestamp: msg.timestamp,
+                  level: msg.level,
+                  target: msg.target,
+                  message: msg.message,
+                  // raw 展開(クリック時)にも同じ内容を出す
+                  raw: { level: msg.level, target: msg.target, message: msg.message },
+                }
+              : { id: nextId.current++, kind: "status", raw: msg.raw };
         setEntries((prev) => {
           const next = [...prev, entry];
           return next.length > CLIENT_BUFFER_LIMIT

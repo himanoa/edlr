@@ -23,3 +23,16 @@ test("matches raw JSON content", () => {
 test("status entries match by kind name", () => {
   expect(filterEntries(entries, "status").map((e) => e.id)).toEqual([3]);
 });
+
+test("matches log entries by message text", () => {
+  const log: LogEntry = {
+    id: 10,
+    kind: "log",
+    timestamp: "t",
+    level: "info",
+    message: "plugin widgety started",
+    raw: {},
+  };
+  expect(filterEntries([log], "widgety")).toHaveLength(1);
+  expect(filterEntries([log], "nomatch")).toHaveLength(0);
+});

@@ -1,8 +1,14 @@
 export interface LogEntry {
   id: number;
-  kind: "journal" | "status";
+  kind: "journal" | "status" | "log";
   timestamp?: string;
   event?: string;
+  /** kind === "log" のみ: info | warn | error */
+  level?: string;
+  /** kind === "log" のみ: 整形済みログ本文(key=value フィールド込み) */
+  message?: string;
+  /** kind === "log" のみ: 発生元モジュールパス */
+  target?: string;
   raw: unknown;
 }
 
@@ -12,6 +18,7 @@ export function filterEntries(entries: LogEntry[], query: string): LogEntry[] {
   return entries.filter((e) => {
     const name = (e.event ?? e.kind).toLowerCase();
     if (name.includes(q)) return true;
+    if (e.kind === "log" && e.message?.toLowerCase().includes(q)) return true;
     return JSON.stringify(e.raw).toLowerCase().includes(q);
   });
 }
