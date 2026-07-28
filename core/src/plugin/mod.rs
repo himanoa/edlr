@@ -7,6 +7,7 @@ pub mod host;
 pub mod manifest;
 pub mod registry;
 pub mod runner;
+pub(crate) mod schedule;
 pub mod settings;
 pub mod sidecar;
 pub mod sidecar_runtime;
