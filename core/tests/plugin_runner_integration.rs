@@ -160,14 +160,32 @@ async fn hello_logger_stays_running_and_busy_loop_gets_disabled_after_publish() 
         Some(&PluginState::Running)
     );
 
-    router.publish(Event::Journal {
-        timestamp: "2026-07-25T00:00:00Z".to_string(),
-        event: "FSDJump".to_string(),
-        raw: serde_json::json!({}),
-        replay: false,
-    });
+    let publish_jump = || {
+        router.publish(Event::Journal {
+            timestamp: "2026-07-25T00:00:00Z".to_string(),
+            event: "FSDJump".to_string(),
+            raw: serde_json::json!({}),
+            replay: false,
+        });
+    };
 
-    let deadline = Instant::now() + Duration::from_secs(15);
+    // 1 回目の期限超過ではまだ無効化されない。期限超過は trap と違って
+    // 一時的でありうる(応答しないホストなど)ため、`CALL_DEADLINE_STRIKES`
+    // 回**連続**するまでは有効なまま(`runner::CALL_DEADLINE_STRIKES` 参照)。
+    publish_jump();
+    tokio::time::sleep(Duration::from_secs(4)).await;
+    assert_eq!(
+        state_of(&registry.snapshot(), "busy-loop"),
+        Some(&PluginState::Running),
+        "a single deadline overrun must not disable a plugin -- it may be transient"
+    );
+
+    // 連続して超過し続ければ、いずれ諦める。
+    for _ in 0..4 {
+        publish_jump();
+    }
+
+    let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         let snapshot = registry.snapshot();
         if matches!(
@@ -181,6 +199,17 @@ async fn hello_logger_stays_running_and_busy_loop_gets_disabled_after_publish() 
             "busy-loop was not disabled within the timeout"
         );
         tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    // Disabled の理由が「期限超過」だと分かること(UI にそのまま出る)。
+    let snapshot = registry.snapshot();
+    match state_of(&snapshot, "busy-loop") {
+        Some(PluginState::Disabled { reason }) => assert!(
+            reason.contains("deadline"),
+            "the disable reason must say it was a deadline overrun, not just \
+             'call failed'; got: {reason}"
+        ),
+        other => panic!("expected busy-loop to be disabled, got {other:?}"),
     }
 
     let snapshot = registry.snapshot();

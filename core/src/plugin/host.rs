@@ -9,7 +9,7 @@ use std::thread;
 use std::time::Duration;
 
 use wasmtime::component::{Component, HasSelf, Linker, ResourceTable};
-use wasmtime::{Config, Engine, Store, StoreLimits, StoreLimitsBuilder};
+use wasmtime::{Config, Engine, Store, StoreLimits, StoreLimitsBuilder, Trap};
 use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
 mod bindings {
@@ -847,6 +847,68 @@ fn deadline_ticks(duration: Duration) -> u64 {
     u64::try_from(ticks).unwrap_or(u64::MAX).max(1)
 }
 
+/// なぜ guest 呼び出しが失敗したか。
+///
+/// **この 2 つを混同してはいけない**: `DeadlineExceeded` は「このプラグインは
+/// 遅かった」でしかなく、原因はプラグイン作者の管理下にないこと(応答しない
+/// HTTP ホスト、レジューム直後の詰まり)でありうる。一方 `Trap` は
+/// 「このプラグインは壊れている」であり、次に呼んでも同じ結果になる。
+///
+/// 以前は両者をまとめて 1 回の失敗で恒久 `Disabled` にしていたため、
+/// 一時的なネットワーク停滞でプラグインが二度と動かなくなり、しかも
+/// ログには "on-event call failed" しか残らなかった。
+#[derive(Debug)]
+pub enum PluginCallError {
+    /// `CALL_DEADLINE` を使い切り、epoch 割り込みで中断された。
+    /// 一時的でありうるので、呼び出し元はリトライ/ストライク方式で扱う。
+    DeadlineExceeded {
+        /// 呼び出した export 名(`on-event` など)。
+        call: &'static str,
+    },
+    /// wasm トラップ、あるいはホスト側のエラー。決定的な故障として扱う。
+    Trap {
+        call: &'static str,
+        source: wasmtime::Error,
+    },
+}
+
+impl PluginCallError {
+    /// wasmtime のエラーを、期限超過とそれ以外に振り分ける。
+    ///
+    /// epoch 割り込み(`CALL_DEADLINE` 到達)は `wasmtime::Trap::Interrupt`
+    /// として現れる。それ以外はすべて決定的な故障として扱う。
+    fn classify(call: &'static str, error: wasmtime::Error) -> PluginCallError {
+        if error.downcast_ref::<Trap>() == Some(&Trap::Interrupt) {
+            PluginCallError::DeadlineExceeded { call }
+        } else {
+            PluginCallError::Trap {
+                call,
+                source: error,
+            }
+        }
+    }
+
+    /// 期限超過(= 一時的でありうる)か。
+    pub fn is_deadline_exceeded(&self) -> bool {
+        matches!(self, PluginCallError::DeadlineExceeded { .. })
+    }
+}
+
+impl std::fmt::Display for PluginCallError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PluginCallError::DeadlineExceeded { call } => write!(
+                f,
+                "{call} exceeded the {:?} call deadline",
+                PluginInstance::CALL_DEADLINE
+            ),
+            PluginCallError::Trap { call, source } => write!(f, "{call} call failed: {source}"),
+        }
+    }
+}
+
+impl std::error::Error for PluginCallError {}
+
 /// A loaded, instantiated plugin component together with its store.
 pub struct PluginInstance {
     store: Store<HostCtx>,
@@ -858,12 +920,12 @@ impl PluginInstance {
     /// forcibly traps it via epoch interruption.
     pub const CALL_DEADLINE: Duration = Duration::from_secs(2);
 
-    pub fn call_init(&mut self) -> anyhow::Result<()> {
+    pub fn call_init(&mut self) -> Result<(), PluginCallError> {
         self.store
             .set_epoch_deadline(deadline_ticks(Self::CALL_DEADLINE));
         self.bindings
             .call_init(&mut self.store)
-            .map_err(|e| anyhow::anyhow!("plugin init() call failed or timed out: {e}"))
+            .map_err(|e| PluginCallError::classify("init", e))
     }
 
     pub fn call_on_event(
@@ -873,7 +935,7 @@ impl PluginInstance {
         name: Option<&str>,
         payload_json: &str,
         replay: bool,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), PluginCallError> {
         let event = WitEvent {
             kind: kind.to_string(),
             timestamp: timestamp.map(|s| s.to_string()),
@@ -885,7 +947,7 @@ impl PluginInstance {
             .set_epoch_deadline(deadline_ticks(Self::CALL_DEADLINE));
         self.bindings
             .call_on_event(&mut self.store, &event)
-            .map_err(|e| anyhow::anyhow!("plugin on-event() call failed or timed out: {e}"))
+            .map_err(|e| PluginCallError::classify("on-event", e))
     }
 
     pub fn call_on_message(
@@ -893,33 +955,33 @@ impl PluginInstance {
         driver: &str,
         topic: &str,
         payload: &[u8],
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), PluginCallError> {
         self.store
             .set_epoch_deadline(deadline_ticks(Self::CALL_DEADLINE));
         self.bindings
             .call_on_message(&mut self.store, driver, topic, payload)
-            .map_err(|e| anyhow::anyhow!("plugin on-message() call failed or timed out: {e}"))
+            .map_err(|e| PluginCallError::classify("on-message", e))
     }
 
     /// manifest の `[[schedule]]` エントリが発火したときに呼ぶ。`name` は
     /// そのエントリの name。
-    pub fn call_on_schedule(&mut self, name: &str) -> anyhow::Result<()> {
+    pub fn call_on_schedule(&mut self, name: &str) -> Result<(), PluginCallError> {
         self.store
             .set_epoch_deadline(deadline_ticks(Self::CALL_DEADLINE));
         self.bindings
             .call_on_schedule(&mut self.store, name)
-            .map_err(|e| anyhow::anyhow!("plugin on-schedule() call failed or timed out: {e}"))
+            .map_err(|e| PluginCallError::classify("on-schedule", e))
     }
 
     /// デーモンの graceful shutdown 時に一度だけ呼ぶ。trap による無効化
     /// (disable)の後には呼ばない -- 呼び出し元(daemon shutdown 経路)の
     /// 責務。
-    pub fn call_on_stop(&mut self) -> anyhow::Result<()> {
+    pub fn call_on_stop(&mut self) -> Result<(), PluginCallError> {
         self.store
             .set_epoch_deadline(deadline_ticks(Self::CALL_DEADLINE));
         self.bindings
             .call_on_stop(&mut self.store)
-            .map_err(|e| anyhow::anyhow!("plugin on-stop() call failed or timed out: {e}"))
+            .map_err(|e| PluginCallError::classify("on-stop", e))
     }
 }
 

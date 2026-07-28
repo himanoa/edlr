@@ -120,7 +120,9 @@ use crate::plugin::dropped::DropCounters;
 use crate::plugin::filesystem::FilesystemConfigStore;
 use crate::plugin::fs_runtime::{filesystem_json_string, FsRuntimeEntry};
 use crate::plugin::grants::GrantsStore;
-use crate::plugin::host::{capabilities_json_string, HostCtx, PluginHost, PluginInstance};
+use crate::plugin::host::{
+    capabilities_json_string, HostCtx, PluginCallError, PluginHost, PluginInstance,
+};
 use crate::plugin::manifest::{load_manifest, matches_event};
 use crate::plugin::registry::{PluginEntry, PluginState, Registry};
 use crate::plugin::schedule::{Clock, ScheduleState, ScheduleView};
@@ -142,6 +144,21 @@ use crate::router::Router;
 /// (スケジュールが無いので)ので `LoopAction::Idle` になり、単に
 /// もう一度待ち直すだけで観測できる差は無い。
 const SCHEDULE_LESS_FALLBACK_TIMEOUT: Duration = Duration::from_secs(3600);
+
+/// 連続して何回 `PluginInstance::CALL_DEADLINE` を使い切ったら、プラグインを
+/// `Disabled` にするか。
+///
+/// 期限超過は trap(壊れたプラグイン)と違い、プラグイン作者の管理下にない
+/// 事情でも起きる: `driver-http.send` の相手ホストが応答しない、サスペンド
+/// からのレジューム直後に処理が詰まる、など。1 回の超過で恒久 `Disabled` に
+/// すると、一時的なネットワーク停滞でプラグインがデーモン再起動まで
+/// 二度と動かなくなる(実際にそうなっていた)。
+///
+/// 一方で無制限に許すと、毎回 2 秒使い切るプラグインがワークキューを
+/// 詰まらせ続ける。3 回という値に強い根拠は無く、「単発の停滞は見逃し、
+/// 恒常的な遅さは捕まえる」程度の線。**連続**回数なので、1 回でも成功すれば
+/// 0 に戻る。
+const CALL_DEADLINE_STRIKES: u32 = 3;
 
 /// `plugins_dir` を走査し、各プラグインをロードして専用タスクで駆動する。
 ///
@@ -491,34 +508,40 @@ fn run_plugin_thread(
     // 参照: 呼ばないと、このプラグインが二度と読まない購読エントリが
     // プロセスの生存期間中ずっと購読表に残り続ける。
     let bus_for_unsubscribe = bus.clone();
-    let ctx = HostCtx::new(
-        manifest.id.clone(),
-        settings_json,
-        capabilities_json,
-        sidecars_json,
-        filesystem_json,
-        bus_json,
-        bus,
-        host.http_driver(),
-        host.process_driver(),
-        host.fs_driver(),
-    );
-    let mut instance = match host.load(&entry_path, ctx) {
+
+    // インスタンスの生成をクロージャに切り出しておく。期限超過からの復帰
+    // (下記 `handle_call_result!`)で作り直す必要があるため。`HostCtx` が
+    // 束ねているのは共有バッファ(`Arc<Mutex<String>>`)とドライバの `Arc`
+    // だけなので、作り直しても承認・設定の状態は失われない。
+    let load_instance = || -> Result<PluginInstance, String> {
+        let ctx = HostCtx::new(
+            manifest.id.clone(),
+            settings_json.clone(),
+            capabilities_json.clone(),
+            sidecars_json.clone(),
+            filesystem_json.clone(),
+            bus_json.clone(),
+            bus.clone(),
+            host.http_driver(),
+            host.process_driver(),
+            host.fs_driver(),
+        );
+        let mut instance = host
+            .load(&entry_path, ctx)
+            .map_err(|e| format!("failed to load plugin component: {e}"))?;
+        instance
+            .call_init()
+            .map_err(|e| format!("init() failed: {e}"))?;
+        Ok(instance)
+    };
+
+    let mut instance = match load_instance() {
         Ok(instance) => instance,
-        Err(e) => {
-            let _ = ready_tx.send(PluginState::Disabled {
-                reason: format!("failed to load plugin component: {e}"),
-            });
+        Err(reason) => {
+            let _ = ready_tx.send(PluginState::Disabled { reason });
             return;
         }
     };
-
-    if let Err(e) = instance.call_init() {
-        let _ = ready_tx.send(PluginState::Disabled {
-            reason: format!("init() failed: {e}"),
-        });
-        return;
-    }
 
     if ready_tx.send(PluginState::Running).is_err() {
         // start_plugins 側が既に受信を諦めている(通常起こらない)。
@@ -541,19 +564,78 @@ fn run_plugin_thread(
     }
 
     // 1 回の `Err(reason)` を「warn ログ + disable + unsubscribe + ループ
-    // 脱出」という既存の trap 分岐へ合流させるためのマクロ。`Handle` 後の
-    // wasm 呼び出し・`Fire` 自身・`Fire` 後の追い発火のいずれで失敗しても
-    // 同じ扱いにする(呼び出し元がどの分岐であっても trap の意味は同じ)。
+    // 脱出」へ合流させるためのマクロ。`Handle` 後の wasm 呼び出し・`Fire`
+    // 自身・`Fire` 後の追い発火のいずれで失敗しても同じ扱いにする。
     macro_rules! disable_and_break {
         ($reason:expr) => {{
             let reason = $reason;
             tracing::warn!(
                 plugin_id = %manifest.id,
-                "wasm call failed, disabling plugin: {reason}"
+                "disabling plugin: {reason}"
             );
             registry.set_disabled(&manifest.id, reason);
             bus_for_unsubscribe.unsubscribe_plugin(&manifest.id);
             break;
+        }};
+    }
+
+    // 連続して `CALL_DEADLINE` を使い切った回数。成功するたびに 0 に戻る。
+    let mut deadline_strikes: u32 = 0;
+
+    // wasm 呼び出しの結果を処理する。**期限超過と trap を区別する**のが要点:
+    //
+    // - trap(壊れたプラグイン)は次に呼んでも同じ結果なので、従来どおり
+    //   1 回で恒久 `Disabled` にする
+    // - 期限超過は「このプラグインは遅かった」でしかなく、原因はプラグイン
+    //   作者の管理下にないこと(応答しない HTTP ホスト、レジューム直後の
+    //   詰まり)でありうる。`CALL_DEADLINE_STRIKES` 回**連続**して超過した
+    //   ときだけ諦める
+    //
+    // かつては両者を区別せず、一時的なネットワーク停滞でも 1 回で恒久
+    // `Disabled` になり、ログには "on-event call failed" しか残らなかった。
+    //
+    // **期限超過からの復帰にはインスタンスの作り直しが要る**: epoch 割り込み
+    // でトラップしたコンポーネントインスタンスは wasmtime に毒扱いされ、
+    // 以後の呼び出しはすべて "cannot enter component instance" で失敗する。
+    // そのため同じインスタンスを再試行しても意味が無く、`load_instance()` で
+    // 新しく作り直して `init` からやり直す。副作用として、プラグインが
+    // wasm 線形メモリ上に持っていた状態(未送信キューなど)は失われる --
+    // ただし恒久 `Disabled` は同じものを失ったうえで以後の仕事も全部止める
+    // ので、作り直す方が厳密に良い。
+    macro_rules! handle_call_result {
+        ($result:expr) => {{
+            match $result {
+                Ok(()) => {
+                    deadline_strikes = 0;
+                }
+                Err(e) if e.is_deadline_exceeded() => {
+                    deadline_strikes += 1;
+                    if deadline_strikes >= CALL_DEADLINE_STRIKES {
+                        disable_and_break!(format!(
+                            "{e} on {deadline_strikes} consecutive calls; the plugin is \
+                             persistently too slow (a blocked host call, or work that does \
+                             not fit the deadline)"
+                        ));
+                    }
+                    match load_instance() {
+                        Ok(fresh) => {
+                            tracing::warn!(
+                                plugin_id = %manifest.id,
+                                strikes = deadline_strikes,
+                                limit = CALL_DEADLINE_STRIKES,
+                                "{e}; restarted the plugin instead of disabling it \
+                                 (transient slowness is not a fault)"
+                            );
+                            instance = fresh;
+                        }
+                        Err(reason) => disable_and_break!(format!(
+                            "{e}, and the plugin could not be restarted: {reason}"
+                        )),
+                    }
+                    continue;
+                }
+                Err(e) => disable_and_break!(e.to_string()),
+            }
         }};
     }
 
@@ -612,19 +694,19 @@ fn run_plugin_thread(
                 let result = match &work {
                     PluginWork::Event(event) => {
                         let (kind, timestamp, name, payload_json, replay) = event_params(event);
-                        instance
-                            .call_on_event(
-                                kind,
-                                timestamp.as_deref(),
-                                name.as_deref(),
-                                &payload_json,
-                                replay,
-                            )
-                            .map_err(|e| format!("on-event call failed: {e}"))
+                        instance.call_on_event(
+                            kind,
+                            timestamp.as_deref(),
+                            name.as_deref(),
+                            &payload_json,
+                            replay,
+                        )
                     }
-                    PluginWork::Message(delivery) => instance
-                        .call_on_message(&delivery.driver_id, &delivery.topic, &delivery.payload)
-                        .map_err(|e| format!("on-message call failed: {e}")),
+                    PluginWork::Message(delivery) => instance.call_on_message(
+                        &delivery.driver_id,
+                        &delivery.topic,
+                        &delivery.payload,
+                    ),
                     // `next_action` は `PluginWork::Stop` を `LoopAction::Handle`
                     // ではなく専用の `LoopAction::Stop` に振り分けるので、ここに
                     // 来ることはない。
@@ -632,20 +714,12 @@ fn run_plugin_thread(
                         "next_action routes PluginWork::Stop to LoopAction::Stop, not Handle"
                     ),
                 };
-                if let Err(reason) = result {
-                    disable_and_break!(reason);
-                }
-                if let Err(reason) = fire_all_due(&mut schedule_state, &mut instance) {
-                    disable_and_break!(reason);
-                }
+                handle_call_result!(result);
+                handle_call_result!(fire_all_due(&mut schedule_state, &mut instance));
             }
             LoopAction::Fire(name) => {
-                if let Err(e) = instance.call_on_schedule(&name) {
-                    disable_and_break!(format!("on-schedule call failed: {e}"));
-                }
-                if let Err(reason) = fire_all_due(&mut schedule_state, &mut instance) {
-                    disable_and_break!(reason);
-                }
+                handle_call_result!(instance.call_on_schedule(&name));
+                handle_call_result!(fire_all_due(&mut schedule_state, &mut instance));
             }
             LoopAction::Idle => {}
             LoopAction::Exit => break,
@@ -664,14 +738,15 @@ fn run_plugin_thread(
 /// なので、`None` になるまでループして呼び切ることで「同時に複数期限切れ
 /// でも、名前ごとにちょうど 1 回」という仕様(タスク仕様の「ブロック中に
 /// 過ぎた発火は後で 1 回」)を満たす。
-fn fire_all_due(state: &mut ScheduleState, instance: &mut PluginInstance) -> Result<(), String> {
+fn fire_all_due(
+    state: &mut ScheduleState,
+    instance: &mut PluginInstance,
+) -> Result<(), PluginCallError> {
     loop {
         let Some(name) = state.take_due(Clock::now()) else {
             return Ok(());
         };
-        instance
-            .call_on_schedule(&name)
-            .map_err(|e| format!("on-schedule call failed: {e}"))?;
+        instance.call_on_schedule(&name)?;
     }
 }
 
