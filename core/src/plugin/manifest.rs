@@ -109,6 +109,20 @@ pub struct FilesystemRequest {
     pub mode: FilesystemMode,
 }
 
+/// プラグインが要求するバス接続 1 件。
+///
+/// **`get` は `subscribe` に宣言したトピックにのみ許される**(「配信は要らないが
+/// 最新値は読みたい」という区別は設けない -- 承認画面に出す情報を増やさないため)。
+#[derive(Debug, Clone, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct BusRequest {
+    pub driver: String,
+    #[serde(default)]
+    pub publish: Vec<String>,
+    #[serde(default)]
+    pub subscribe: Vec<String>,
+    pub reason: String,
+}
+
 /// `manifest.toml` のパース結果。
 #[derive(Debug, Clone, PartialEq, serde::Deserialize)]
 pub struct Manifest {
@@ -128,6 +142,8 @@ pub struct Manifest {
     pub sidecars: Vec<SidecarRequest>,
     #[serde(default)]
     pub filesystem: Vec<FilesystemRequest>,
+    #[serde(default, rename = "bus")]
+    pub bus: Vec<BusRequest>,
 }
 
 impl Manifest {
@@ -243,6 +259,34 @@ impl Manifest {
         canonical.push_str(&encode_field(request.mode.as_str()));
         Some(sha256_hex(&canonical))
     }
+
+    pub fn bus_request(&self, driver: &str) -> Option<&BusRequest> {
+        self.bus.iter().find(|r| r.driver == driver)
+    }
+
+    /// バス接続 1 件の要求内容の安定フィンガープリント(grants の失効判定に使う)。
+    /// `capabilities_fingerprint` と同じ長さ接頭辞エンコード + SHA-256。
+    /// トピック順の違いは無視する(ソートしてから畳み込む)。
+    pub fn bus_fingerprint(&self, driver: &str) -> Option<String> {
+        let request = self.bus_request(driver)?;
+        let mut publish = request.publish.clone();
+        publish.sort();
+        let mut subscribe = request.subscribe.clone();
+        subscribe.sort();
+
+        let mut canonical = encode_field("bus");
+        canonical.push_str(&encode_field(&request.driver));
+        canonical.push_str(&encode_field(&publish.len().to_string()));
+        for topic in &publish {
+            canonical.push_str(&encode_field(topic));
+        }
+        canonical.push_str(&encode_field(&subscribe.len().to_string()));
+        for topic in &subscribe {
+            canonical.push_str(&encode_field(topic));
+        }
+        canonical.push_str(&encode_field(&request.reason));
+        Some(sha256_hex(&canonical))
+    }
 }
 
 /// 可変長文字列フィールドを長さ接頭辞方式でエンコードする: `"{byte_len}:{content}"`。
@@ -291,6 +335,11 @@ pub enum ManifestError {
     BadSidecar(String),
     /// `filesystem` の内容が不正(name の形式・重複・reason 空など)。
     BadFilesystem(String),
+    /// `bus` の内容が不正(driver の形式・重複・空の publish/subscribe・
+    /// トピック名・reason 空など)。
+    BadBus(String),
+    /// `topics`(ドライバの `[[topics]]`)の内容が不正(名前の形式・重複など)。
+    BadTopic(String),
 }
 
 impl fmt::Display for ManifestError {
@@ -307,13 +356,15 @@ impl fmt::Display for ManifestError {
             ManifestError::BadCapability(msg) => write!(f, "invalid capability request: {msg}"),
             ManifestError::BadSidecar(msg) => write!(f, "invalid sidecar request: {msg}"),
             ManifestError::BadFilesystem(msg) => write!(f, "invalid filesystem request: {msg}"),
+            ManifestError::BadBus(msg) => write!(f, "invalid bus request: {msg}"),
+            ManifestError::BadTopic(msg) => write!(f, "invalid topic: {msg}"),
         }
     }
 }
 
 impl std::error::Error for ManifestError {}
 
-fn is_valid_id(id: &str) -> bool {
+pub(crate) fn is_valid_id(id: &str) -> bool {
     !id.is_empty()
         && id
             .chars()
@@ -388,7 +439,9 @@ fn reject_invisible_chars(field: &str, s: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn validate_capabilities(capabilities: &mut [CapabilityRequest]) -> Result<(), ManifestError> {
+pub(crate) fn validate_capabilities(
+    capabilities: &mut [CapabilityRequest],
+) -> Result<(), ManifestError> {
     for capability in capabilities.iter_mut() {
         match capability {
             CapabilityRequest::Http { hosts, reason } => {
@@ -423,7 +476,7 @@ fn validate_capabilities(capabilities: &mut [CapabilityRequest]) -> Result<(), M
 /// `[[sidecar]]` を検証・正規化する。`reason` は `capabilities` と同じく
 /// trim して不可視文字を拒否する(承認画面に出る文字列とフィンガープリントの
 /// 元になる文字列を byte 単位で一致させるため)。
-fn validate_sidecars(sidecars: &mut [SidecarRequest]) -> Result<(), ManifestError> {
+pub(crate) fn validate_sidecars(sidecars: &mut [SidecarRequest]) -> Result<(), ManifestError> {
     let mut seen = HashSet::new();
     for sidecar in sidecars.iter_mut() {
         if !is_valid_id(&sidecar.name) {
@@ -460,7 +513,7 @@ fn validate_sidecars(sidecars: &mut [SidecarRequest]) -> Result<(), ManifestErro
     Ok(())
 }
 
-fn validate_filesystem(requests: &mut [FilesystemRequest]) -> Result<(), ManifestError> {
+pub(crate) fn validate_filesystem(requests: &mut [FilesystemRequest]) -> Result<(), ManifestError> {
     let mut seen = HashSet::new();
     for request in requests.iter_mut() {
         if !is_valid_id(&request.name) {
@@ -483,6 +536,67 @@ fn validate_filesystem(requests: &mut [FilesystemRequest]) -> Result<(), Manifes
             ));
         }
         reject_invisible_chars("reason", &trimmed).map_err(ManifestError::BadFilesystem)?;
+        request.reason = trimmed;
+    }
+    Ok(())
+}
+
+/// `[[bus]]` を検証・正規化する。`reason` は `capabilities` と同じく trim
+/// して不可視文字を拒否する(承認画面に出る文字列とフィンガープリントの
+/// 元になる文字列を byte 単位で一致させるため)。
+fn validate_bus(requests: &mut [BusRequest]) -> Result<(), ManifestError> {
+    let mut seen = HashSet::new();
+    for request in requests.iter_mut() {
+        if !is_valid_id(&request.driver) {
+            return Err(ManifestError::BadBus(format!(
+                "bus driver must match [a-z0-9-]+: {}",
+                request.driver
+            )));
+        }
+        if !seen.insert(request.driver.clone()) {
+            return Err(ManifestError::BadBus(format!(
+                "duplicate bus driver: {}",
+                request.driver
+            )));
+        }
+        if request.publish.is_empty() && request.subscribe.is_empty() {
+            return Err(ManifestError::BadBus(format!(
+                "bus request must declare at least one publish or subscribe topic: {}",
+                request.driver
+            )));
+        }
+
+        for topic in request.publish.iter().chain(request.subscribe.iter()) {
+            edlr_driver_channel::topic::validate_name(topic).map_err(ManifestError::BadBus)?;
+        }
+        // `[[topics]]`(`crate::driver::manifest::validate_topics`)と同じ
+        // 規律: `publish`/`subscribe` それぞれの中で同じトピック名が重複して
+        // 宣言されているのを許すと、`subscribe = ["a", "a"]` が実際には 2 件の
+        // 購読を作ってしまい、`emit` のたびに `on-event` が 2 回呼ばれ、
+        // プラグインの作業キューを無駄に 2 スロット消費する(Minor: 最終
+        // レビューで見つかった取りこぼし)。
+        for (field, topics) in [
+            ("publish", &request.publish),
+            ("subscribe", &request.subscribe),
+        ] {
+            let mut seen_topics = HashSet::new();
+            for topic in topics {
+                if !seen_topics.insert(topic.as_str()) {
+                    return Err(ManifestError::BadBus(format!(
+                        "duplicate {field} topic for driver {}: {topic}",
+                        request.driver
+                    )));
+                }
+            }
+        }
+
+        let trimmed = request.reason.trim().to_string();
+        if trimmed.is_empty() {
+            return Err(ManifestError::BadBus(
+                "bus request requires a non-empty reason".to_string(),
+            ));
+        }
+        reject_invisible_chars("reason", &trimmed).map_err(ManifestError::BadBus)?;
         request.reason = trimmed;
     }
     Ok(())
@@ -521,6 +635,7 @@ pub fn load_manifest(dir: &Path) -> Result<Manifest, ManifestError> {
     validate_capabilities(&mut manifest.capabilities)?;
     validate_sidecars(&mut manifest.sidecars)?;
     validate_filesystem(&mut manifest.filesystem)?;
+    validate_bus(&mut manifest.bus)?;
 
     Ok(manifest)
 }
@@ -1032,6 +1147,7 @@ reason = ""
                 }],
                 sidecars: vec![],
                 filesystem: vec![],
+                bus: vec![],
             }
         }
 
@@ -1092,6 +1208,7 @@ reason = ""
             }],
             sidecars: vec![],
             filesystem: vec![],
+            bus: vec![],
         };
 
         // Set B: two separate requests that request an additional host
@@ -1116,6 +1233,7 @@ reason = ""
             ],
             sidecars: vec![],
             filesystem: vec![],
+            bus: vec![],
         };
 
         let fp_a = set_a
@@ -1187,6 +1305,7 @@ reason = "fetch data"
                 }],
                 sidecars: vec![],
                 filesystem: vec![],
+                bus: vec![],
             }
         }
 
@@ -1317,6 +1436,7 @@ reason = "foo"
             }],
             sidecars: vec![],
             filesystem: vec![],
+            bus: vec![],
         };
 
         let old_style_fingerprint = "0123456789abcdef"; // 16 hex chars, FNV-1a-64 shape
@@ -1548,5 +1668,192 @@ port = 50030
         )
         .unwrap();
         assert_ne!(first, changed.filesystem_fingerprint("exports").unwrap());
+    }
+
+    fn manifest_with_bus(bus: Vec<BusRequest>) -> Manifest {
+        Manifest {
+            id: "translator".into(),
+            name: "Translator".into(),
+            version: "0.1.0".into(),
+            description: String::new(),
+            entry: "plugin.wasm".into(),
+            events: Vec::new(),
+            settings: Vec::new(),
+            capabilities: Vec::new(),
+            sidecars: Vec::new(),
+            filesystem: Vec::new(),
+            bus,
+        }
+    }
+
+    #[test]
+    fn parses_bus_requests() {
+        // NOTE: deviates from the brief's literal test body -- the brief wrote
+        // manifest.toml directly under a randomly-named tempdir with
+        // `id = "translator"` and an `entry = "plugin.wasm"` that is never
+        // created. That trips the pre-existing `IdMismatch`/`MissingEntry`
+        // checks in `load_manifest` (id must equal the plugin directory name;
+        // entry file must exist), which are unrelated to this task's bus
+        // parsing. Following the same `plugin_dir` + stub entry file
+        // convention already used by `parse_sidecar_manifest` /
+        // `parse_fs_manifest` in this same file instead.
+        let dir = tempfile::tempdir().unwrap();
+        let plugin_dir = dir.path().join("translator");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        std::fs::write(plugin_dir.join("plugin.wasm"), b"\0asm").unwrap();
+        std::fs::write(
+            plugin_dir.join("manifest.toml"),
+            r#"
+id = "translator"
+name = "Translator"
+version = "0.1.0"
+entry = "plugin.wasm"
+
+[[bus]]
+driver = "ed-state"
+publish = ["ship-status"]
+subscribe = ["current-system"]
+reason = "現在システムを購読して翻訳先を切り替えるため"
+"#,
+        )
+        .unwrap();
+        let manifest = load_manifest(&plugin_dir).unwrap();
+        let request = manifest
+            .bus_request("ed-state")
+            .expect("bus request parsed");
+        assert_eq!(request.publish, vec!["ship-status".to_string()]);
+        assert_eq!(request.subscribe, vec!["current-system".to_string()]);
+    }
+
+    #[test]
+    fn rejects_a_bus_block_with_neither_publish_nor_subscribe() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("manifest.toml"),
+            r#"
+id = "translator"
+name = "Translator"
+version = "0.1.0"
+entry = "plugin.wasm"
+
+[[bus]]
+driver = "ed-state"
+reason = "何もしない"
+"#,
+        )
+        .unwrap();
+        assert!(load_manifest(dir.path()).is_err());
+    }
+
+    #[test]
+    fn rejects_duplicate_bus_drivers() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("manifest.toml"),
+            r#"
+id = "translator"
+name = "Translator"
+version = "0.1.0"
+entry = "plugin.wasm"
+
+[[bus]]
+driver = "ed-state"
+publish = ["a"]
+reason = "one"
+
+[[bus]]
+driver = "ed-state"
+publish = ["b"]
+reason = "two"
+"#,
+        )
+        .unwrap();
+        assert!(load_manifest(dir.path()).is_err());
+    }
+
+    /// Regression test for a Minor review finding: `validate_bus` rejected
+    /// duplicate `[[bus]]` blocks for the same driver, but not duplicate
+    /// topic names *within* one block's `publish`/`subscribe` list.
+    /// `subscribe = ["a", "a"]` used to be accepted and created two separate
+    /// subscriptions (`crate::driver::manifest::validate_topics` already
+    /// dedupes `[[topics]]` the same way; this brings `[[bus]]` in line).
+    #[test]
+    fn rejects_duplicate_topics_within_one_bus_blocks_publish_or_subscribe() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("manifest.toml"),
+            r#"
+id = "translator"
+name = "Translator"
+version = "0.1.0"
+entry = "plugin.wasm"
+
+[[bus]]
+driver = "ed-state"
+subscribe = ["current-system", "current-system"]
+reason = "duplicate subscribe topic"
+"#,
+        )
+        .unwrap();
+        assert!(
+            load_manifest(dir.path()).is_err(),
+            "a duplicated subscribe topic within one [[bus]] block must be rejected"
+        );
+
+        let dir2 = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir2.path().join("manifest.toml"),
+            r#"
+id = "translator"
+name = "Translator"
+version = "0.1.0"
+entry = "plugin.wasm"
+
+[[bus]]
+driver = "ed-state"
+publish = ["set-system", "set-system"]
+reason = "duplicate publish topic"
+"#,
+        )
+        .unwrap();
+        assert!(
+            load_manifest(dir2.path()).is_err(),
+            "a duplicated publish topic within one [[bus]] block must be rejected"
+        );
+    }
+
+    #[test]
+    fn bus_fingerprint_changes_with_the_requested_topics() {
+        let base = BusRequest {
+            driver: "ed-state".into(),
+            publish: vec!["a".into()],
+            subscribe: vec![],
+            reason: "r".into(),
+        };
+        let mut widened = base.clone();
+        widened.publish.push("b".into());
+
+        let m1 = manifest_with_bus(vec![base]);
+        let m2 = manifest_with_bus(vec![widened]);
+        assert_ne!(
+            m1.bus_fingerprint("ed-state"),
+            m2.bus_fingerprint("ed-state")
+        );
+    }
+
+    #[test]
+    fn bus_fingerprint_ignores_topic_order() {
+        let a = BusRequest {
+            driver: "ed-state".into(),
+            publish: vec!["a".into(), "b".into()],
+            subscribe: vec![],
+            reason: "r".into(),
+        };
+        let mut reordered = a.clone();
+        reordered.publish.reverse();
+        assert_eq!(
+            manifest_with_bus(vec![a]).bus_fingerprint("ed-state"),
+            manifest_with_bus(vec![reordered]).bus_fingerprint("ed-state")
+        );
     }
 }

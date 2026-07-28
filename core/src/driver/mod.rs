@@ -1,0 +1,12 @@
+//! ユーザー定義ドライバ(常駐 wasm コンポーネント)のロードと駆動。
+//! `crate::plugin` と対称の構造だが、別レイヤーなので無理に共通化しない
+//! (共有するのは grants / settings の下位ユーティリティ程度)。
+
+pub mod host;
+pub mod manifest;
+pub mod registry;
+pub mod runner;
+
+pub use manifest::{load_driver_manifest, DriverManifest};
+pub use registry::{DriverEntry, DriverInfo, DriverRegistry, DriverRegistryError, DriverState};
+pub use runner::start_drivers;

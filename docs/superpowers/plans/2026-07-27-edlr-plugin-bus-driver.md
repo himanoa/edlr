@@ -651,8 +651,14 @@ git commit -m "feat(drivers/channel): add the bus with retained topics and queue
 
 `core/wit/plugin.wit` の先頭を `package edlr:plugin@0.3.0;` に変更し、以下を追加する。
 
+`bus-error` は関数を持たない `bus-types` interface に切り出す。`bus` や `bus-host` のように
+関数を持つ interface から `use` で型だけを借りると WIT の `use` 意味論上その interface 全体への
+依存になり、`bus-host` だけを import したいはずの `world driver` に `bus` ごと引き込まれて
+ドライバから `bus.publish` を呼べてしまう。それを避けるため、型だけの `bus-types` を両者が
+`use` する形にする。
+
 ```wit
-interface bus {
+interface bus-types {
   variant bus-error {
     permission-denied(string),
     unknown-driver(string),
@@ -661,13 +667,17 @@ interface bus {
     queue-full(string),
     too-large(string),
   }
+}
+
+interface bus {
+  use bus-types.{bus-error};
 
   publish: func(driver: string, topic: string, payload: list<u8>) -> result<_, bus-error>;
   get:     func(driver: string, topic: string) -> result<option<list<u8>>, bus-error>;
 }
 
 interface bus-host {
-  use bus.{bus-error};
+  use bus-types.{bus-error};
 
   emit: func(topic: string, payload: list<u8>) -> result<_, bus-error>;
 }
@@ -2320,7 +2330,7 @@ Ok(serde_json::json!({
 }))
 ```
 
-`plugins/list` の各要素に `"bus"` を足す(`BusInfo` から `driver` / `publish` / `subscribe` / `reason` / `granted` / `stale` / `resolved`)。
+`plugins/list` の各要素に `"bus"` を足す(`BusInfo` から `driver` / `publish` / `subscribe` / `reason` / `granted` / `staleGrant` / `resolved`)。
 
 `ServerState` に `Option<DriverRegistry>` を持たせ、WebSocket ハンドラから渡す。
 
@@ -2347,7 +2357,7 @@ git commit -m "feat(server): add the drivers RPC and bus info in plugins/list"
 **Interfaces:**
 - Consumes: Task 12 の RPC
 - Produces:
-  - `types/plugin.ts` の `BusRequest { driver: string; publish: string[]; subscribe: string[]; reason: string; granted: boolean; stale: boolean; resolved: boolean }`
+  - `types/plugin.ts` の `BusRequest { driver: string; publish: string[]; subscribe: string[]; reason: string; granted: boolean; staleGrant: boolean; resolved: boolean }`
   - `types/plugin.ts` の `DriverInfo { id: string; name: string; version: string; description: string; topics: TopicSpec[]; state: "running" | "disabled"; reason?: string; ... }`
   - `rpc.ts` の `listDrivers()` / `setDriverSettings()` / `setDriverCapabilities()` / `setBusGrant()`
 
@@ -2367,7 +2377,7 @@ const base = {
   subscribe: ["current-system"],
   reason: "現在システムを購読するため",
   granted: false,
-  stale: false,
+  staleGrant: false,
   resolved: true,
 };
 
@@ -2389,7 +2399,7 @@ describe("BusSection", () => {
 
   it("marks stale grants as needing re-approval", () => {
     render(
-      <BusSection pluginId="translator" bus={[{ ...base, stale: true }]} onSetGrant={vi.fn()} />,
+      <BusSection pluginId="translator" bus={[{ ...base, staleGrant: true }]} onSetGrant={vi.fn()} />,
     );
     expect(screen.getByText("要再承認")).toBeInTheDocument();
   });
@@ -2418,7 +2428,7 @@ const driver = {
   topics: [{ name: "current-system", retain: true, description: "現在のシステム" }],
   settings: [],
   values: {},
-  capabilities: { requests: [], granted: false, stale: false },
+  capabilities: { requests: [], granted: false, staleGrant: false },
   sidecars: [],
   filesystem: [],
   state: "running" as const,
@@ -2457,7 +2467,7 @@ Expected: モジュールが見つからず FAIL
 
 - [ ] **Step 3: 実装する**
 
-`BusSection.tsx` は `FilesystemSection.tsx` と同じ構造(props で状態を受け、承認チェックボックスを出し、`onSetGrant` を呼ぶ)。`resolved === false` のとき「未解決」バッジ、`stale === true` のとき「要再承認」バッジを出す。
+`BusSection.tsx` は `FilesystemSection.tsx` と同じ構造(props で状態を受け、承認チェックボックスを出し、`onSetGrant` を呼ぶ)。`resolved === false` のとき「未解決」バッジ、`staleGrant === true` のとき「要再承認」バッジを出す。
 
 `Drivers.tsx` は `Plugins.tsx` の一覧部分を写し、トピック一覧(`retain` の有無つき)、設定フォーム(`PluginForm` を再利用)、capability / sidecar / filesystem の各セクションを並べる。
 

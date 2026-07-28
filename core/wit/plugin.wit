@@ -1,4 +1,4 @@
-package edlr:plugin@0.2.0;
+package edlr:plugin@0.3.0;
 
 interface host-log {
   enum level { debug, info, warn, error }
@@ -86,12 +86,43 @@ interface driver-fs {
   delete:     func(root: string, path: string) -> result<_, driver-error>;
 }
 
+/// `bus-error` を関数を持たない型だけの interface に切り出したもの。
+/// `bus` や `bus-host` のように関数を持つ interface から `use` で型を借りると、
+/// その interface 全体が import 先の world に引き込まれてしまう
+/// (WIT の `use` は型だけでなく interface 全体への依存を生む)。
+/// `world driver` が `bus-host` を import しつつ `bus` を引き込まないためには、
+/// 両者が共有する型をこの関数なし interface から借りる必要がある。
+interface bus-types {
+  variant bus-error {
+    permission-denied(string),
+    unknown-driver(string),
+    unknown-topic(string),
+    driver-unavailable(string),
+    queue-full(string),
+    too-large(string),
+  }
+}
+
+interface bus {
+  use bus-types.{bus-error};
+
+  publish: func(driver: string, topic: string, payload: list<u8>) -> result<_, bus-error>;
+  get:     func(driver: string, topic: string) -> result<option<list<u8>>, bus-error>;
+}
+
+interface bus-host {
+  use bus-types.{bus-error};
+
+  emit: func(topic: string, payload: list<u8>) -> result<_, bus-error>;
+}
+
 world plugin {
   import host-log;
   import host-settings;
   import driver-http;
   import driver-process;
   import driver-fs;
+  import bus;
 
   record event {
     // "journal" | "status"
@@ -107,6 +138,7 @@ world plugin {
 
   export init: func();
   export on-event: func(ev: event);
+  export on-message: func(driver: string, topic: string, payload: list<u8>);
 }
 
 /// ゲスト(プラグイン)がビルド時に対象とする world。
@@ -128,5 +160,27 @@ world plugin {
 /// ホストの world に WASI を含めると二重登録になってしまう。
 world plugin-guest {
   include plugin;
+  include wasi:cli/imports@0.2.0;
+}
+
+/// ドライバ(ホスト側 `bindgen!` が使う)。`bus` は import しない
+/// -- ドライバ間の呼び出しを構造的に不可能にするため。`on-event` も無い
+/// -- ドライバは journal / status を受け取らない。
+world driver {
+  import host-log;
+  import host-settings;
+  import driver-http;
+  import driver-process;
+  import driver-fs;
+  import bus-host;
+
+  export init: func();
+  export on-message: func(%from: string, topic: string, payload: list<u8>);
+}
+
+/// ドライバ(ゲスト)がビルド時に対象とする world。`plugin-guest` と同じ理由で
+/// WASI の import 一式を足してある。
+world driver-guest {
+  include driver;
   include wasi:cli/imports@0.2.0;
 }

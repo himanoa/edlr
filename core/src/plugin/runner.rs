@@ -15,32 +15,94 @@
 //! レジストリを `Disabled` にしてループを抜け、スレッドを終了する。それに伴い
 //! `std::sync::mpsc` の送信側(購読タスク)への送信も失敗するようになるため、
 //! 購読タスクも次のイベントで終了する。他プラグインや監視コアには一切波及しない。
+//!
+//! journal イベントに加えて、バス経由でドライバから届く配信(`Delivery`)も
+//! 同じプラグインスレッドで処理する。`PluginInstance` は 1 スレッドの外に出ない
+//! という性質を保つため、2 本目のスレッドや 2 つ目の wasm 呼び出し口を増やす
+//! のではなく、両方を 1 本の `PluginWork` キューに混ぜて直列化する
+//! (`PluginWork` のドキュメントコメント参照)。バス側の配信は `Bus::subscribe`
+//! が要求する `SyncSender<Delivery>` を別途受け取り、それを `PluginWork` へ
+//! 詰め替えて転送する専用の tokio タスク(`spawn_bus_subscriber`)が
+//! `spawn_event_subscriber` と対称の形で存在する。
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc as std_mpsc, Arc, Mutex};
 use std::thread;
+use std::time::Duration;
 
-/// Capacity of the per-plugin journal-event queue (`events_tx`/`events_rx`
-/// below). `driver-http.send` can block a plugin's dedicated thread for up
-/// to `host::HTTP_TIMEOUT` per call (a host the plugin author controls can
-/// simply not respond), during which the plugin's own thread is not
-/// draining `events_rx` at all. The channel used to be unbounded
-/// (`std_mpsc::channel`), so a stalled plugin let the router/monitor's
-/// broadcast events accumulate in host memory without limit -- outside
-/// anything `StoreLimits` can see, since it lives on the host side of the
-/// boundary, not in the plugin's wasm linear memory. Bounding it here caps
-/// that growth at a fixed, small number of pending events per plugin.
+/// プラグイン専用の作業キュー(下記 `work_tx`/`work_rx`)の容量。journal
+/// イベント(`PluginWork::Event`)とドライバからのバス配信
+/// (`PluginWork::Message`)の両方をこの 1 本の有界チャネルに混ぜることで、
+/// 2 種類の wasm 呼び出しをプラグイン専用の 1 スレッドに直列化する(モジュール
+/// のドキュメントコメントと `PluginWork` を参照)。`spawn_bus_subscriber` が
+/// 読む配信専用の `Delivery` チャネルの容量にも同じ値を使い回している。
 ///
-/// Overflow policy: when full, `spawn_event_subscriber` drops the new event
-/// and logs a `tracing::warn!` rather than blocking the subscriber task (see
-/// its doc comment) or disabling the plugin outright -- a plugin that's
-/// merely slow (e.g. waiting out its own `driver-http.send` call) should be
-/// allowed to catch up and keep running, not be killed for falling behind.
-const PLUGIN_EVENT_QUEUE_CAPACITY: usize = 32;
+/// `driver-http.send` は 1 呼び出しあたり `host::HTTP_TIMEOUT` までプラグイン
+/// 専用スレッドをブロックしうる(プラグイン作者の管理下にないホストが単に
+/// 応答しないことがある)。その間プラグイン自身のスレッドは `work_rx` を
+/// 全く読まない。このチャネルはかつて無制限(`std_mpsc::channel`)で journal
+/// イベントのみを運んでいたため、詰まったプラグインは router/monitor 側の
+/// broadcast イベントをホストメモリ上に際限なく溜め込ませてしまっていた
+/// -- `StoreLimits` から見えるプラグインの wasm 線形メモリの外側の話なので、
+/// そこでは検知できない。ここで容量を切ることで、プラグイン 1 件あたりの
+/// 積み残し(イベントであれバス配信であれ)を固定の小さい数に抑える。
+///
+/// 満杯時の方針: `spawn_event_subscriber` は新しいイベントを、
+/// `spawn_bus_subscriber` は新しい配信を、それぞれ `tracing::warn!` を出して
+/// 捨てる(購読タスク自身をブロックする(各ドキュメントコメント参照)のでも
+/// プラグインを無効化するのでもない)。`driver-http.send` を待っているだけの
+/// ような、単に遅いプラグインを、遅れを理由に殺すべきではないため。
+///
+/// **32 → 64 への変更(このタスクでの調整)**: この容量はもともと journal
+/// イベントのみを運んでいた頃に決めた値。今は 2 つの独立したプロデューサ
+/// (router のイベント購読タスクと、バスの配信購読タスク)が同じキューの
+/// 枠を奪い合っており、両者の間には公平性も優先度も無いため、どちらか一方の
+/// バーストがもう一方を飢えさせて捨てさせうる。容量を倍にすることで、
+/// おおよそ元の数が想定していた「1 ストリームあたりの余裕」を両ストリームに
+/// 復元する(ドライバ側 `DRIVER_MESSAGE_QUEUE_CAPACITY` の 64 とも揃う)。
+///
+/// **既知の限界(このタスクでは未解決)**: これは緩和策であって解決策では
+/// ない。2 プロデューサ間の公平性は依然として無く、十分におしゃべりな
+/// ドライバがあれば journal イベント側が捨てられることは今も起こりうる。
+/// この計画で意図的にスコープ外としている次の一手は、破棄をプラグインごとに
+/// 観測可能にすること(`plugins/list` 経由で見えるカウンタなど)-- 実際に
+/// 何か捨てられているかも分からないままこの数値だけをチューニングするのは
+/// 当て推量でしかないため。
+const PLUGIN_WORK_QUEUE_CAPACITY: usize = 64;
+
+/// `spawn_bus_subscriber` のブロッキング受信を区切る間隔。
+///
+/// **これが無いとデーモンの正常終了がハングする(実際に踏んだ Critical
+/// バグの修正)**: `spawn_bus_subscriber` は `tokio::task::spawn_blocking` の
+/// 中で `delivery_rx` を読み続けるが、その送信側(`Bus::subscribe` に渡した
+/// `Sender<Delivery>`)は `edlr_driver_channel::Bus` の購読表に居座り続け、
+/// 明示的に `unsubscribe`(`run_plugin_thread` の trap 分岐、あるいはプロセス
+/// 終了)されない限り閉じない。素朴な `for delivery in delivery_rx`(かつての
+/// 実装)は「送信側が全部閉じるまで無期限に待つ」ブロッキング呼び出しであり、
+/// `core/src/bin/edlr.rs` の `main` が(`Runtime::drop` を伴って)戻ろうとする
+/// 際、`Runtime` はこの `spawn_blocking` タスクの完了を待ち続けるため、
+/// **デーモンが SIGTERM/SIGINT を受けても `main` から永久に戻れない**
+/// (Tauri アプリの「デーモン未起動なら自動 spawn し、終了時に道連れで止める」
+/// が `STOP_GRACE` を使い切って最後は SIGKILL する羽目になる、という形で
+/// 顕在化した)。`[[bus]] subscribe` を宣言するプラグインが 1 つでもあれば
+/// 再現する。
+///
+/// 対策として、`delivery_rx.recv_timeout(..)` でブロッキング時間をこの間隔に
+/// 区切り、タイムアウトのたびに `shutdown` フラグ(`bin/edlr.rs` の shutdown
+/// シーケンスが `Registry::shutdown_bus_subscribers` 経由で `Runtime` を drop
+/// する**前**に立てる)を確認する。200ms は「シグナル受信からタスク終了までの
+/// 体感の遅延」と「アイドル時に無駄にウェイクアップする頻度」のバランスを
+/// 取った値で、他に強い制約は無い。
+const BUS_SUBSCRIBER_SHUTDOWN_POLL_INTERVAL: Duration = Duration::from_millis(200);
 
 use tokio::sync::broadcast;
 
+use edlr_driver_channel::{Bus, Delivery};
+
+use crate::driver::registry::DriverRegistry;
 use crate::event::Event;
+use crate::plugin::bus_runtime::{bus_json_string, parse_bus, BusRuntimeEntry};
 use crate::plugin::filesystem::FilesystemConfigStore;
 use crate::plugin::fs_runtime::{filesystem_json_string, FsRuntimeEntry};
 use crate::plugin::grants::GrantsStore;
@@ -64,6 +126,17 @@ use crate::router::Router;
 /// `sidecars_json`/`capabilities_json` はあくまで承認・設定状態のスナップ
 /// ショットで、実プロセスの起動はプラグイン自身の `ensure-started` 呼び出し
 /// か、ユーザー操作(`Registry::control_sidecar`)を経て初めて行われる。
+///
+/// **`bus` は呼び出し元が構築した 1 つのインスタンスを渡す**: ここで組み立て
+/// る各プラグインの `HostCtx` はこの同じ `bus` を(`Clone` して)共有する
+/// (`http_driver`/`process_driver`/`fs_driver` と同様、`HostCtx::bus` の
+/// ドキュメントコメント参照)。呼び出し元は `crate::driver::start_drivers` を
+/// この関数より先に呼び、そこで返した `DriverRegistry` の構築に使ったのと
+/// 同じ `bus` をここへ渡すこと -- そうしないと、ドライバの登録
+/// (`Bus::register_driver`)が完了する前にプラグインが起動し、`init` 中の
+/// 最初の `bus.get` 呼び出しが `unknown-driver` を見てしまう(設計書
+/// 「起動順序」参照)。
+#[allow(clippy::too_many_arguments)]
 pub fn start_plugins(
     plugins_dir: &Path,
     settings_store: SettingsStore,
@@ -71,6 +144,8 @@ pub fn start_plugins(
     filesystem_config_store: FilesystemConfigStore,
     grants_store: GrantsStore,
     router: &Router,
+    bus: Bus,
+    drivers: DriverRegistry,
     host: PluginHost,
 ) -> Registry {
     let host = Arc::new(host);
@@ -86,6 +161,7 @@ pub fn start_plugins(
         sidecar_config_store.clone(),
         filesystem_config_store.clone(),
         process_driver,
+        drivers.clone(),
         plugins_dir.to_path_buf(),
     );
 
@@ -118,6 +194,8 @@ pub fn start_plugins(
             }
         };
 
+        warn_unresolved_bus(&manifest, &drivers);
+
         load_and_run_plugin(
             &manifest,
             &path,
@@ -126,6 +204,7 @@ pub fn start_plugins(
             &sidecar_config_store,
             &filesystem_config_store,
             router,
+            &bus,
             &host,
             &registry,
         );
@@ -145,6 +224,7 @@ fn load_and_run_plugin(
     sidecar_config_store: &SidecarConfigStore,
     filesystem_config_store: &FilesystemConfigStore,
     router: &Router,
+    bus: &Bus,
     host: &Arc<PluginHost>,
     registry: &Registry,
 ) {
@@ -222,7 +302,30 @@ fn load_and_run_plugin(
         .collect();
     let filesystem_json = Arc::new(Mutex::new(filesystem_json_string(&filesystem_entries)));
 
-    let (events_tx, events_rx) = std_mpsc::sync_channel::<Arc<Event>>(PLUGIN_EVENT_QUEUE_CAPACITY);
+    // バス接続先ごとの承認(`GrantsStore::bus_state`)を解決して
+    // `BusRuntimeEntry` にまとめる。サイドカー/ファイルアクセスの初期値組み
+    // 立てと同じ流儀(未承認の接続先は `bus_json_string` が `publish`/
+    // `subscribe` を落とす -- `bus_runtime` のドキュメント参照)。トピック
+    // 一覧自体は manifest の要求をそのまま載せる(`GrantsStore` はトピック
+    // の中身を持たない)。
+    let bus_entries: Vec<BusRuntimeEntry> = manifest
+        .bus
+        .iter()
+        .map(|request| {
+            let granted = grants_store.bus_state(manifest, &request.driver).granted;
+            BusRuntimeEntry {
+                driver: request.driver.clone(),
+                granted,
+                publish: request.publish.clone(),
+                subscribe: request.subscribe.clone(),
+            }
+        })
+        .collect();
+    let bus_json = Arc::new(Mutex::new(bus_json_string(&bus_entries)));
+
+    // journal イベントとバス配信を混ぜる 1 本の作業キュー(`PluginWork` の
+    // ドキュメントコメント参照)。
+    let (work_tx, work_rx) = std_mpsc::sync_channel::<PluginWork>(PLUGIN_WORK_QUEUE_CAPACITY);
     let (ready_tx, ready_rx) = std_mpsc::channel::<PluginState>();
 
     thread::spawn({
@@ -232,6 +335,8 @@ fn load_and_run_plugin(
         let capabilities_json = capabilities_json.clone();
         let sidecars_json = sidecars_json.clone();
         let filesystem_json = filesystem_json.clone();
+        let bus_json = bus_json.clone();
+        let bus = bus.clone();
         let registry = registry.clone();
         move || {
             run_plugin_thread(
@@ -242,8 +347,10 @@ fn load_and_run_plugin(
                 capabilities_json,
                 sidecars_json,
                 filesystem_json,
+                bus_json,
+                bus,
                 registry,
-                events_rx,
+                work_rx,
                 ready_tx,
             );
         }
@@ -261,13 +368,51 @@ fn load_and_run_plugin(
         capabilities_json,
         sidecars_json,
         filesystem_json,
+        bus_json: bus_json.clone(),
     });
 
     if running {
-        spawn_event_subscriber(manifest.clone(), router.subscribe(), events_tx);
+        spawn_event_subscriber(manifest.clone(), router.subscribe(), work_tx.clone());
+
+        // `[[bus]]` の `subscribe` トピックがあれば、購読を登録して配信を
+        // このプラグインの作業キューへ流し込む(`spawn_bus_subscriber` の
+        // ドキュメントコメント参照)。登録は承認の有無に関わらず行う --
+        // 承認は配信のたびに再確認するため(稼働中の取り消しを即座に効かせる
+        // ため)、後から承認されても購読し直す必要がない。
+        let subscribe_topics: Vec<(String, String)> = manifest
+            .bus
+            .iter()
+            .flat_map(|request| {
+                request
+                    .subscribe
+                    .iter()
+                    .map(move |topic| (request.driver.clone(), topic.clone()))
+            })
+            .collect();
+        if !subscribe_topics.is_empty() {
+            let (delivery_tx, delivery_rx) =
+                std_mpsc::sync_channel::<Delivery>(PLUGIN_WORK_QUEUE_CAPACITY);
+            for (driver_id, topic) in &subscribe_topics {
+                subscribe_with_initial_value(
+                    bus,
+                    &manifest.id,
+                    driver_id,
+                    topic,
+                    delivery_tx.clone(),
+                );
+            }
+            drop(delivery_tx);
+            spawn_bus_subscriber(
+                manifest.clone(),
+                bus_json,
+                delivery_rx,
+                work_tx,
+                registry.bus_subscriber_shutdown_flag(),
+            );
+        }
     }
-    // Disabled の場合、events_tx はここで drop される。プラグインスレッドは
-    // 既に init 失敗で return 済みで events_rx を読まないので問題ない。
+    // Disabled の場合、work_tx はここで drop される。プラグインスレッドは
+    // 既に init 失敗で return 済みで work_rx を読まないので問題ない。
 }
 
 /// プラグイン専用スレッドの本体。`load` → `call_init` → イベントループを
@@ -281,16 +426,26 @@ fn run_plugin_thread(
     capabilities_json: Arc<Mutex<String>>,
     sidecars_json: Arc<Mutex<String>>,
     filesystem_json: Arc<Mutex<String>>,
+    bus_json: Arc<Mutex<String>>,
+    bus: Bus,
     registry: Registry,
-    events_rx: std_mpsc::Receiver<Arc<Event>>,
+    work_rx: std_mpsc::Receiver<PluginWork>,
     ready_tx: std_mpsc::Sender<PluginState>,
 ) {
+    // trap 時にこのプラグインの購読を `Bus` の購読表から取り除くために手元に
+    // 残しておく(`ctx` へ渡す方は `HostCtx::new` に move する)。
+    // `edlr_driver_channel::Bus::unsubscribe_plugin` のドキュメントコメント
+    // 参照: 呼ばないと、このプラグインが二度と読まない購読エントリが
+    // プロセスの生存期間中ずっと購読表に残り続ける。
+    let bus_for_unsubscribe = bus.clone();
     let ctx = HostCtx::new(
         manifest.id.clone(),
         settings_json,
         capabilities_json,
         sidecars_json,
         filesystem_json,
+        bus_json,
+        bus,
         host.http_driver(),
         host.process_driver(),
         host.fs_driver(),
@@ -317,40 +472,54 @@ fn run_plugin_thread(
         return;
     }
 
-    for event in events_rx {
-        let (kind, timestamp, name, payload_json, replay) = event_params(&event);
-        if let Err(e) = instance.call_on_event(
-            kind,
-            timestamp.as_deref(),
-            name.as_deref(),
-            &payload_json,
-            replay,
-        ) {
+    for work in work_rx {
+        let result = match &work {
+            PluginWork::Event(event) => {
+                let (kind, timestamp, name, payload_json, replay) = event_params(event);
+                instance
+                    .call_on_event(kind, timestamp.as_deref(), name.as_deref(), &payload_json, replay)
+                    .map_err(|e| format!("on-event call failed: {e}"))
+            }
+            PluginWork::Message(delivery) => instance
+                .call_on_message(&delivery.driver_id, &delivery.topic, &delivery.payload)
+                .map_err(|e| format!("on-message call failed: {e}")),
+        };
+        if let Err(reason) = result {
             tracing::warn!(
                 plugin_id = %manifest.id,
-                "on-event call failed, disabling plugin: {e}"
+                "wasm call failed, disabling plugin: {reason}"
             );
-            registry.set_disabled(&manifest.id, format!("on-event call failed: {e}"));
+            registry.set_disabled(&manifest.id, reason);
+            bus_for_unsubscribe.unsubscribe_plugin(&manifest.id);
             break;
         }
     }
 }
 
+/// プラグイン専用スレッドが処理する仕事。journal イベントとバスの配信を
+/// 1 本のキューに混ぜることで、wasm 呼び出しが 1 スレッドに直列化される
+/// 性質(`PluginInstance` が `Send` を気にしなくてよい根拠)を保つ。
+#[derive(Debug)]
+enum PluginWork {
+    Event(Arc<Event>),
+    Message(Delivery),
+}
+
 /// `router` を購読し、`manifest.events` にマッチしたイベントだけを
 /// プラグインスレッドへ転送する tokio タスクを起動する。
 ///
-/// `events_tx` は容量固定の `sync_channel`(`PLUGIN_EVENT_QUEUE_CAPACITY`)
+/// `work_tx` は容量固定の `sync_channel`(`PLUGIN_WORK_QUEUE_CAPACITY`)
 /// なので、送信には(ブロックする `send` ではなく)`try_send` を使う。この
 /// tokio タスクは非同期ランタイムのワーカースレッド上で動くため、万一
 /// プラグインスレッドが `driver-http.send` のブロッキング呼び出し中で
-/// `events_rx` を全く読んでいなくても、ここで待たされてはいけない
+/// `work_rx` を全く読んでいなくても、ここで待たされてはいけない
 /// (ワーカースレッドを塞ぐと router/monitor 全体に波及する)。キューが
 /// 満杯の間に届いたイベントは `tracing::warn!` を出して破棄する
-/// (`PLUGIN_EVENT_QUEUE_CAPACITY` のドキュメント参照)。
+/// (`PLUGIN_WORK_QUEUE_CAPACITY` のドキュメント参照)。
 fn spawn_event_subscriber(
     manifest: Manifest,
     mut rx: broadcast::Receiver<Arc<Event>>,
-    events_tx: std_mpsc::SyncSender<Arc<Event>>,
+    work_tx: std_mpsc::SyncSender<PluginWork>,
 ) {
     tokio::spawn(async move {
         loop {
@@ -359,12 +528,12 @@ fn spawn_event_subscriber(
                     if !matches_event(&manifest.events, &event) {
                         continue;
                     }
-                    match events_tx.try_send(event) {
+                    match work_tx.try_send(PluginWork::Event(event)) {
                         Ok(()) => {}
                         Err(std_mpsc::TrySendError::Full(_)) => {
                             tracing::warn!(
                                 plugin_id = %manifest.id,
-                                "event queue full ({PLUGIN_EVENT_QUEUE_CAPACITY} pending), \
+                                "event queue full ({PLUGIN_WORK_QUEUE_CAPACITY} pending), \
                                  dropping event for a slow/blocked plugin"
                             );
                         }
@@ -404,6 +573,131 @@ fn event_params(event: &Event) -> (&'static str, Option<String>, Option<String>,
     }
 }
 
+/// 購読を登録し、retain 済みトピックなら現在値を 1 回だけ届ける。
+///
+/// 後から起動・後から承認されたプラグインにも最新値が渡るようにするため
+/// (設計書「データフロー」参照)。ここで送るのは登録直後の 1 通だけで、
+/// 以降は通常の `emit` 経路に乗る。
+///
+/// **登録が先、送信が後**: 先に `bus.subscribe` で購読表へ登録してから
+/// 現在の retained 値を読んで送る。逆順にすると、値を読んだ直後・購読登録の
+/// 前に割り込んだ `emit` を取りこぼす窓ができてしまう。
+pub(crate) fn subscribe_with_initial_value(
+    bus: &Bus,
+    plugin_id: &str,
+    driver_id: &str,
+    topic: &str,
+    sender: std_mpsc::SyncSender<Delivery>,
+) {
+    bus.subscribe(plugin_id, driver_id, topic, sender.clone());
+    if let Some(payload) = bus.retained_for(driver_id, topic) {
+        let _ = sender.try_send(Delivery {
+            plugin_id: plugin_id.to_string(),
+            driver_id: driver_id.to_string(),
+            topic: topic.to_string(),
+            payload,
+        });
+    }
+}
+
+/// `Bus::subscribe` に渡した `SyncSender<Delivery>` の受け口を読み、
+/// 承認済み・宣言済みのままの配信だけを `PluginWork::Message` に詰め替えて
+/// プラグインの作業キューへ転送する。`spawn_event_subscriber` と対称の形だが、
+/// 転送元が(非同期の `broadcast::Receiver` ではなく)同期の
+/// `std::sync::mpsc::Receiver` なので `tokio::task::spawn_blocking` を使う
+/// (`bin/edlr.rs` の `spawn_blocking` 呼び出しと同じ流儀。非同期ランタイムの
+/// ワーカースレッドを専有させない)。
+///
+/// **配信のたびに承認を再確認する**: 承認は稼働中も取り消せる
+/// (`Registry::set_bus_grant`)ため、購読を登録した時点の承認状態を信じて
+/// 転送し続けると、取り消し後も届いてしまう(fail-open)。ここでは毎回
+/// `bus_json` を読み直し、`granted` かつ当該トピックが `subscribe` に
+/// 含まれている場合だけ転送する(`HostCtx::check_bus` と同じ判定材料・
+/// 同じ判定規則)。
+///
+/// **`shutdown` を定期的に確認しながらブロックする**(`for delivery in
+/// delivery_rx` ではなく `delivery_rx.recv_timeout(..)` を使う理由は
+/// `BUS_SUBSCRIBER_SHUTDOWN_POLL_INTERVAL` のドキュメントコメント参照)。
+/// `shutdown` が立っていれば、キューに残りがあってもそこで打ち切って戻る --
+/// デーモン終了シーケンスの一部として呼ばれるので、残りを律儀に配り切る
+/// より `Runtime::drop` を進められる方を優先する。
+fn spawn_bus_subscriber(
+    manifest: Manifest,
+    bus_json: Arc<Mutex<String>>,
+    delivery_rx: std_mpsc::Receiver<Delivery>,
+    work_tx: std_mpsc::SyncSender<PluginWork>,
+    shutdown: Arc<AtomicBool>,
+) {
+    tokio::task::spawn_blocking(move || loop {
+        if shutdown.load(Ordering::Acquire) {
+            break;
+        }
+        let delivery = match delivery_rx.recv_timeout(BUS_SUBSCRIBER_SHUTDOWN_POLL_INTERVAL) {
+            Ok(delivery) => delivery,
+            Err(std_mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(std_mpsc::RecvTimeoutError::Disconnected) => break,
+        };
+        let raw = bus_json
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        let entries = parse_bus(&raw);
+        let still_granted = entries
+            .get(&delivery.driver_id)
+            .is_some_and(|entry| entry.granted && entry.subscribe.contains(&delivery.topic));
+        if !still_granted {
+            // 承認が取り消された(か、そもそも一度も承認されていない)。
+            // 黙って捨てる -- `check_bus` が publish/get 側で同じ状況を
+            // `permission-denied` として扱うのと違い、こちらはドライバ
+            // 起点のプッシュ配信なので呼び出し元に返すエラーが無い。
+            continue;
+        }
+        match work_tx.try_send(PluginWork::Message(delivery)) {
+            Ok(()) => {}
+            Err(std_mpsc::TrySendError::Full(_)) => {
+                tracing::warn!(
+                    plugin_id = %manifest.id,
+                    "work queue full ({PLUGIN_WORK_QUEUE_CAPACITY} pending), \
+                     dropping a bus delivery for a slow/blocked plugin"
+                );
+            }
+            Err(std_mpsc::TrySendError::Disconnected(_)) => {
+                // プラグインスレッドが終了(disabled)済み。
+                break;
+            }
+        }
+    });
+}
+
+/// `[[bus]]` の参照先が実在しないものを warn ログに出す。
+///
+/// **起動は止めない**(ドライバは後から入れられるべき)。ただし黙って
+/// 動くと事故になるので、プラグイン ID・ドライバ ID・トピック名を全て
+/// 含めて必ず 1 件ずつ出す。UI 側は `BusInfo::resolved` を見て「未解決」
+/// バッジを出す。
+pub(crate) fn warn_unresolved_bus(manifest: &Manifest, drivers: &DriverRegistry) {
+    for request in &manifest.bus {
+        let Some(driver) = drivers.manifest_of(&request.driver) else {
+            tracing::warn!(
+                plugin_id = %manifest.id,
+                driver_id = %request.driver,
+                "plugin declares a bus connection to a driver that is not installed"
+            );
+            continue;
+        };
+        for topic in request.publish.iter().chain(request.subscribe.iter()) {
+            if driver.topic(topic).is_none() {
+                tracing::warn!(
+                    plugin_id = %manifest.id,
+                    driver_id = %request.driver,
+                    topic = %topic,
+                    "plugin declares a bus topic the driver does not provide"
+                );
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     //! `spawn_event_subscriber` is what stands between the router's
@@ -411,7 +705,7 @@ mod tests {
     //! to `host::HTTP_TIMEOUT` inside `driver-http.send`. These tests never
     //! drain `events_rx` (simulating a fully-stalled plugin thread) and
     //! assert that publishing far more events than
-    //! `PLUGIN_EVENT_QUEUE_CAPACITY` neither blocks the publishing task nor
+    //! `PLUGIN_WORK_QUEUE_CAPACITY` neither blocks the publishing task nor
     //! grows the queue past its bound.
     use super::*;
     use std::time::Duration;
@@ -428,6 +722,7 @@ mod tests {
             capabilities: vec![],
             sidecars: vec![],
             filesystem: vec![],
+            bus: vec![],
         }
     }
 
@@ -443,19 +738,19 @@ mod tests {
     #[tokio::test]
     async fn slow_plugin_channel_stays_bounded_and_publishing_does_not_block() {
         let (broadcast_tx, broadcast_rx) = broadcast::channel::<Arc<Event>>(4096);
-        let (events_tx, events_rx) =
-            std_mpsc::sync_channel::<Arc<Event>>(PLUGIN_EVENT_QUEUE_CAPACITY);
+        let (work_tx, work_rx) =
+            std_mpsc::sync_channel::<PluginWork>(PLUGIN_WORK_QUEUE_CAPACITY);
 
-        spawn_event_subscriber(test_manifest(), broadcast_rx, events_tx);
+        spawn_event_subscriber(test_manifest(), broadcast_rx, work_tx);
 
         // Simulate a plugin thread that's blocked in `driver-http.send`:
-        // never drain `events_rx` while publishing far more events than the
+        // never drain `work_rx` while publishing far more events than the
         // queue's capacity. If `try_send` were replaced with a blocking
         // `send`, this loop (running on the current task, same as the
         // subscriber would on a shared runtime) would risk deadlocking or
         // at minimum this test would take a long time; with `try_send` it
         // must complete promptly regardless of channel fullness.
-        let published = PLUGIN_EVENT_QUEUE_CAPACITY * 50;
+        let published = PLUGIN_WORK_QUEUE_CAPACITY * 50;
         for i in 0..published {
             broadcast_tx
                 .send(journal_event(&format!("Evt{i}")))
@@ -463,21 +758,216 @@ mod tests {
         }
 
         // Give the subscriber tokio task a bounded window to drain the
-        // broadcast channel into events_rx (or drop on overflow); this test
+        // broadcast channel into work_rx (or drop on overflow); this test
         // fails by hanging (via the outer test timeout) if the subscriber
         // ever blocks trying to push past the queue's capacity.
         tokio::time::sleep(Duration::from_millis(200)).await;
 
         let mut queued = 0usize;
-        while events_rx.try_recv().is_ok() {
+        while work_rx.try_recv().is_ok() {
             queued += 1;
         }
 
         assert!(
-            queued <= PLUGIN_EVENT_QUEUE_CAPACITY,
-            "queued {queued} events, expected at most {PLUGIN_EVENT_QUEUE_CAPACITY} \
+            queued <= PLUGIN_WORK_QUEUE_CAPACITY,
+            "queued {queued} events, expected at most {PLUGIN_WORK_QUEUE_CAPACITY} \
              (publishing {published} events to a never-drained receiver must not \
              grow the queue past its bound)"
+        );
+    }
+
+    #[test]
+    fn deliveries_reach_the_plugin_queue_and_full_queues_drop_the_message() {
+        // Bus::subscribe に渡すのと同じ容量 1 の sync_channel を使い、
+        // 2 通目が捨てられる(＝ emit 自体は成功する)ことを確認する。
+        let bus = edlr_driver_channel::Bus::new();
+        let (dtx, _drx) = std::sync::mpsc::sync_channel(4);
+        bus.register_driver(
+            "ed-state",
+            vec![edlr_driver_channel::TopicSpec {
+                name: "current-system".into(),
+                retain: true,
+                description: String::new(),
+            }],
+            dtx,
+        );
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        bus.subscribe("translator", "ed-state", "current-system", tx);
+
+        bus.emit("ed-state", "current-system", b"a".to_vec()).unwrap();
+        bus.emit("ed-state", "current-system", b"b".to_vec()).unwrap();
+
+        assert!(rx.try_recv().is_ok());
+        assert!(rx.try_recv().is_err());
+        assert_eq!(
+            bus.retained_for("ed-state", "current-system"),
+            Some(b"b".to_vec())
+        );
+    }
+
+    #[test]
+    fn subscribing_to_a_retained_topic_delivers_the_current_value_once() {
+        let bus = edlr_driver_channel::Bus::new();
+        let (dtx, _drx) = std::sync::mpsc::sync_channel(4);
+        bus.register_driver(
+            "ed-state",
+            vec![edlr_driver_channel::TopicSpec {
+                name: "current-system".into(),
+                retain: true,
+                description: String::new(),
+            }],
+            dtx,
+        );
+        bus.emit("ed-state", "current-system", b"Sol".to_vec())
+            .unwrap();
+
+        let (tx, rx) = std::sync::mpsc::sync_channel(4);
+        subscribe_with_initial_value(&bus, "translator", "ed-state", "current-system", tx);
+
+        assert_eq!(rx.try_recv().unwrap().payload, b"Sol".to_vec());
+    }
+
+    /// `spawn_bus_subscriber` が承認取消を配信のたびに再確認することの検証。
+    ///
+    /// テストの信頼性を担保するため、承認あり/なしの 2 ケースを **同じ**
+    /// 購読・同じ emit で作り、違いは `bus_json` の `granted` だけにする
+    /// (「何も送っていないから届かない」で偽陽性になるのを避けるため)。
+    #[tokio::test]
+    async fn bus_subscriber_forwards_only_while_still_granted() {
+        use crate::plugin::bus_runtime::{bus_json_string, BusRuntimeEntry};
+
+        let bus = edlr_driver_channel::Bus::new();
+        let (dtx, _drx) = std_mpsc::sync_channel(4);
+        bus.register_driver(
+            "ed-state",
+            vec![edlr_driver_channel::TopicSpec {
+                name: "current-system".into(),
+                retain: false,
+                description: String::new(),
+            }],
+            dtx,
+        );
+
+        let granted_entry = |granted: bool| {
+            bus_json_string(&[BusRuntimeEntry {
+                driver: "ed-state".into(),
+                granted,
+                publish: vec![],
+                subscribe: vec!["current-system".into()],
+            }])
+        };
+
+        // 承認あり・承認なしを 2 つの独立したケースとして作ると、それぞれが
+        // 「配信を 1 回しか送らない」ため、「サブスクライバ起動時に承認を
+        // 一度だけ確認する」実装と「配信のたびに再確認する」実装のどちらでも
+        // 両ケースが通ってしまう(前者は起動時の `bus_json` の値をそのまま
+        // 使い続けるだけで、たまたま両ケースとも「起動時点の値」と「配信時点
+        // の値」が一致しているに過ぎない)。ここでは **1 つのサブスクライバの
+        // 生存期間の中で** 同じ `bus_json` バッファを書き換えることで、
+        // 「配信のたびに再確認している」ことしか通らないようにする:
+        // 1. 承認ありで購読・emit → 届く
+        // 2. 同じバッファを(`refresh_bus_runtime` がやるのと同じように)
+        //    承認なしへ書き換える
+        // 3. 同じ購読のまま再度 emit → 届かない
+        let bus_json = Arc::new(Mutex::new(granted_entry(true)));
+        let (delivery_tx, delivery_rx) = std_mpsc::sync_channel(4);
+        let (work_tx, work_rx) = std_mpsc::sync_channel::<PluginWork>(4);
+        bus.subscribe("translator", "ed-state", "current-system", delivery_tx);
+        spawn_bus_subscriber(
+            test_manifest(),
+            bus_json.clone(),
+            delivery_rx,
+            work_tx,
+            Arc::new(AtomicBool::new(false)),
+        );
+
+        bus.emit("ed-state", "current-system", b"Sol".to_vec())
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        match work_rx.try_recv() {
+            Ok(PluginWork::Message(delivery)) => assert_eq!(delivery.payload, b"Sol".to_vec()),
+            other => panic!("expected a granted delivery to reach the plugin queue, got {other:?}"),
+        }
+
+        // `Registry::refresh_bus_runtime` が実際に行うのと同じ操作: 同じ
+        // 共有バッファの中身を書き換えるだけで、購読もサブスクライバタスクも
+        // 再起動しない。
+        *bus_json.lock().unwrap() = granted_entry(false);
+
+        bus.emit("ed-state", "current-system", b"Jameson".to_vec())
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            work_rx.try_recv().is_err(),
+            "revoking the grant on the same running subscriber must stop further \
+             deliveries immediately, without re-subscribing"
+        );
+    }
+
+    /// Regression test for a Critical bug found in review of this task: a
+    /// live `spawn_bus_subscriber` task used to prevent its owning
+    /// `tokio::Runtime` from ever finishing shutdown, because it blocked
+    /// forever on `delivery_rx.recv()` and the `Sender` half (held by
+    /// `edlr_driver_channel::Bus`'s subscription table, exactly as
+    /// `Bus::subscribe` leaves it for the whole process's lifetime) never
+    /// closes on its own. This reproduces the real shutdown shape end to
+    /// end: build a `Runtime`, spawn a `spawn_bus_subscriber` task on it with
+    /// its `delivery_tx` kept alive (the same shape `Bus::subscribe`
+    /// produces), signal shutdown the same way
+    /// `Registry::shutdown_bus_subscribers` does, then drop the `Runtime` and
+    /// assert the drop completes within a bounded deadline.
+    ///
+    /// `Runtime::drop` is itself the call that can hang, so it's performed on
+    /// a dedicated thread and observed through a bounded channel receive --
+    /// this test fails via a timed-out assertion (not a real, unbounded
+    /// process hang) if the fix regresses.
+    #[test]
+    fn spawn_bus_subscriber_lets_the_runtime_shut_down_once_signaled() {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("tokio runtime should build");
+
+        let (delivery_tx, delivery_rx) = std_mpsc::sync_channel::<Delivery>(4);
+        let (work_tx, _work_rx) = std_mpsc::sync_channel::<PluginWork>(4);
+        let shutdown = Arc::new(AtomicBool::new(false));
+
+        rt.block_on(async {
+            spawn_bus_subscriber(
+                test_manifest(),
+                Arc::new(Mutex::new("{}".to_string())),
+                delivery_rx,
+                work_tx,
+                shutdown.clone(),
+            );
+        });
+
+        // Keep the sender alive, exactly like `Bus`'s subscription table
+        // does for as long as the plugin stays subscribed -- if this were
+        // dropped instead, the subscriber would detect `Disconnected` and
+        // exit on its own, and this test would no longer be exercising the
+        // shutdown-signal path at all.
+        let _keep_delivery_tx_alive = delivery_tx;
+
+        // Signal shutdown *before* dropping the runtime, exactly as
+        // `core/src/bin/edlr.rs` now calls
+        // `registry.shutdown_bus_subscribers()` before letting `main` return
+        // (and its implicit `Runtime` drop).
+        shutdown.store(true, Ordering::Release);
+
+        let (done_tx, done_rx) = std_mpsc::channel();
+        thread::spawn(move || {
+            drop(rt);
+            let _ = done_tx.send(());
+        });
+
+        done_rx.recv_timeout(Duration::from_secs(5)).expect(
+            "Runtime::drop must complete promptly once the shutdown flag was set \
+             before the drop; a timeout here means the spawn_blocking task in \
+             spawn_bus_subscriber is still blocking on delivery_rx.recv() instead \
+             of observing the shutdown flag (this is the exact daemon shutdown \
+             hang the fix addresses)",
         );
     }
 }

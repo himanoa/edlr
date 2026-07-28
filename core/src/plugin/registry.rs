@@ -4,10 +4,13 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 
 use edlr_driver_process::{InstanceStatus, ProcessDriver, ProcessSpec};
 
+use crate::driver::registry::DriverRegistry;
+use crate::plugin::bus_runtime::{bus_json_string, BusRuntimeEntry};
 use crate::plugin::filesystem::{FilesystemConfig, FilesystemConfigError, FilesystemConfigStore};
 use crate::plugin::fs_runtime::{filesystem_json_string, FsRuntimeEntry};
 use crate::plugin::grants::{GrantState, GrantsError, GrantsStore};
@@ -18,7 +21,7 @@ use crate::plugin::sidecar_runtime::{
     implicit_http_hosts, sidecars_json_string, SidecarRuntimeEntry,
 };
 use crate::plugin::{
-    CapabilityRequest, FilesystemRequest, Manifest, SettingsError, SidecarRequest,
+    BusRequest, CapabilityRequest, FilesystemRequest, Manifest, SettingsError, SidecarRequest,
 };
 
 /// プラグイン 1 件の現在の駆動状態。
@@ -51,6 +54,11 @@ pub struct PluginEntry {
     /// `driver-fs.*` 呼び出しに再起動不要で反映される。未承認のルートは
     /// `path` を持たない(`fs_runtime` のドキュメント参照)。
     pub filesystem_json: Arc<Mutex<String>>,
+    /// `HostCtx` と共有されるバス承認状態・宣言済みトピック JSON。形は
+    /// `bus_runtime::bus_json_string` を参照。`filesystem_json` と同じく
+    /// 起動時に `GrantsStore::bus_state` と manifest から組み立てられ、以後は
+    /// 将来の `Registry` の bus 承認 API(Task 10)が更新する。
+    pub bus_json: Arc<Mutex<String>>,
 }
 
 /// サイドカー 1 件分の現在状態(`Registry::sidecars` / `PluginInfo::sidecars` 用)。
@@ -68,6 +76,21 @@ pub struct FilesystemInfo {
     pub request: FilesystemRequest,
     pub config: FilesystemConfig,
     pub grant: GrantState,
+}
+
+/// バス接続先 1 件分の現在状態(`Registry::bus` / `PluginInfo::bus` 用)。
+///
+/// `resolved` は「宣言している接続先が実在するか」を表す: 接続先ドライバが
+/// インストールされていない、または宣言したトピック(`publish`/`subscribe`
+/// のいずれか)がそのドライバの `driver.toml` に無い場合に `false` になる。
+/// **承認(`grant`)とは独立**: 未承認でも接続先自体は解決していることが
+/// あり得るし、逆に解決していない接続先を承認すること自体は妨げない
+/// (ドライバが後から入れば、既に承認済みの状態のまま解決される)。
+#[derive(Debug)]
+pub struct BusInfo {
+    pub request: BusRequest,
+    pub grant: GrantState,
+    pub resolved: bool,
 }
 
 /// RPC 応答用のプラグイン情報スナップショット。
@@ -110,6 +133,19 @@ pub enum RegistryError {
     UnknownFilesystem(String),
     /// ファイルアクセス承認自体に関するエラー(未設定ディレクトリでの承認など)。
     Filesystem(String),
+    /// 指定された `driver` のバス接続要求が manifest に無い。
+    UnknownBus(String),
+    /// 指定された `id` のドライバが登録されていない。`UnknownPlugin` とは
+    /// 別の variant にしてある: `crate::driver::registry::DriverRegistry` の
+    /// サイドカー/ファイルアクセス系メソッド(`find_manifest_for_shared` /
+    /// `refresh_sidecar_runtime` / `refresh_filesystem_runtime`)が返す未登録
+    /// エラーは「プラグイン」ではなく「ドライバ」の話であり、
+    /// `drivers/set-capabilities` など既存の `drivers/*` アーム
+    /// (`DriverRegistryError::UnknownDriver` 経由)が既に "unknown driver:
+    /// {id}" という文言を使っている。`UnknownPlugin` を使い回すと同じ失敗が
+    /// アームによって違う文言になってしまう(レビュー指摘)ので、ここで
+    /// 揃える。
+    UnknownDriver(String),
 }
 
 impl fmt::Display for RegistryError {
@@ -124,6 +160,8 @@ impl fmt::Display for RegistryError {
             RegistryError::FilesystemConfig(e) => write!(f, "{e}"),
             RegistryError::UnknownFilesystem(name) => write!(f, "unknown filesystem root: {name}"),
             RegistryError::Filesystem(msg) => write!(f, "{msg}"),
+            RegistryError::UnknownBus(driver) => write!(f, "unknown bus connection: {driver}"),
+            RegistryError::UnknownDriver(id) => write!(f, "unknown driver: {id}"),
         }
     }
 }
@@ -214,7 +252,28 @@ pub struct Registry {
     /// `refresh_filesystem_runtime` は `capabilities_json` に触れないため
     /// `capabilities_lock` も取らない。
     filesystem_runtime_locks: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
+    /// `set_bus_grant` が呼ぶ `refresh_bus_runtime`(`bus_json` の作り直し)の
+    /// 臨界区間を **プラグイン ID ごとに** 直列化するロックのマップ。
+    ///
+    /// `filesystem_runtime_locks` と同じ理由で別マップにしてある: バス承認は
+    /// 止めるべきプロセスを持たないので臨界区間自体は短いが、サイドカー側の
+    /// `ProcessDriver::stop`(SIGTERM 無視の子がいれば `shutdown_grace` 秒
+    /// ブロックしうる)と同じマップを共有すると、その停止待ちの間バス承認の
+    /// 取消がロック待ちで足止めされ、その間 `bus_json` が古い `granted:true`
+    /// を保持し続けてしまう(fail-open)。資源が独立している(バス承認 vs.
+    /// プロセス起動/ディレクトリアクセス)以上、分けてもロック順序の一方向性は
+    /// 壊れない。
+    bus_runtime_locks: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
+    /// バス接続先の解決状況(`BusInfo::resolved`)を答えるために保持する。
+    /// `DriverRegistry` は `Clone` で安価に持ち回れる(`DriverRegistry` 自身の
+    /// ドキュメント参照)。
+    driver_registry: DriverRegistry,
     plugins_dir: PathBuf,
+    /// `crate::plugin::runner::spawn_bus_subscriber` の各インスタンスが共有
+    /// する shutdown フラグ。`shutdown_bus_subscribers` が立て、各購読タスクは
+    /// `BUS_SUBSCRIBER_SHUTDOWN_POLL_INTERVAL` ごとにこれを見に行く。詳しい
+    /// 経緯は `shutdown_bus_subscribers` のドキュメントコメント参照。
+    bus_subscriber_shutdown: Arc<AtomicBool>,
 }
 
 impl Registry {
@@ -226,6 +285,7 @@ impl Registry {
         sidecar_config_store: Arc<SidecarConfigStore>,
         filesystem_config_store: Arc<FilesystemConfigStore>,
         process_driver: Arc<ProcessDriver>,
+        driver_registry: DriverRegistry,
         plugins_dir: PathBuf,
     ) -> Self {
         Registry {
@@ -239,8 +299,18 @@ impl Registry {
             capabilities_lock: Arc::new(Mutex::new(())),
             sidecar_runtime_locks: Arc::new(Mutex::new(HashMap::new())),
             filesystem_runtime_locks: Arc::new(Mutex::new(HashMap::new())),
+            bus_runtime_locks: Arc::new(Mutex::new(HashMap::new())),
+            driver_registry,
             plugins_dir,
+            bus_subscriber_shutdown: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// `crate::plugin::runner::spawn_bus_subscriber` が共有する shutdown
+    /// フラグの `Arc` を返す。`runner.rs` がプラグインごとの購読タスクを
+    /// 起動する際にこれを渡す(crate 内部専用: `pub(crate)`)。
+    pub(crate) fn bus_subscriber_shutdown_flag(&self) -> Arc<AtomicBool> {
+        self.bus_subscriber_shutdown.clone()
     }
 
     pub(crate) fn push(&self, entry: PluginEntry) {
@@ -394,6 +464,35 @@ impl Registry {
             .collect()
     }
 
+    /// `manifest.bus` の宣言順に `BusInfo` を組み立てる。承認
+    /// (`GrantsStore::bus_state`)はディスクを読む。`resolved` は
+    /// `driver_registry.manifest_of` が返す `DriverManifest`(インストール済み
+    /// ドライバの現在の宣言)と、この要求が挙げる `publish`/`subscribe` の
+    /// 全トピックとを突き合わせて決める -- ドライバ自体が無ければ即
+    /// `false`、ドライバはあってもトピックが 1 つでも無ければ `false`。
+    fn build_bus_infos(&self, manifest: &Manifest) -> Vec<BusInfo> {
+        manifest
+            .bus
+            .iter()
+            .map(|request| {
+                let grant = self.grants_store.bus_state(manifest, &request.driver);
+                let resolved = match self.driver_registry.manifest_of(&request.driver) {
+                    Some(driver_manifest) => request
+                        .publish
+                        .iter()
+                        .chain(request.subscribe.iter())
+                        .all(|topic| driver_manifest.topic(topic).is_some()),
+                    None => false,
+                };
+                BusInfo {
+                    request: request.clone(),
+                    grant,
+                    resolved,
+                }
+            })
+            .collect()
+    }
+
     /// `id` 用のサイドカー実行時ロック(`sidecar_runtime_locks`)を引く。
     /// 無ければ作る。マップ自体を保護する `Mutex` は、id からロックの `Arc`
     /// を引く/挿入する間だけ保持し、返した `Arc<Mutex<()>>` の実際の臨界
@@ -407,6 +506,13 @@ impl Registry {
     /// (`filesystem_runtime_locks` のドキュメント参照)。
     fn filesystem_runtime_lock_for(&self, id: &str) -> Arc<Mutex<()>> {
         Self::lock_for(&self.filesystem_runtime_locks, id)
+    }
+
+    /// `id` 用のバス実行時ロック(`bus_runtime_locks`)を引く。サイドカー・
+    /// ファイルアクセスとは**別のマップ**であることが要点
+    /// (`bus_runtime_locks` のドキュメント参照)。
+    fn bus_runtime_lock_for(&self, id: &str) -> Arc<Mutex<()>> {
+        Self::lock_for(&self.bus_runtime_locks, id)
     }
 
     fn lock_for(map: &Mutex<HashMap<String, Arc<Mutex<()>>>>, id: &str) -> Arc<Mutex<()>> {
@@ -667,6 +773,29 @@ impl Registry {
         Ok(buffer)
     }
 
+    /// `id` のプラグインの `bus_json` 共有バッファの中身をそのまま返す
+    /// (テスト用アクセサ)。`HostCtx::check_bus` /
+    /// `runner::spawn_bus_subscriber` が実際に参照するのと同じ文字列
+    /// (`bus_runtime::bus_json_string` の出力そのもの)。
+    pub fn bus_buffer(&self, id: &str) -> Result<String, RegistryError> {
+        let bus_json = {
+            let guard = self
+                .entries
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            guard
+                .iter()
+                .find(|entry| entry.manifest.id == id)
+                .map(|entry| entry.bus_json.clone())
+                .ok_or_else(|| RegistryError::UnknownPlugin(id.to_string()))?
+        };
+        let buffer = bus_json
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        Ok(buffer)
+    }
+
     /// ファイルアクセスの設定変更・承認変更のあとに必ず呼ぶ内部ヘルパー。
     ///
     /// サイドカーと違い、ファイルアクセスには「止めるべきプロセス」が無い
@@ -791,6 +920,88 @@ impl Registry {
             .map_err(RegistryError::Grants)?;
 
         self.refresh_filesystem_runtime(id)
+    }
+
+    /// `id` のプラグインの現在のバス接続状態一覧(manifest の `[[bus]]`
+    /// 宣言順)を返す。`BusInfo::resolved` は `DriverRegistry` の現在の登録
+    /// 状況(ドライバの有無・トピックの有無)から都度計算する(承認と違い
+    /// ディスクに永続化しない -- ドライバの実体そのものが真実源)。
+    pub fn bus(&self, id: &str) -> Result<Vec<BusInfo>, RegistryError> {
+        let manifest = self.find_manifest(id)?;
+        Ok(self.build_bus_infos(&manifest))
+    }
+
+    /// バス承認変更のあとに必ず呼ぶ内部ヘルパー。ファイルアクセスと同じく
+    /// 「止めるべきプロセス」が無いので、`GrantsStore::bus_state` /
+    /// `DriverRegistry::manifest_of` の現在値から `bus_json` を作り直す
+    /// だけ。未承認の接続先は `publish`/`subscribe` を持たない
+    /// (`bus_runtime` のドキュメント参照)。
+    ///
+    /// ロックは `bus_runtime_lock_for(id)` -- サイドカー・ファイルアクセス
+    /// とは別のマップ(`bus_runtime_locks` のドキュメント参照)から引く。
+    fn refresh_bus_runtime(&self, id: &str) -> Result<Vec<BusInfo>, RegistryError> {
+        let (manifest, bus_json) = {
+            let guard = self
+                .entries
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let entry = guard
+                .iter()
+                .find(|entry| entry.manifest.id == id)
+                .ok_or_else(|| RegistryError::UnknownPlugin(id.to_string()))?;
+            (entry.manifest.clone(), entry.bus_json.clone())
+        };
+
+        let runtime_lock = self.bus_runtime_lock_for(id);
+        let _runtime_guard = runtime_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let infos = self.build_bus_infos(&manifest);
+        let runtime_entries: Vec<BusRuntimeEntry> = infos
+            .iter()
+            .map(|info| BusRuntimeEntry {
+                driver: info.request.driver.clone(),
+                granted: info.grant.granted,
+                publish: info.request.publish.clone(),
+                subscribe: info.request.subscribe.clone(),
+            })
+            .collect();
+        *bus_json
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = bus_json_string(&runtime_entries);
+
+        Ok(infos)
+    }
+
+    /// `id` のプラグインの `driver` バス接続の承認/取消を `GrantsStore` に
+    /// 永続化し、稼働中プラグインが参照する `bus_json` を作り直す
+    /// (`set_filesystem_grant` と同じ形)。
+    ///
+    /// **配信は取消を即座に反映する**: `bus_json` の書き換えだけで済むのは、
+    /// `runner.rs` の配信転送タスク(`spawn_bus_subscriber`)が配信のたびに
+    /// この同じ `bus_json` を読み直して承認を再確認するため。ここでは
+    /// 購読の解除(`Bus::subscribe` の取り消し)自体は行わない -- 取り消して
+    /// も転送タスク側で捨てられるだけなので、購読表を触る必要が無い。
+    pub fn set_bus_grant(
+        &self,
+        id: &str,
+        driver: &str,
+        granted: bool,
+    ) -> Result<GrantState, RegistryError> {
+        let manifest = self.find_manifest(id)?;
+        if manifest.bus_request(driver).is_none() {
+            return Err(RegistryError::UnknownBus(driver.to_string()));
+        }
+
+        let state = self
+            .grants_store
+            .set_bus(&manifest, driver, granted)
+            .map_err(RegistryError::Grants)?;
+
+        self.refresh_bus_runtime(id)?;
+
+        Ok(state)
     }
 
     /// サイドカーの設定変更・承認変更のあとに必ず呼ぶ内部ヘルパー。
@@ -1114,6 +1325,30 @@ impl Registry {
         self.process_driver.stop_all();
     }
 
+    /// 全プラグインの `spawn_bus_subscriber` タスクへ shutdown を通知する
+    /// (デーモン shutdown 用)。
+    ///
+    /// **これを `main()` が戻る(= `Runtime::drop` される)前に呼ばないと
+    /// デーモンは正常終了できない。** `[[bus]] subscribe` を宣言するプラグ
+    /// インが 1 つでもあれば、その `spawn_bus_subscriber` タスクは
+    /// `tokio::task::spawn_blocking` の中でブロッキング受信をしており、送信側
+    /// (`Bus::subscribe` に渡した `Sender<Delivery>`)はそのプラグインの購読
+    /// エントリとして `Bus` の購読表に居座り続けるため、明示的に知らせない
+    /// 限り自然には終了しない。`Runtime::drop` は実行中の `spawn_blocking`
+    /// タスクの完了を待つため、これを呼ばずに `main` を抜けようとすると
+    /// **プロセスが `Runtime::drop` の中で無期限にハングする**(実際に踏んだ
+    /// Critical バグ。詳細は `crate::plugin::runner::
+    /// BUS_SUBSCRIBER_SHUTDOWN_POLL_INTERVAL` のドキュメントコメント参照)。
+    ///
+    /// `stop_all_sidecars` と同じくデーモンの shutdown シーケンスの一部として
+    /// 呼ぶことを想定している(`core/src/bin/edlr.rs` を参照)。フラグを立てる
+    /// だけの軽い呼び出しなので、`stop_all_sidecars` のように `spawn_blocking`
+    /// へ逃がす必要はない。
+    pub fn shutdown_bus_subscribers(&self) {
+        self.bus_subscriber_shutdown
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+
     /// `id` のプラグインが持つ settings JSON の共有ハンドルを返す。
     pub fn entry_settings(&self, id: &str) -> Option<Arc<Mutex<String>>> {
         self.entries
@@ -1191,10 +1426,25 @@ impl Registry {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::thread;
     use std::time::Duration;
+
+    /// ドライバを 1 件もロードしていない `DriverRegistry`(存在しない
+    /// ディレクトリを走査させることで空のまま作る -- `driver::runner` の
+    /// 自テストにある `start_drivers_for_test` と同じ流儀)。
+    fn empty_driver_registry(tmp: &std::path::Path) -> DriverRegistry {
+        crate::driver::start_drivers(
+            &tmp.join("drivers"),
+            SettingsStore::new(tmp.join("driver-settings")),
+            SidecarConfigStore::new(tmp.join("driver-settings")),
+            FilesystemConfigStore::new(tmp.join("driver-settings"), Vec::new()),
+            GrantsStore::new_for_drivers(tmp.join("driver-grants")),
+            edlr_driver_channel::Bus::new(),
+            crate::driver::host::DriverHost::new().expect("driver host should build"),
+        )
+    }
 
     fn empty_registry() -> Registry {
         let host = Arc::new(PluginHost::new().expect("host should start"));
@@ -1210,6 +1460,7 @@ mod tests {
             Duration::from_millis(200),
             Duration::from_millis(0),
         ));
+        let driver_registry = empty_driver_registry(tmp.path());
         Registry::new(
             host,
             settings_store,
@@ -1217,6 +1468,7 @@ mod tests {
             sidecar_config_store,
             filesystem_config_store,
             process_driver,
+            driver_registry,
             tmp.path().join("plugins"),
         )
     }
@@ -1272,7 +1524,189 @@ mod tests {
                 reason: "reason".into(),
                 mode: crate::plugin::manifest::FilesystemMode::ReadWrite,
             }],
+            bus: vec![],
         }
+    }
+
+    fn manifest_with_bus(id: &str) -> Manifest {
+        Manifest {
+            id: id.to_string(),
+            name: id.to_string(),
+            version: "0.1.0".into(),
+            description: String::new(),
+            entry: "plugin.wasm".into(),
+            events: vec![],
+            settings: vec![],
+            capabilities: vec![],
+            sidecars: vec![],
+            filesystem: vec![],
+            bus: vec![BusRequest {
+                driver: "ed-state".into(),
+                publish: vec!["ship-status".into()],
+                subscribe: vec!["current-system".into()],
+                reason: "r".into(),
+            }],
+        }
+    }
+
+    /// `[[bus]]` を 1 件持つプラグインだけを載せた `Registry`。
+    /// `DriverRegistry` には何も登録しないので、`bus("translator")` の
+    /// `resolved` は必ず `false` になる。
+    pub(crate) fn test_registry_with_bus_request() -> Registry {
+        let tmp = tempfile::tempdir().unwrap();
+        test_registry_with_bus_request_using(empty_driver_registry(tmp.path()))
+    }
+
+    /// `test_registry_with_bus_request` と同じ `translator` プラグイン
+    /// (`[[bus]] {driver="ed-state", publish=["ship-status"],
+    /// subscribe=["current-system"]}`)を、呼び出し元が指定した
+    /// `driver_registry` の上に載せた `Registry` を返す。
+    ///
+    /// `bus("translator")[0].resolved` は `Registry` 自身が保持する
+    /// `driver_registry`(コンストラクタで焼き込まれる、他から差し替え不可)
+    /// から計算されるので、resolved を true/false 両方でテストしたい呼び出し
+    /// 元はこの関数に望みの `DriverRegistry` を渡す(`crate::server` の
+    /// `plugins/list` テストがまさにこれ -- `ed-state` を持つ
+    /// `DriverRegistry` を渡せば `resolved: true`、持たないものを渡せば
+    /// `resolved: false` になる)。
+    pub(crate) fn test_registry_with_bus_request_using(driver_registry: DriverRegistry) -> Registry {
+        let host = Arc::new(PluginHost::new().expect("host should start"));
+        let tmp = tempfile::tempdir().unwrap();
+        let settings_store = Arc::new(SettingsStore::new(tmp.path().join("settings")));
+        let grants_store = Arc::new(GrantsStore::new(tmp.path().join("grants")));
+        let sidecar_config_store = Arc::new(SidecarConfigStore::new(tmp.path().join("settings")));
+        let filesystem_config_store = Arc::new(FilesystemConfigStore::new(
+            tmp.path().join("settings"),
+            Vec::new(),
+        ));
+        let process_driver = Arc::new(ProcessDriver::new(
+            Duration::from_millis(200),
+            Duration::from_millis(0),
+        ));
+        let registry = Registry::new(
+            host,
+            settings_store,
+            grants_store,
+            sidecar_config_store,
+            filesystem_config_store,
+            process_driver,
+            driver_registry,
+            tmp.path().join("plugins"),
+        );
+        registry.push(PluginEntry {
+            manifest: manifest_with_bus("translator"),
+            state: PluginState::Running,
+            settings_json: Arc::new(Mutex::new("{}".to_string())),
+            capabilities_json: Arc::new(Mutex::new(crate::plugin::host::capabilities_json_string(
+                &[],
+            ))),
+            sidecars_json: Arc::new(Mutex::new("[]".to_string())),
+            filesystem_json: Arc::new(Mutex::new("[]".to_string())),
+            bus_json: Arc::new(Mutex::new("[]".to_string())),
+        });
+        registry
+    }
+
+    #[test]
+    fn a_bus_request_for_a_missing_driver_is_reported_as_unresolved() {
+        // DriverRegistry が空のとき、BusInfo.resolved は false になる。
+        let registry = test_registry_with_bus_request();
+        let info = registry.bus("translator").unwrap();
+        assert_eq!(info.len(), 1);
+        assert!(!info[0].resolved);
+    }
+
+    /// 上のテストの裏付け: 同じ manifest でも、要求したトピックを両方とも
+    /// 揃えたドライバがインストールされていれば `resolved` は `true` になる。
+    /// 「ドライバが無ければ false」を「ドライバがあれば必ず true になりうる」
+    /// と対で示すことで、`resolved` の計算自体(`manifest_of`/`topic` の
+    /// 呼び出し)が効いていることを確認する -- さもないと前のテストは
+    /// 「常に false を返す」実装でも通ってしまう。
+    #[test]
+    fn a_bus_request_whose_driver_and_topics_are_all_installed_is_resolved() {
+        let tmp = tempfile::tempdir().unwrap();
+        let driver_registry = empty_driver_registry(tmp.path());
+        driver_registry.push(crate::driver::registry::DriverEntry {
+            manifest: crate::driver::manifest::DriverManifest {
+                id: "ed-state".into(),
+                name: "ED State".into(),
+                version: "0.1.0".into(),
+                description: String::new(),
+                entry: "driver.wasm".into(),
+                topics: vec![
+                    edlr_driver_channel::TopicSpec {
+                        name: "ship-status".into(),
+                        retain: false,
+                        description: String::new(),
+                    },
+                    edlr_driver_channel::TopicSpec {
+                        name: "current-system".into(),
+                        retain: true,
+                        description: String::new(),
+                    },
+                ],
+                settings: vec![],
+                capabilities: vec![],
+                sidecars: vec![],
+                filesystem: vec![],
+            },
+            state: crate::driver::registry::DriverState::Running,
+            settings_json: Arc::new(Mutex::new("{}".to_string())),
+            capabilities_json: Arc::new(Mutex::new(crate::plugin::host::capabilities_json_string(
+                &[],
+            ))),
+            sidecars_json: Arc::new(Mutex::new("[]".to_string())),
+            filesystem_json: Arc::new(Mutex::new("[]".to_string())),
+        });
+
+        let registry = test_registry_with_bus_request_using(driver_registry);
+
+        let info = registry.bus("translator").unwrap();
+        assert_eq!(info.len(), 1);
+        assert!(
+            info[0].resolved,
+            "driver is installed and both requested topics are declared, so this must resolve"
+        );
+    }
+
+    /// `set_bus_grant` は `GrantsStore` への永続化と `bus_json` バッファの
+    /// 作り直しを両方行う。承認・取消の両方を同じプラグイン・同じ manifest
+    /// で確認し、`bus_json` に載る `publish`/`subscribe` の有無が承認状態と
+    /// 一致することを見る(`bus_runtime` の「未承認は topics を落とす」
+    /// 契約どおりであることの確認)。
+    #[test]
+    fn set_bus_grant_persists_and_updates_the_shared_buffer_both_ways() {
+        let registry = test_registry_with_bus_request();
+
+        let granted = registry
+            .set_bus_grant("translator", "ed-state", true)
+            .expect("granting a declared bus connection should succeed");
+        assert!(granted.granted);
+        let parsed = crate::plugin::bus_runtime::parse_bus(&registry.bus_buffer("translator").unwrap());
+        let entry = parsed.get("ed-state").expect("entry present after grant");
+        assert!(entry.granted);
+        assert_eq!(entry.subscribe, vec!["current-system".to_string()]);
+
+        let revoked = registry
+            .set_bus_grant("translator", "ed-state", false)
+            .expect("revoking should succeed");
+        assert!(!revoked.granted);
+        let parsed = crate::plugin::bus_runtime::parse_bus(&registry.bus_buffer("translator").unwrap());
+        let entry = parsed.get("ed-state").expect("entry still present after revoke");
+        assert!(!entry.granted);
+        assert!(
+            entry.subscribe.is_empty(),
+            "a revoked bus connection must not keep its topics in the shared buffer"
+        );
+    }
+
+    #[test]
+    fn set_bus_grant_for_an_undeclared_driver_returns_unknown_bus_error() {
+        let registry = test_registry_with_bus_request();
+        let err = registry
+            .set_bus_grant("translator", "not-declared", true)
+            .expect_err("undeclared bus connection must be rejected");
+        assert!(matches!(err, RegistryError::UnknownBus(driver) if driver == "not-declared"));
     }
 
     /// 承認取消は、同じプラグインのサイドカー停止の裏で待たされてはならない。
@@ -1306,6 +1740,7 @@ mod tests {
             sidecar_config_store,
             filesystem_config_store,
             process_driver,
+            empty_driver_registry(tmp.path()),
             tmp.path().join("plugins"),
         );
 
@@ -1320,6 +1755,7 @@ mod tests {
             ))),
             sidecars_json: Arc::new(Mutex::new("[]".to_string())),
             filesystem_json: filesystem_json.clone(),
+            bus_json: Arc::new(Mutex::new("[]".to_string())),
         });
 
         let root = tmp.path().join("exports");
@@ -1391,6 +1827,7 @@ mod tests {
                 scalable: false,
             }],
             filesystem: vec![],
+            bus: vec![],
         }
     }
 
@@ -1413,6 +1850,7 @@ mod tests {
             ))),
             sidecars_json: Arc::new(Mutex::new("[]".to_string())),
             filesystem_json: Arc::new(Mutex::new("[]".to_string())),
+            bus_json: Arc::new(Mutex::new("[]".to_string())),
         });
 
         let key = Registry::sidecar_key("sc-plugin", "tts");
@@ -1468,6 +1906,7 @@ mod tests {
             ))),
             sidecars_json: Arc::new(Mutex::new("[]".to_string())),
             filesystem_json: Arc::new(Mutex::new("[]".to_string())),
+            bus_json: Arc::new(Mutex::new("[]".to_string())),
         });
         registry
             .grants_store
@@ -1553,6 +1992,7 @@ mod tests {
             ))),
             sidecars_json: Arc::new(Mutex::new("[]".to_string())),
             filesystem_json: Arc::new(Mutex::new("[]".to_string())),
+            bus_json: Arc::new(Mutex::new("[]".to_string())),
         });
 
         registry
@@ -1656,6 +2096,7 @@ mod tests {
             ))),
             sidecars_json: Arc::new(Mutex::new("[]".to_string())),
             filesystem_json: Arc::new(Mutex::new("[]".to_string())),
+            bus_json: Arc::new(Mutex::new("[]".to_string())),
         });
 
         let result = registry.set_sidecar_grant("sc-plugin", "tts", true);
@@ -1720,6 +2161,7 @@ mod tests {
             }],
             sidecars: vec![],
             filesystem: vec![],
+            bus: vec![],
         }
     }
 
@@ -1737,6 +2179,7 @@ mod tests {
             capabilities_json: capabilities_json.clone(),
             sidecars_json: Arc::new(Mutex::new("[]".to_string())),
             filesystem_json: Arc::new(Mutex::new("[]".to_string())),
+            bus_json: Arc::new(Mutex::new("[]".to_string())),
         });
 
         let state = registry
@@ -1805,6 +2248,7 @@ mod tests {
             sidecar_config_store,
             filesystem_config_store,
             process_driver,
+            empty_driver_registry(tmp.path()),
             tmp.path().join("plugins"),
         );
 
@@ -1819,6 +2263,7 @@ mod tests {
             capabilities_json: capabilities_json.clone(),
             sidecars_json: Arc::new(Mutex::new("[]".to_string())),
             filesystem_json: Arc::new(Mutex::new("[]".to_string())),
+            bus_json: Arc::new(Mutex::new("[]".to_string())),
         });
 
         const THREADS: usize = 16;

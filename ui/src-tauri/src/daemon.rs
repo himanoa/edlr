@@ -22,22 +22,31 @@ pub const DAEMON_ADDR: &str = "127.0.0.1:8137";
 /// デーモンを道連れに殺してしまい、サイドカーが孤児として残っていた)。
 ///
 /// `STOP_GRACE` はデーモン側の最悪ケース(`SIDECAR_SHUTDOWN_GRACE_SECS` ×
-/// `SIDECAR_SHUTDOWN_WORST_CASE_INSTANCES`、両方 `edlr_config` の共有定数)を
-/// **厳密に超える**必要がある。この関係は下のコンパイル時アサーションで
-/// 固定してある: どちらかの定数だけが将来変更されても、この関係が崩れれば
-/// ビルドが失敗する。デーモンが早く終了した場合、`stop_child_gracefully` は
-/// `try_wait` のポーリングで即座に戻る(この猶予いっぱい待つのは、デーモンが
-/// 本当にハングしている最悪ケースのみ)。
-pub const STOP_GRACE: Duration = Duration::from_secs(65);
+/// `SIDECAR_SHUTDOWN_WORST_CASE_INSTANCES`、両方 `edlr_config` の共有定数)に、
+/// さらに `DRIVER_CALL_DEADLINE_SECS`(同じく `edlr_config` の共有定数)を
+/// 加えた値を**厳密に超える**必要がある。ドライバはメッセージ 1 件の処理中に
+/// HTTP 呼び出し等でブロックしうり、その間は SIGTERM で送られる停止要求
+/// (`stop_all_sidecars` 経由でデーモンが要求する後始末)にも応答できない --
+/// ドライバ専用スレッドはメッセージループを直列に回しているため、ブロック中の
+/// 呼び出しが `DriverInstance::CALL_DEADLINE`(= `DRIVER_CALL_DEADLINE_SECS`)
+/// に達して戻るまで、次のシャットダウン処理へ進めない。したがってデーモン
+/// 全体の後始末にかかる最悪時間は「サイドカーの逐次後始末」だけでなく、この
+/// ドライバの呼び出し期限 1 回分も上乗せして見積もる必要がある。この関係は
+/// 下のコンパイル時アサーションで固定してある: いずれかの定数だけが将来
+/// 変更されても、この関係が崩れればビルドが失敗する。デーモンが早く終了した
+/// 場合、`stop_child_gracefully` は `try_wait` のポーリングで即座に戻る
+/// (この猶予いっぱい待つのは、デーモンが本当にハングしている最悪ケースのみ)。
+pub const STOP_GRACE: Duration = Duration::from_secs(95);
 
 const _: () = assert!(
     STOP_GRACE.as_secs()
         > edlr_config::SIDECAR_SHUTDOWN_GRACE_SECS
-            * edlr_config::SIDECAR_SHUTDOWN_WORST_CASE_INSTANCES,
+            * edlr_config::SIDECAR_SHUTDOWN_WORST_CASE_INSTANCES
+            + edlr_config::DRIVER_CALL_DEADLINE_SECS,
     "STOP_GRACE must strictly exceed the daemon's worst-case sequential sidecar \
-     shutdown time (SIDECAR_SHUTDOWN_GRACE_SECS * SIDECAR_SHUTDOWN_WORST_CASE_INSTANCES, \
-     both in edlr_config) -- see STOP_GRACE's doc comment. If this fails after changing \
-     either constant, raise STOP_GRACE's literal value to restore the margin."
+     shutdown time plus one driver call deadline (a driver blocked in an HTTP call \
+     cannot answer a stop request until its deadline elapses) -- see STOP_GRACE's \
+     doc comment."
 );
 
 /// 子プロセスを SIGTERM で止め、`grace` 待って死ななければ SIGKILL に
@@ -141,14 +150,17 @@ mod tests {
     #[test]
     fn stop_grace_exceeds_the_daemons_worst_case_sequential_shutdown_time() {
         let daemon_worst_case_secs = edlr_config::SIDECAR_SHUTDOWN_GRACE_SECS
-            * edlr_config::SIDECAR_SHUTDOWN_WORST_CASE_INSTANCES;
+            * edlr_config::SIDECAR_SHUTDOWN_WORST_CASE_INSTANCES
+            + edlr_config::DRIVER_CALL_DEADLINE_SECS;
         assert!(
             STOP_GRACE.as_secs() > daemon_worst_case_secs,
             "STOP_GRACE ({STOP_GRACE:?}) must strictly exceed the daemon's worst-case \
-             sequential sidecar shutdown time ({daemon_worst_case_secs}s = \
-             SIDECAR_SHUTDOWN_GRACE_SECS * SIDECAR_SHUTDOWN_WORST_CASE_INSTANCES); \
+             sequential sidecar shutdown time plus one driver call deadline \
+             ({daemon_worst_case_secs}s = SIDECAR_SHUTDOWN_GRACE_SECS * \
+             SIDECAR_SHUTDOWN_WORST_CASE_INSTANCES + DRIVER_CALL_DEADLINE_SECS); \
              otherwise Tauri can SIGKILL the daemon before it has finished stopping \
-             every sidecar, orphaning any that ignore SIGTERM"
+             every sidecar (or before a driver blocked in a call can respond), \
+             orphaning any that ignore SIGTERM"
         );
     }
 
@@ -227,6 +239,65 @@ mod tests {
         assert_eq!(find_in_path("edlr-definitely-not-a-real-binary"), None);
     }
 
+    /// `fs::write` でスクリプトを書いてから `Command::spawn` で実行するテストの
+    /// 共通ヘルパー。ETXTBSY (`ExecutableFileBusy`) が出た場合はリトライする。
+    ///
+    /// `fs::write` はファイルディスクリプタを閉じてから返るが、このテスト
+    /// モジュールは複数のテストが**同一プロセスの別スレッド**で並行に走る。
+    /// あるスレッド A がスクリプトを書き込んでいる(まだ書き込み用 fd を
+    /// クローズし切っていない)最中に、別スレッド B が `Command::spawn` で
+    /// fork すると、B が fork した子プロセスは A の書き込み用 fd をそのまま
+    /// 継承する。fork はプロセス全体の fd テーブルを複製するため、A のファイル
+    /// への書き込み用 fd が「A のスレッドだけのもの」ではなく「プロセス全体で
+    /// 開いている fd」としてカーネルに見えてしまうのが原因。この状態で A が
+    /// 自分のスクリプトを `execve` しようとすると、カーネルは「このファイルは
+    /// 書き込み用に開かれている」と判断して `ETXTBSY`(Text file busy)で
+    /// exec を拒否する。
+    ///
+    /// これはテスト対象コード(`stop_child_gracefully` など)のバグではなく、
+    /// マルチスレッドなテストハーネスから fork/exec すること自体に内在する
+    /// レースである。したがって「直す」ことはできず、リトライで吸収するのが
+    /// 正しい緩和策になる。将来だれかが「たまたま通ったから」とリトライを
+    /// 単純化・削除しないよう、ここに理由を残しておく。
+    fn spawn_script_retrying_etxtbsy(path: &std::path::Path) -> Child {
+        retry_spawn_on_etxtbsy(path, || Command::new(path).spawn())
+    }
+
+    /// `spawn_script_retrying_etxtbsy` の中身を切り出した汎用版。
+    ///
+    /// `spawn_daemon_passes_journal_dir_and_child_can_be_killed` のように、
+    /// 生の `Command::new(..).spawn()` ではなく本番コードの `spawn_daemon`
+    /// 経由で同じスクリプトを実行するテストも同一の ETXTBSY レースに
+    /// 晒されている(実際に本修正の検証中に再現した)ため、`spawn` を渡す
+    /// クロージャで抽象化して両方から使えるようにしてある。
+    fn retry_spawn_on_etxtbsy(
+        path: &std::path::Path,
+        mut spawn: impl FnMut() -> io::Result<Child>,
+    ) -> Child {
+        const MAX_ATTEMPTS: u32 = 10;
+        for attempt in 1..=MAX_ATTEMPTS {
+            match spawn() {
+                Ok(child) => return child,
+                Err(e) if e.kind() == io::ErrorKind::ExecutableFileBusy => {
+                    if attempt == MAX_ATTEMPTS {
+                        panic!(
+                            "giving up after {MAX_ATTEMPTS} attempts: {path:?} still \
+                             ETXTBSY (Text file busy) -- this is the classic \
+                             multithreaded fork/exec race where another test thread's \
+                             write fd to its own script was inherited by our fork; if \
+                             this ever reproduces reliably, look for a widened window \
+                             around fs::write(...).unwrap() + spawn(), not a bug in the \
+                             code under test"
+                        );
+                    }
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Err(e) => panic!("failed to spawn {path:?}: {e}"),
+            }
+        }
+        unreachable!("loop always returns or panics");
+    }
+
     /// Regression test for the "SIGKILL orphans sidecars" finding: a
     /// SIGTERM-ignoring child must still end up dead after
     /// `stop_child_gracefully`, via the SIGKILL fallback, and the call must
@@ -251,7 +322,7 @@ mod tests {
         .unwrap();
         fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
 
-        let mut child = Command::new(&script).spawn().unwrap();
+        let mut child = spawn_script_retrying_etxtbsy(&script);
         let pid = child.id() as libc::pid_t;
 
         for _ in 0..200 {
@@ -287,7 +358,7 @@ mod tests {
         fs::write(&script, "#!/bin/sh\nsleep 30\n").unwrap();
         fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
 
-        let mut child = Command::new(&script).spawn().unwrap();
+        let mut child = spawn_script_retrying_etxtbsy(&script);
 
         let started = Instant::now();
         // grace は意図的に長め(10 秒)にしておく: これより十分短い時間で
@@ -317,7 +388,7 @@ mod tests {
         fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
 
         let jdir = dir.path().join("journal");
-        let mut child = spawn_daemon(&script, Some(&jdir)).unwrap();
+        let mut child = retry_spawn_on_etxtbsy(&script, || spawn_daemon(&script, Some(&jdir)));
         // args.txt が書かれるまで少し待つ
         for _ in 0..50 {
             if dir.path().join("args.txt").exists() {

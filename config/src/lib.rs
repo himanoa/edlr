@@ -36,6 +36,11 @@ pub const SIDECAR_SHUTDOWN_GRACE_SECS: u64 = 3;
 /// アサーションでこの関係を固定してある(`daemon.rs` を参照)。
 pub const SIDECAR_SHUTDOWN_WORST_CASE_INSTANCES: u64 = 20;
 
+/// ドライバ 1 呼び出しの期限(秒)。`edlr-core`(`driver::host::DriverInstance::
+/// CALL_DEADLINE`)と `edlr-ui`(`STOP_GRACE` のアサーション)の両方が参照する
+/// ため、`SIDECAR_SHUTDOWN_GRACE_SECS` と同じくここで共有する。
+pub const DRIVER_CALL_DEADLINE_SECS: u64 = 30;
+
 /// 既知の Journal ディレクトリを探す。現状は Proton 既定パスのみ。
 pub fn default_journal_dir(home: &Path) -> Option<PathBuf> {
     let candidate = home.join(PROTON_JOURNAL_DIR);

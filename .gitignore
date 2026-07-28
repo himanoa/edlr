@@ -5,4 +5,5 @@ ui/frontend/dist/
 ui/frontend/*.tsbuildinfo
 ui/src-tauri/gen/
 examples/plugins/*/target/
+examples/drivers/*/target/
 .worktrees/

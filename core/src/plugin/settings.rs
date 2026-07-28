@@ -246,6 +246,7 @@ mod tests {
             capabilities: vec![],
             sidecars: vec![],
             filesystem: vec![],
+            bus: vec![],
         }
     }
 
@@ -494,6 +495,7 @@ mod tests {
             capabilities: vec![],
             sidecars: vec![],
             filesystem: vec![],
+            bus: vec![],
         }
     }
 

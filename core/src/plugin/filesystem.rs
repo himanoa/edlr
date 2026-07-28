@@ -327,6 +327,7 @@ mod tests {
             capabilities: vec![],
             sidecars: vec![],
             filesystem: requests,
+            bus: vec![],
         }
     }
 

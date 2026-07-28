@@ -19,6 +19,8 @@ impl Guest for BusyLoop {
             // epoch-based call deadline.
         }
     }
+
+    fn on_message(_driver: String, _topic: String, _payload: Vec<u8>) {}
 }
 
 export!(BusyLoop);

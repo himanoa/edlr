@@ -86,6 +86,8 @@ fn hello_logger_registry() -> (tempfile::TempDir, Registry) {
         filesystem_config_store,
         grants_store,
         &router,
+        edlr_driver_channel::Bus::new(),
+        support::empty_driver_registry(tmp.path()),
         host,
     );
     (tmp, registry)
@@ -154,6 +156,8 @@ fn http_caller_registry() -> (tempfile::TempDir, Registry) {
         filesystem_config_store,
         grants_store,
         &router,
+        edlr_driver_channel::Bus::new(),
+        support::empty_driver_registry(tmp.path()),
         host,
     );
     (tmp, registry)
@@ -161,7 +165,7 @@ fn http_caller_registry() -> (tempfile::TempDir, Registry) {
 
 async fn setup(registry: Option<Registry>) -> (Router, SocketAddr) {
     let router = Router::new(64);
-    let state = ServerState::new(&router, registry);
+    let state = ServerState::new(&router, registry, None);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(server::serve(listener, state, None));

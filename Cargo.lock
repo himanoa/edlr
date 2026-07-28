@@ -1211,6 +1211,7 @@ dependencies = [
  "axum",
  "clap",
  "edlr-config",
+ "edlr-driver-channel",
  "edlr-driver-fs",
  "edlr-driver-http",
  "edlr-driver-process",
@@ -1235,6 +1236,10 @@ dependencies = [
 [[package]]
 name = "edlr-driver-channel"
 version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "edlr-driver-fs"

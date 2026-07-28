@@ -1,11 +1,12 @@
 import { useEffect, useState } from "react";
 import { invoke, isTauri, type AppConfigDto } from "./lib/tauri";
 import Dashboard from "./pages/Dashboard";
+import DriversPage from "./pages/Drivers";
 import Logs from "./pages/Logs";
 import Plugins from "./pages/Plugins";
 import Settings from "./pages/Settings";
 
-const TABS = ["Dashboard", "Logs", "Plugins", "Settings"] as const;
+const TABS = ["Dashboard", "Logs", "Plugins", "Drivers", "Settings"] as const;
 type Tab = (typeof TABS)[number];
 
 export default function App() {
@@ -45,6 +46,7 @@ export default function App() {
         {tab === "Dashboard" && <Dashboard />}
         {tab === "Logs" && <Logs />}
         {tab === "Plugins" && <Plugins />}
+        {tab === "Drivers" && <DriversPage />}
         {tab === "Settings" && <Settings />}
       </main>
     </div>

@@ -1,0 +1,15 @@
+id = "ed-state"
+name = "ED State"
+version = "0.1.0"
+description = "受け取ったシステム名を retained トピックとして配る"
+entry = "driver.wasm"
+
+[[topics]]
+name = "set-system"
+retain = false
+description = "プラグインからのシステム名の更新"
+
+[[topics]]
+name = "current-system"
+retain = true
+description = "現在のスターシステム"

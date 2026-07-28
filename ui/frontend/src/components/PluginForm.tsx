@@ -1,7 +1,12 @@
 import { useEffect, useState } from "react";
 import type { PluginInfo, SettingField } from "../types/plugin";
 
-function mergedValues(plugin: PluginInfo): Record<string, unknown> {
+// `PluginInfo` の一部だけを要求する形にしてある。`DriverInfo`(bus を持たない)
+// のようにフィールドの一部が異なる形でも、この 3 つさえ揃っていれば
+// 同じフォームを再利用できるようにするため。
+export type FormPlugin = Pick<PluginInfo, "id" | "settings" | "values">;
+
+function mergedValues(plugin: FormPlugin): Record<string, unknown> {
   const defaults: Record<string, unknown> = {};
   for (const field of plugin.settings) {
     defaults[field.key] = field.default;
@@ -116,7 +121,7 @@ export default function PluginForm({
   plugin,
   onChange,
 }: {
-  plugin: PluginInfo;
+  plugin: FormPlugin;
   onChange: (key: string, value: unknown) => Promise<void>;
 }) {
   const [values, setValues] = useState<Record<string, unknown>>(() => mergedValues(plugin));
