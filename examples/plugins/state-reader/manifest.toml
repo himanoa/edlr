@@ -9,3 +9,9 @@ driver = "ed-state"
 publish = ["set-system"]
 subscribe = ["current-system"]
 reason = "ジャンプ先を ed-state ドライバへ渡し、配り直された現在システムを受け取るため"
+
+[[dashboard]]
+id = "last-jump"
+title = "Last Jump"
+entry = "ui/last-jump/index.html"
+size = "small"
