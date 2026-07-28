@@ -1,10 +1,10 @@
 ---
 id: catch-up-xrdt
 title: デーモン停止中に過ぎたスケジュールのcatch-up実行が無い
-status: open
+status: closed
 labels: scheduler, enhancement
 created: 2026-07-28T15:07:27Z
-updated: 2026-07-28T15:09:15Z
+updated: 2026-07-28T17:02:09Z
 ---
 
 ## 問題
