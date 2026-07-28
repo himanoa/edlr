@@ -123,6 +123,40 @@ pub struct BusRequest {
     pub reason: String,
 }
 
+/// ダッシュボードウィジェットのサイズ(Dashboard 画面のグリッドの
+/// カラムスパンに対応: small=1 / medium=2 / large=3)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum WidgetSize {
+    Small,
+    Medium,
+    Large,
+}
+
+impl WidgetSize {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            WidgetSize::Small => "small",
+            WidgetSize::Medium => "medium",
+            WidgetSize::Large => "large",
+        }
+    }
+}
+
+/// プラグインが宣言するダッシュボードウィジェット 1 件(`[[dashboard]]`)。
+///
+/// `entry` はプラグインディレクトリからの相対パス。ディレクトリ外への
+/// 脱出(`..`・絶対パス)はロード時に拒否するが、ファイルの実在は要求
+/// しない -- 不在は Registry が `resolved: false` として UI バッジで報せる
+/// (bus の未解決参照と同じセマンティクス)。
+#[derive(Debug, Clone, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct DashboardWidget {
+    pub id: String,
+    pub title: String,
+    pub entry: String,
+    pub size: WidgetSize,
+}
+
 /// `manifest.toml` のパース結果。
 #[derive(Debug, Clone, PartialEq, serde::Deserialize)]
 pub struct Manifest {
@@ -144,6 +178,8 @@ pub struct Manifest {
     pub filesystem: Vec<FilesystemRequest>,
     #[serde(default, rename = "bus")]
     pub bus: Vec<BusRequest>,
+    #[serde(default)]
+    pub dashboard: Vec<DashboardWidget>,
 }
 
 impl Manifest {
@@ -287,6 +323,23 @@ impl Manifest {
         canonical.push_str(&encode_field(&request.reason));
         Some(sha256_hex(&canonical))
     }
+
+    pub fn dashboard_widget(&self, id: &str) -> Option<&DashboardWidget> {
+        self.dashboard.iter().find(|w| w.id == id)
+    }
+
+    /// ダッシュボードウィジェット 1 件の宣言内容の安定フィンガープリント
+    /// (grants の失効判定に使う)。宣言のどのフィールドが変わっても値が
+    /// 変わる(`bus_fingerprint` と同じ流儀)。
+    pub fn dashboard_fingerprint(&self, id: &str) -> Option<String> {
+        let widget = self.dashboard_widget(id)?;
+        let mut canonical = encode_field("dashboard");
+        canonical.push_str(&encode_field(&widget.id));
+        canonical.push_str(&encode_field(&widget.title));
+        canonical.push_str(&encode_field(&widget.entry));
+        canonical.push_str(&encode_field(widget.size.as_str()));
+        Some(sha256_hex(&canonical))
+    }
 }
 
 /// 可変長文字列フィールドを長さ接頭辞方式でエンコードする: `"{byte_len}:{content}"`。
@@ -340,6 +393,8 @@ pub enum ManifestError {
     BadBus(String),
     /// `topics`(ドライバの `[[topics]]`)の内容が不正(名前の形式・重複など)。
     BadTopic(String),
+    /// `dashboard` の内容が不正(id の形式・重複・title 空・entry の脱出など)。
+    BadDashboard(String),
 }
 
 impl fmt::Display for ManifestError {
@@ -358,6 +413,7 @@ impl fmt::Display for ManifestError {
             ManifestError::BadFilesystem(msg) => write!(f, "invalid filesystem request: {msg}"),
             ManifestError::BadBus(msg) => write!(f, "invalid bus request: {msg}"),
             ManifestError::BadTopic(msg) => write!(f, "invalid topic: {msg}"),
+            ManifestError::BadDashboard(msg) => write!(f, "invalid dashboard widget: {msg}"),
         }
     }
 }
@@ -602,6 +658,52 @@ fn validate_bus(requests: &mut [BusRequest]) -> Result<(), ManifestError> {
     Ok(())
 }
 
+pub(crate) fn validate_dashboard(widgets: &mut [DashboardWidget]) -> Result<(), ManifestError> {
+    let mut seen = HashSet::new();
+    for widget in widgets.iter_mut() {
+        if !is_valid_id(&widget.id) {
+            return Err(ManifestError::BadDashboard(format!(
+                "dashboard id must match [a-z0-9-]+: {}",
+                widget.id
+            )));
+        }
+        if !seen.insert(widget.id.clone()) {
+            return Err(ManifestError::BadDashboard(format!(
+                "duplicate dashboard id: {}",
+                widget.id
+            )));
+        }
+        let title = widget.title.trim().to_string();
+        if title.is_empty() {
+            return Err(ManifestError::BadDashboard(
+                "dashboard widget requires a non-empty title".to_string(),
+            ));
+        }
+        reject_invisible_chars("title", &title).map_err(ManifestError::BadDashboard)?;
+        widget.title = title;
+        validate_widget_entry(&widget.entry)?;
+    }
+    Ok(())
+}
+
+/// `entry` がプラグインディレクトリ内に収まる相対パスであることの検証。
+/// 絶対パス・`..`・空・ルート/プレフィックス成分を拒否する(配信ハンドラの
+/// トラバーサル防御の一段目。二段目は `Registry::dashboard_asset_path`)。
+fn validate_widget_entry(entry: &str) -> Result<(), ManifestError> {
+    use std::path::Component;
+    let path = Path::new(entry);
+    if entry.is_empty()
+        || path
+            .components()
+            .any(|c| !matches!(c, Component::Normal(_)))
+    {
+        return Err(ManifestError::BadDashboard(format!(
+            "dashboard entry must be a relative path inside the plugin directory: {entry}"
+        )));
+    }
+    Ok(())
+}
+
 /// `dir/manifest.toml` を読み込み、検証して返す。
 ///
 /// 検証エラーは `Err` として返す(panic しない)。呼び出し側は当該プラグインのみ
@@ -636,6 +738,7 @@ pub fn load_manifest(dir: &Path) -> Result<Manifest, ManifestError> {
     validate_sidecars(&mut manifest.sidecars)?;
     validate_filesystem(&mut manifest.filesystem)?;
     validate_bus(&mut manifest.bus)?;
+    validate_dashboard(&mut manifest.dashboard)?;
 
     Ok(manifest)
 }
@@ -1148,6 +1251,7 @@ reason = ""
                 sidecars: vec![],
                 filesystem: vec![],
                 bus: vec![],
+            dashboard: vec![],
             }
         }
 
@@ -1209,6 +1313,7 @@ reason = ""
             sidecars: vec![],
             filesystem: vec![],
             bus: vec![],
+            dashboard: vec![],
         };
 
         // Set B: two separate requests that request an additional host
@@ -1234,6 +1339,7 @@ reason = ""
             sidecars: vec![],
             filesystem: vec![],
             bus: vec![],
+            dashboard: vec![],
         };
 
         let fp_a = set_a
@@ -1306,6 +1412,7 @@ reason = "fetch data"
                 sidecars: vec![],
                 filesystem: vec![],
                 bus: vec![],
+            dashboard: vec![],
             }
         }
 
@@ -1437,6 +1544,7 @@ reason = "foo"
             sidecars: vec![],
             filesystem: vec![],
             bus: vec![],
+            dashboard: vec![],
         };
 
         let old_style_fingerprint = "0123456789abcdef"; // 16 hex chars, FNV-1a-64 shape
@@ -1683,6 +1791,7 @@ port = 50030
             sidecars: Vec::new(),
             filesystem: Vec::new(),
             bus,
+            dashboard: Vec::new(),
         }
     }
 
@@ -1855,5 +1964,120 @@ reason = "duplicate publish topic"
             manifest_with_bus(vec![a]).bus_fingerprint("ed-state"),
             manifest_with_bus(vec![reordered]).bus_fingerprint("ed-state")
         );
+    }
+
+    /// dashboard セクションだけ差し替えた manifest をロードするヘルパー。
+    fn load_with_dashboard_section(section: &str) -> Result<Manifest, ManifestError> {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin_dir = tmp.path().join("widgety");
+        fs::create_dir_all(&plugin_dir).unwrap();
+        write_entry(&plugin_dir, "plugin.wasm");
+        write_manifest(
+            &plugin_dir,
+            &format!(
+                "id = \"widgety\"\nname = \"W\"\nversion = \"0.1.0\"\nentry = \"plugin.wasm\"\n{section}"
+            ),
+        );
+        load_manifest(&plugin_dir)
+    }
+
+    #[test]
+    fn dashboard_section_parses_and_validates() {
+        let manifest = load_with_dashboard_section(
+            "[[dashboard]]\nid = \"status\"\ntitle = \"Status\"\nentry = \"ui/status/index.html\"\nsize = \"medium\"\n",
+        )
+        .expect("dashboard manifest should parse");
+        assert_eq!(manifest.dashboard.len(), 1);
+        let w = manifest.dashboard_widget("status").expect("widget present");
+        assert_eq!(w.title, "Status");
+        assert_eq!(w.size, WidgetSize::Medium);
+        assert_eq!(w.size.as_str(), "medium");
+        assert!(manifest.dashboard_widget("missing").is_none());
+    }
+
+    #[test]
+    fn dashboard_rejects_bad_id_duplicate_and_traversal_entry() {
+        let bad_id = load_with_dashboard_section(
+            "[[dashboard]]\nid = \"Bad_ID\"\ntitle = \"t\"\nentry = \"ui/a.html\"\nsize = \"small\"\n",
+        );
+        assert!(matches!(bad_id, Err(ManifestError::BadDashboard(_))));
+
+        let dup = load_with_dashboard_section(
+            "[[dashboard]]\nid = \"a\"\ntitle = \"t\"\nentry = \"ui/a.html\"\nsize = \"small\"\n\n[[dashboard]]\nid = \"a\"\ntitle = \"t\"\nentry = \"ui/b.html\"\nsize = \"small\"\n",
+        );
+        assert!(matches!(dup, Err(ManifestError::BadDashboard(_))));
+
+        let traversal = load_with_dashboard_section(
+            "[[dashboard]]\nid = \"a\"\ntitle = \"t\"\nentry = \"../outside.html\"\nsize = \"small\"\n",
+        );
+        assert!(matches!(traversal, Err(ManifestError::BadDashboard(_))));
+
+        let absolute = load_with_dashboard_section(
+            "[[dashboard]]\nid = \"a\"\ntitle = \"t\"\nentry = \"/etc/passwd\"\nsize = \"small\"\n",
+        );
+        assert!(matches!(absolute, Err(ManifestError::BadDashboard(_))));
+
+        let empty_title = load_with_dashboard_section(
+            "[[dashboard]]\nid = \"a\"\ntitle = \"  \"\nentry = \"ui/a.html\"\nsize = \"small\"\n",
+        );
+        assert!(matches!(empty_title, Err(ManifestError::BadDashboard(_))));
+    }
+
+    #[test]
+    fn dashboard_entry_missing_file_does_not_fail_load() {
+        // entry ファイル不在はロード成功(resolved 判定は Registry 側の責務)
+        let manifest = load_with_dashboard_section(
+            "[[dashboard]]\nid = \"a\"\ntitle = \"t\"\nentry = \"ui/nonexistent.html\"\nsize = \"large\"\n",
+        );
+        assert!(manifest.is_ok());
+    }
+
+    fn manifest_with_dashboard_widget(widget: DashboardWidget) -> Manifest {
+        Manifest {
+            id: "p".into(),
+            name: "P".into(),
+            version: "0".into(),
+            description: String::new(),
+            entry: "plugin.wasm".into(),
+            events: vec![],
+            settings: vec![],
+            capabilities: vec![],
+            sidecars: vec![],
+            filesystem: vec![],
+            bus: vec![],
+            dashboard: vec![widget],
+        }
+    }
+
+    #[test]
+    fn dashboard_fingerprint_changes_with_each_field() {
+        let widget = |title: &str, entry: &str, size: WidgetSize| DashboardWidget {
+            id: "a".into(),
+            title: title.into(),
+            entry: entry.into(),
+            size,
+        };
+        let base = manifest_with_dashboard_widget(widget("t", "ui/a.html", WidgetSize::Small));
+        let fp = base.dashboard_fingerprint("a").unwrap();
+        assert_eq!(fp, base.dashboard_fingerprint("a").unwrap());
+        assert_ne!(
+            fp,
+            manifest_with_dashboard_widget(widget("t2", "ui/a.html", WidgetSize::Small))
+                .dashboard_fingerprint("a")
+                .unwrap()
+        );
+        assert_ne!(
+            fp,
+            manifest_with_dashboard_widget(widget("t", "ui/b.html", WidgetSize::Small))
+                .dashboard_fingerprint("a")
+                .unwrap()
+        );
+        assert_ne!(
+            fp,
+            manifest_with_dashboard_widget(widget("t", "ui/a.html", WidgetSize::Large))
+                .dashboard_fingerprint("a")
+                .unwrap()
+        );
+        assert!(base.dashboard_fingerprint("missing").is_none());
     }
 }

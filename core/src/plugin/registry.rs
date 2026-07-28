@@ -1525,6 +1525,7 @@ pub(crate) mod tests {
                 mode: crate::plugin::manifest::FilesystemMode::ReadWrite,
             }],
             bus: vec![],
+            dashboard: vec![],
         }
     }
 
@@ -1546,6 +1547,7 @@ pub(crate) mod tests {
                 subscribe: vec!["current-system".into()],
                 reason: "r".into(),
             }],
+            dashboard: vec![],
         }
     }
 
@@ -1828,6 +1830,7 @@ pub(crate) mod tests {
             }],
             filesystem: vec![],
             bus: vec![],
+            dashboard: vec![],
         }
     }
 
@@ -2162,6 +2165,7 @@ pub(crate) mod tests {
             sidecars: vec![],
             filesystem: vec![],
             bus: vec![],
+            dashboard: vec![],
         }
     }
 

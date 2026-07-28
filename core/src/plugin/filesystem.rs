@@ -328,6 +328,7 @@ mod tests {
             sidecars: vec![],
             filesystem: requests,
             bus: vec![],
+            dashboard: vec![],
         }
     }
 

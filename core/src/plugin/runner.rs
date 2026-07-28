@@ -723,6 +723,7 @@ mod tests {
             sidecars: vec![],
             filesystem: vec![],
             bus: vec![],
+            dashboard: vec![],
         }
     }
 

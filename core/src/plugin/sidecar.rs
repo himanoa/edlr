@@ -250,6 +250,7 @@ mod tests {
             sidecars,
             filesystem: vec![],
             bus: vec![],
+            dashboard: vec![],
         }
     }
 

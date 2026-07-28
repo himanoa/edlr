@@ -247,6 +247,7 @@ mod tests {
             sidecars: vec![],
             filesystem: vec![],
             bus: vec![],
+            dashboard: vec![],
         }
     }
 
@@ -496,6 +497,7 @@ mod tests {
             sidecars: vec![],
             filesystem: vec![],
             bus: vec![],
+            dashboard: vec![],
         }
     }
 

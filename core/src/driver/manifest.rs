@@ -61,6 +61,7 @@ impl DriverManifest {
             sidecars: self.sidecars.clone(),
             filesystem: self.filesystem.clone(),
             bus: Vec::new(),
+            dashboard: Vec::new(),
         }
     }
 }

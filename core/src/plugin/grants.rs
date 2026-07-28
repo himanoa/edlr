@@ -402,6 +402,7 @@ mod tests {
             sidecars: vec![],
             filesystem: vec![],
             bus: vec![],
+            dashboard: vec![],
         }
     }
 
@@ -418,6 +419,7 @@ mod tests {
             sidecars: vec![],
             filesystem: vec![],
             bus: vec![],
+            dashboard: vec![],
         }
     }
 
@@ -641,6 +643,7 @@ mod tests {
             }],
             filesystem: vec![],
             bus: vec![],
+            dashboard: vec![],
         }
     }
 
@@ -808,6 +811,7 @@ mod tests {
                 mode,
             }],
             bus: vec![],
+            dashboard: vec![],
         }
     }
 
@@ -915,6 +919,7 @@ mod tests {
                 subscribe: vec!["current-system".into()],
                 reason: "r".into(),
             }],
+            dashboard: vec![],
         }
     }
 
