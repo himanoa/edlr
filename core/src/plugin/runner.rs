@@ -120,7 +120,7 @@ use crate::plugin::grants::GrantsStore;
 use crate::plugin::host::{capabilities_json_string, HostCtx, PluginHost, PluginInstance};
 use crate::plugin::manifest::{load_manifest, matches_event};
 use crate::plugin::registry::{PluginEntry, PluginState, Registry};
-use crate::plugin::schedule::{Clock, ScheduleState};
+use crate::plugin::schedule::{Clock, ScheduleState, ScheduleView};
 use crate::plugin::settings::SettingsStore;
 use crate::plugin::sidecar::{assign_ports, SidecarConfig, SidecarConfigStore};
 use crate::plugin::sidecar_runtime::{
@@ -510,6 +510,15 @@ fn run_plugin_thread(
     // cron は壁時計で評価される。
     let mut schedule_state = ScheduleState::new(&manifest.schedules, Clock::now());
 
+    // このスレッドが実際に予定している発火時刻を `plugins/list` から読める
+    // ようにする。`ScheduleState` 自体はここから出さない(`take_due` が状態を
+    // 進める可変操作なので、スレッドをまたいで共有すると RPC と発火が競合
+    // する)。宣言が無いプラグインでは窓口も作らない。
+    let schedule_view = ScheduleView::default();
+    if !manifest.schedules.is_empty() {
+        registry.register_schedule_view(&manifest.id, schedule_view.clone());
+    }
+
     // 1 回の `Err(reason)` を「warn ログ + disable + unsubscribe + ループ
     // 脱出」という既存の trap 分岐へ合流させるためのマクロ。`Handle` 後の
     // wasm 呼び出し・`Fire` 自身・`Fire` 後の追い発火のいずれで失敗しても
@@ -528,8 +537,13 @@ fn run_plugin_thread(
     }
 
     loop {
+        // 待ちに入る直前に、いまの状態を公開する。発火(`take_due`/
+        // `fire_all_due`)は必ずこのループを一周してここへ戻ってくるので、
+        // 状態が進むたびに公開値も更新される。
+        let clock = Clock::now();
+        schedule_view.publish(&schedule_state, clock);
         let timeout = schedule_state
-            .until_next(Clock::now())
+            .until_next(clock)
             .unwrap_or(SCHEDULE_LESS_FALLBACK_TIMEOUT);
         let recv_result = work_rx.recv_timeout(timeout);
         // due は `Timeout` のときだけ取り出す。`Ok(work)` のときにも

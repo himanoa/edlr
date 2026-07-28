@@ -19,7 +19,7 @@ use crate::plugin::fs_runtime::{filesystem_json_string, FsRuntimeEntry};
 use crate::plugin::grants::{GrantState, GrantsError, GrantsStore};
 use crate::plugin::host::{capabilities_json_string, parse_capability_hosts, PluginHost};
 use crate::plugin::runner::PluginWork;
-use crate::plugin::schedule::{Clock, ScheduleState};
+use crate::plugin::schedule::{Clock, ScheduleState, ScheduleView};
 use crate::plugin::settings::SettingsStore;
 use crate::plugin::sidecar::{assign_ports, SidecarConfig, SidecarConfigError, SidecarConfigStore};
 use crate::plugin::sidecar_runtime::{
@@ -124,14 +124,17 @@ pub struct DashboardInfo {
 
 /// スケジュール 1 件の RPC 応答用スナップショット(`PluginInfo::schedules` 用)。
 ///
-/// `next` は表示用の**近似値**である点に注意: 真の発火スケジュール
-/// (`ScheduleState`)はプラグイン専用スレッドが所有しており、ここへは共有
-/// しない(タスクブリーフの設計判断: スレッドをまたいで `ScheduleState` を
-/// 共有する複雑さを避ける)。代わりに `plugins/list` が呼ばれるたびに
-/// `ScheduleState::new(&manifest.schedules, Local::now())` で**独立に作り
-/// 直し**、そこから「今から」の次回発火時刻を求める。cron 系は壁時計から
-/// 一意に決まるため厳密に一致するが、interval 系はプラグインスレッド側の
-/// 実際の発火起点(スレッド開始時刻起点)とはズレうる近似値になる。
+/// `next` はプラグインスレッドが実際に予定している発火時刻。
+///
+/// 真の発火スケジュール(`ScheduleState`)はプラグイン専用スレッドが所有して
+/// おり、`take_due` が状態を進める可変操作である以上、そのままスレッドを
+/// またいで共有はできない。代わりにランナーループが自分の状態を更新する
+/// たびに `ScheduleView` へ壁時計へ変換済みのスナップショットを書き込み、
+/// `plugins/list` はそれを読む(`Registry::schedule_views`)。
+///
+/// プラグインがまだ公開していない(起動途中)か、Disabled でスレッドが
+/// 存在しない場合だけ、`ScheduleState` をその場で作り直した**推定値**へ
+/// フォールバックする。
 #[derive(Debug, Clone)]
 pub struct ScheduleInfo {
     pub name: String,
@@ -338,6 +341,15 @@ pub struct Registry {
     /// return 済みで `work_rx` を読んでいないため、`Stop` を送っても意味が
     /// 無い(`register_plugin_thread` のドキュメント参照)。
     plugin_threads: Arc<Mutex<HashMap<String, PluginThreadHandle>>>,
+    /// 各プラグインのランナーループが公開する「実際の次回発火時刻」を id で
+    /// 引けるようにしたマップ(`plugins/list` 用)。`register_schedule_view` が
+    /// プラグイン専用スレッド自身から呼ばれて登録する。
+    ///
+    /// これが無かった頃、`build_schedule_infos` は RPC のたびに
+    /// `ScheduleState` を作り直していたため、interval の `next` は常に
+    /// 「now + interval」になり、スレッドの実際の発火時点と無関係だった
+    /// (UI のカウントダウンが意味を持たなかった)。
+    schedule_views: Arc<Mutex<HashMap<String, ScheduleView>>>,
 }
 
 /// `Registry::plugin_threads` の 1 エントリ。`shutdown_plugins` 専用。
@@ -374,6 +386,7 @@ impl Registry {
             plugins_dir,
             bus_subscriber_shutdown: Arc::new(AtomicBool::new(false)),
             plugin_threads: Arc::new(Mutex::new(HashMap::new())),
+            schedule_views: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -399,6 +412,18 @@ impl Registry {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .insert(id.to_string(), PluginThreadHandle { work_tx, handle });
+    }
+
+    /// プラグイン専用スレッドが、自分のスケジュール状態を公開する窓口を
+    /// 登録する(`plugins/list` から読まれる)。スレッド自身がループへ入る
+    /// 直前に呼ぶ(`runner::run_plugin_thread`)。
+    ///
+    /// スケジュールを 1 件も宣言していないプラグインは呼ばない。
+    pub(crate) fn register_schedule_view(&self, id: &str, view: ScheduleView) {
+        self.schedule_views
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(id.to_string(), view);
     }
 
     /// Running な全プラグインへ `PluginWork::Stop` を送り、それぞれの専用
@@ -526,7 +551,7 @@ impl Registry {
                 let sidecars = self.build_sidecar_infos(&manifest);
                 let filesystem = self.build_filesystem_infos(&manifest);
                 let dashboard = self.build_dashboard_infos(&manifest);
-                let schedules = Self::build_schedule_infos(&manifest);
+                let schedules = self.build_schedule_infos(&manifest);
                 PluginInfo {
                     manifest,
                     state,
@@ -684,17 +709,26 @@ impl Registry {
 
     /// `manifest.schedules` から `ScheduleInfo` の一覧を組み立てる(宣言順)。
     ///
-    /// ディスク I/O もロックも不要な純粋計算(`ScheduleInfo` のドキュメント
-    /// コメント参照): `ScheduleState::new` をこの場で作り直して現在時刻
-    /// (`Clock::now()`)からの次回発火時刻を求めるだけなので、`&self` すら
-    /// 使わない関連関数にしてある。
-    fn build_schedule_infos(manifest: &Manifest) -> Vec<ScheduleInfo> {
+    /// プラグインが Running なら、そのランナーループが `ScheduleView` へ
+    /// 公開している**実際の**次回発火時刻を返す。まだ公開されていない
+    /// (起動途中)か、プラグインが Disabled でスレッドが無い場合は、
+    /// `ScheduleState` をこの場で作り直した推定値へフォールバックする
+    /// (`ScheduleInfo` のドキュメントコメント参照)。
+    fn build_schedule_infos(&self, manifest: &Manifest) -> Vec<ScheduleInfo> {
+        let published: HashMap<String, chrono::DateTime<chrono::Local>> = self
+            .schedule_views
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(&manifest.id)
+            .map(|view| view.snapshot().into_iter().collect())
+            .unwrap_or_default();
+
         let clock = Clock::now();
         let state = ScheduleState::new(&manifest.schedules, clock);
         state
             .next_times(clock)
             .into_iter()
-            .map(|(name, next)| {
+            .map(|(name, estimated)| {
                 let spec = manifest
                     .schedules
                     .iter()
@@ -702,9 +736,9 @@ impl Registry {
                     .map(|s| s.spec.clone())
                     .expect("next_times names must come from manifest.schedules");
                 ScheduleInfo {
+                    next: published.get(name).copied().unwrap_or(estimated),
                     name: name.to_string(),
                     spec,
-                    next,
                 }
             })
             .collect()
@@ -2059,6 +2093,50 @@ pub(crate) mod tests {
             ScheduleSpec::Cron("0 9 * * *".to_string())
         );
         assert!(schedules[1].next > chrono::Local::now());
+    }
+
+    /// ランナーループが公開した実際の発火時刻が、その場の推定値ではなく
+    /// そのまま `plugins/list` に載ること。これが無かった頃、interval の
+    /// `next` は RPC のたびに「now + interval」へ作り直され、スレッドの
+    /// 実際の発火時点と無関係だった。
+    #[test]
+    fn list_reports_the_next_fire_published_by_the_runner_thread() {
+        let registry = test_registry_with_schedule();
+
+        // スレッドが「flush は 3 秒後に発火予定」と公開している状況を作る。
+        // 推定値(now + 60s)とは明確に違う値にしておく。
+        let published_flush = chrono::Local::now() + chrono::Duration::seconds(3);
+        let view = crate::plugin::schedule::ScheduleView::default();
+        view.set_for_test(vec![("flush".to_string(), published_flush)]);
+        registry.register_schedule_view("scheduler-plugin", view);
+
+        let infos = registry.list();
+        let schedules = &infos[0].schedules;
+
+        assert_eq!(schedules[0].name, "flush");
+        assert_eq!(
+            schedules[0].next, published_flush,
+            "公開済みの発火時刻をそのまま返すこと"
+        );
+
+        // 公開されていない `daily` は推定値へフォールバックする。
+        assert_eq!(schedules[1].name, "daily");
+        assert!(schedules[1].next > chrono::Local::now());
+    }
+
+    /// スレッドがまだ何も公開していない(起動途中 / Disabled)場合は、
+    /// 従来どおりその場の推定値を返す。
+    #[test]
+    fn list_falls_back_to_the_estimate_when_nothing_is_published() {
+        let registry = test_registry_with_schedule();
+        registry.register_schedule_view(
+            "scheduler-plugin",
+            crate::plugin::schedule::ScheduleView::default(),
+        );
+
+        let infos = registry.list();
+        assert_eq!(infos[0].schedules.len(), 2);
+        assert!(infos[0].schedules[0].next > chrono::Local::now());
     }
 
     #[test]

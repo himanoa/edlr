@@ -22,6 +22,7 @@
 //! 基準に単調時刻を壁時計へ変換して組み立てる。
 
 use std::str::FromStr;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Local};
@@ -108,6 +109,53 @@ impl NextFire {
             NextFire::Mono(at) => clock.wall_at(*at),
             NextFire::Wall(at) => *at,
         }
+    }
+}
+
+/// プラグインスレッドが所有する `ScheduleState` の「次回発火時刻」を、
+/// 他スレッド(`plugins/list` の RPC)から読める形で公開する窓口。
+///
+/// `ScheduleState` 自身はプラグイン専用スレッドの外に出さない(`take_due` が
+/// 状態を進める可変操作であり、スレッドをまたいで共有すると発火のタイミングと
+/// RPC が競合する)。代わりに、ランナーループが自分の状態を更新するたびに
+/// ここへ壁時計へ変換済みのスナップショットを書き込む。読み手はロックを
+/// 取ってコピーするだけで、発火ロジックには一切触れない。
+#[derive(Clone, Default)]
+pub(crate) struct ScheduleView {
+    inner: Arc<Mutex<ScheduleSnapshot>>,
+}
+
+/// `ScheduleView` が公開する `(スケジュール名, 次回発火時刻)` の一覧(宣言順)。
+type ScheduleSnapshot = Vec<(String, DateTime<Local>)>;
+
+impl ScheduleView {
+    fn lock(&self) -> std::sync::MutexGuard<'_, ScheduleSnapshot> {
+        self.inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// ランナーループが自分の状態を公開する。発火の直後と、待ちに入る前に
+    /// 呼ぶ(`runner.rs` 参照)。
+    pub(crate) fn publish(&self, state: &ScheduleState, clock: Clock) {
+        let snapshot = state
+            .next_times(clock)
+            .into_iter()
+            .map(|(name, next)| (name.to_string(), next))
+            .collect();
+        *self.lock() = snapshot;
+    }
+
+    /// 公開済みのスナップショットを返す(宣言順)。まだ一度も `publish` されて
+    /// いなければ空。
+    pub(crate) fn snapshot(&self) -> ScheduleSnapshot {
+        self.lock().clone()
+    }
+
+    /// テスト用: ランナーループを起こさずに公開値を差し込む。
+    #[cfg(test)]
+    pub(crate) fn set_for_test(&self, snapshot: ScheduleSnapshot) {
+        *self.lock() = snapshot;
     }
 }
 

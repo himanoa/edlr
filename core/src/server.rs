@@ -598,8 +598,8 @@ fn bus_result_json(bus: &[crate::plugin::registry::BusInfo]) -> serde_json::Valu
 /// `spec` は `ScheduleSpec::display_string()`(`"every {n}s"` /
 /// `"cron: {expr}"`)、`next` は ISO8601(ローカル時刻・オフセット付き)。
 /// `next` は `Registry::ScheduleInfo` のドキュメントコメントが説明する
-/// とおり表示用の近似値であり、真のスケジュール状態(プラグインスレッドの
-/// `ScheduleState`)そのものではない。
+/// とおり、プラグインスレッドが `ScheduleView` へ公開した実際の発火予定時刻
+/// (未公開・Disabled のときだけその場の推定値へフォールバックする)。
 fn schedules_result_json(schedules: &[crate::plugin::registry::ScheduleInfo]) -> serde_json::Value {
     let items: Vec<serde_json::Value> = schedules
         .iter()
