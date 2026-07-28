@@ -1,10 +1,10 @@
 ---
 id: on-stop-graceful-shutdown-flush-e646
 title: on-stopがワークキュー後方に並びgraceful shutdownのflushがスキップされる
-status: open
+status: closed
 labels: plugin, reliability
 created: 2026-07-28T15:07:27Z
-updated: 2026-07-28T15:09:14Z
+updated: 2026-07-28T16:08:25Z
 ---
 
 ## 問題
