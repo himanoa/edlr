@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { BusSection } from "../components/BusSection";
 import CapabilitySection from "../components/CapabilitySection";
+import { DashboardSection } from "../components/DashboardSection";
 import FilesystemSection from "../components/FilesystemSection";
 import PluginForm from "../components/PluginForm";
 import SidecarSection from "../components/SidecarSection";
@@ -175,6 +176,16 @@ export default function Plugins() {
     );
   };
 
+  const handleDashboardGrant = async (pluginId: string, widget: string, granted: boolean) => {
+    const client = clientRef.current;
+    if (!client) throw new Error("RPC に接続されていません");
+    const updated = await client.setDashboardGrant(pluginId, widget, granted);
+    if (!mountedRef.current) return;
+    setPlugins((prev) =>
+      prev.map((p) => (p.id === pluginId ? { ...p, dashboard: updated.dashboard } : p)),
+    );
+  };
+
   return (
     <section>
       <h1>Plugins</h1>
@@ -209,6 +220,11 @@ export default function Plugins() {
               onGrantChange={handleFilesystemGrant(p.id)}
             />
             <BusSection pluginId={p.id} bus={p.bus} onSetGrant={handleBusGrant} />
+            <DashboardSection
+              pluginId={p.id}
+              dashboard={p.dashboard}
+              onSetGrant={handleDashboardGrant}
+            />
           </article>
         ))}
     </section>

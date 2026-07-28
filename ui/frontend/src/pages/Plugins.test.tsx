@@ -20,6 +20,12 @@ let setBusGrantImpl: (
   driver: string,
   granted: boolean,
 ) => Promise<{ bus: PluginInfo["bus"] }> = () => Promise.resolve({ bus: [] });
+let setDashboardGrantImpl: (
+  pluginId: string,
+  widget: string,
+  granted: boolean,
+) => Promise<{ dashboard: PluginInfo["dashboard"] }> = () =>
+  Promise.resolve({ dashboard: [] });
 let instances: Array<{ close: ReturnType<typeof vi.fn> }> = [];
 
 vi.mock("../rpc", () => {
@@ -41,6 +47,13 @@ vi.mock("../rpc", () => {
       setBusGrant(pluginId: string, driver: string, granted: boolean) {
         calls.push({ method: "plugins/set-bus-grant", params: { plugin: pluginId, driver, granted } });
         return setBusGrantImpl(pluginId, driver, granted);
+      }
+      setDashboardGrant(pluginId: string, widget: string, granted: boolean) {
+        calls.push({
+          method: "plugins/set-dashboard-grant",
+          params: { plugin: pluginId, widget, granted },
+        });
+        return setDashboardGrantImpl(pluginId, widget, granted);
       }
     },
   };
@@ -119,6 +132,7 @@ beforeEach(() => {
   setSidecarGrantImpl = () => Promise.resolve({ sidecars: [] });
   setFilesystemGrantImpl = () => Promise.resolve({ roots: [] });
   setBusGrantImpl = () => Promise.resolve({ bus: [] });
+  setDashboardGrantImpl = () => Promise.resolve({ dashboard: [] });
 });
 
 afterEach(() => {
@@ -326,5 +340,40 @@ test("toggling bus approval calls setBusGrant with the right params and replaces
   // entries (a second, previously-absent driver appears), not just flip the
   // toggled entry locally.
   expect(await screen.findByText("translator-core")).toBeInTheDocument();
+  await waitFor(() => expect(toggle.checked).toBe(true));
+});
+
+test("toggling dashboard approval calls setDashboardGrant and replaces the dashboard array from its response", async () => {
+  const widget = {
+    id: "status",
+    title: "Ship Status",
+    entry: "ui/status/index.html",
+    size: "medium" as const,
+    granted: false,
+    staleGrant: false,
+    resolved: true,
+  };
+  const plugin = makePlugin({ dashboard: [widget] });
+  listImpl = () => Promise.resolve({ pluginsDir: "/plugins", plugins: [plugin] });
+  setDashboardGrantImpl = () =>
+    Promise.resolve({
+      dashboard: [
+        { ...widget, granted: true },
+        { ...widget, id: "extra", title: "Extra Widget" },
+      ],
+    });
+
+  render(<Plugins />);
+  const toggle = (await screen.findByRole("checkbox", {
+    name: /このウィジェットの表示を承認する/,
+  })) as HTMLInputElement;
+  await userEvent.click(toggle);
+
+  await waitFor(() => {
+    const call = calls.find((c) => c.method === "plugins/set-dashboard-grant");
+    expect(call?.params).toEqual({ plugin: "voice-notify", widget: "status", granted: true });
+  });
+
+  expect(await screen.findByText("Extra Widget")).toBeInTheDocument();
   await waitFor(() => expect(toggle.checked).toBe(true));
 });
