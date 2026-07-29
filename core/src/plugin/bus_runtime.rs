@@ -70,7 +70,9 @@ mod tests {
     #[test]
     fn ungranted_entries_carry_no_topics() {
         let parsed = parse_bus(&bus_json_string(&[entry(false)]));
-        let e = parsed.get("ed-state").expect("entry survives serialization");
+        let e = parsed
+            .get("ed-state")
+            .expect("entry survives serialization");
         assert!(!e.granted);
         assert!(e.publish.is_empty());
         assert!(e.subscribe.is_empty());

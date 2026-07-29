@@ -5,9 +5,24 @@ use std::path::Path;
 use edlr_driver_channel::TopicSpec;
 
 use crate::plugin::manifest::{
-    is_valid_id, validate_capabilities, validate_filesystem, validate_sidecars, CapabilityRequest,
-    FilesystemRequest, ManifestError, SettingField, SidecarRequest,
+    is_valid_id, unknown_top_level_keys, validate_capabilities, validate_filesystem,
+    validate_sidecars, warn_unknown_top_level_keys, CapabilityRequest, FilesystemRequest,
+    ManifestError, SettingField, SidecarRequest,
 };
+
+/// `DriverManifest` が知っているトップレベルキー(serde の `rename` 後の名前)。
+pub(crate) const DRIVER_MANIFEST_TOP_LEVEL_KEYS: &[&str] = &[
+    "id",
+    "name",
+    "version",
+    "description",
+    "entry",
+    "topics",
+    "settings",
+    "capabilities",
+    "sidecar",
+    "filesystem",
+];
 
 /// `driver.toml` のパース結果。
 ///
@@ -121,6 +136,23 @@ pub fn load_driver_manifest(dir: &Path) -> Result<DriverManifest, ManifestError>
     validate_sidecars(&mut manifest.sidecars)?;
     validate_filesystem(&mut manifest.filesystem)?;
     validate_topics(&manifest.topics)?;
+
+    warn_unknown_top_level_keys(
+        "driver.toml",
+        &manifest.id,
+        &unknown_top_level_keys(&content, DRIVER_MANIFEST_TOP_LEVEL_KEYS),
+    );
+
+    // 宣言と実際の読み取り結果の突き合わせ用(issue manifest-rjoa の提案 3)。
+    tracing::info!(
+        id = manifest.id.as_str(),
+        topics = manifest.topics.len(),
+        settings = manifest.settings.len(),
+        capabilities = manifest.capabilities.len(),
+        sidecars = manifest.sidecars.len(),
+        filesystem = manifest.filesystem.len(),
+        "driver manifest loaded"
+    );
 
     Ok(manifest)
 }
@@ -241,6 +273,100 @@ name = "Bad_Name"
             }
             other => panic!("expected ManifestError::BadTopic, got {other:?}"),
         }
+    }
+
+    /// Issue manifest-rjoa の再現(ドライバ側)。`settings` を `[[sidecar]]` の
+    /// 後ろに置くと TOML 的には `sidecar[0].settings` になる。以前はこれが
+    /// 黙って捨てられ、`drivers/get-settings` が空を返していた。
+    #[test]
+    fn rejects_a_top_level_key_written_after_a_table_header() {
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("ed-state");
+        std::fs::create_dir(&sub).unwrap();
+        write_entry(&sub);
+        write(
+            &sub,
+            r#"
+id = "ed-state"
+name = "ED State"
+version = "0.1.0"
+entry = "driver.wasm"
+
+[[sidecar]]
+name = "worker"
+reason = "音声合成を行う"
+port = 51000
+
+settings = [{ key = "voice", label = "Voice", type = "string", default = "a" }]
+"#,
+        );
+        let err = load_driver_manifest(&sub)
+            .expect_err("a stray key inside [[sidecar]] should be rejected");
+        match err {
+            ManifestError::Parse(e) => {
+                let msg = e.to_string();
+                assert!(
+                    msg.contains("settings"),
+                    "error should name the offending key: {msg}"
+                );
+            }
+            other => panic!("expected ManifestError::Parse, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unknown_top_level_keys_are_reported() {
+        let unknown = crate::plugin::manifest::unknown_top_level_keys(
+            r#"
+id = "ed-state"
+name = "ED State"
+version = "0.1.0"
+entry = "driver.wasm"
+topic = []
+"#,
+            DRIVER_MANIFEST_TOP_LEVEL_KEYS,
+        );
+        // `[[topics]]` の綴り違い(`topic`)は黙って消える典型。
+        assert_eq!(unknown, vec!["topic".to_string()]);
+    }
+
+    #[test]
+    fn a_driver_manifest_using_only_known_top_level_keys_reports_nothing() {
+        let unknown = crate::plugin::manifest::unknown_top_level_keys(
+            r#"
+id = "ed-state"
+name = "ED State"
+version = "0.1.0"
+description = "d"
+entry = "driver.wasm"
+
+[[topics]]
+name = "current-system"
+
+[[settings]]
+key = "a"
+label = "A"
+type = "string"
+default = ""
+
+[[capabilities]]
+kind = "http"
+hosts = ["https://example.com"]
+reason = "r"
+
+[[sidecar]]
+name = "worker"
+reason = "r"
+port = 51000
+
+[[filesystem]]
+name = "logs"
+reason = "r"
+mode = "read"
+"#,
+            DRIVER_MANIFEST_TOP_LEVEL_KEYS,
+        );
+        assert!(unknown.is_empty(), "unexpected unknown keys: {unknown:?}");
     }
 
     #[test]

@@ -783,12 +783,7 @@ fn fire_all_due(
 ///
 /// **wasm 呼び出しが成功した後に呼ぶこと**: 失敗した発火を「実行済み」として
 /// 記録すると、次回起動時にその打ち漏らしを追い掛けられなくなる。
-fn record_fire(
-    state: &ScheduleState,
-    plugin_id: &str,
-    name: &str,
-    schedule_store: &ScheduleStore,
-) {
+fn record_fire(state: &ScheduleState, plugin_id: &str, name: &str, schedule_store: &ScheduleStore) {
     if state.is_catch_up(name) {
         schedule_store.record_fire(plugin_id, name, chrono::Local::now());
     }
@@ -1102,8 +1097,7 @@ mod tests {
     #[tokio::test]
     async fn slow_plugin_channel_stays_bounded_and_publishing_does_not_block() {
         let (broadcast_tx, broadcast_rx) = broadcast::channel::<Arc<Event>>(4096);
-        let (work_tx, work_rx) =
-            std_mpsc::sync_channel::<PluginWork>(PLUGIN_WORK_QUEUE_CAPACITY);
+        let (work_tx, work_rx) = std_mpsc::sync_channel::<PluginWork>(PLUGIN_WORK_QUEUE_CAPACITY);
 
         let drops = DropCounters::new();
         spawn_event_subscriber(test_manifest(), broadcast_rx, work_tx, drops.clone());
@@ -1173,8 +1167,10 @@ mod tests {
         let (tx, rx) = std::sync::mpsc::sync_channel(1);
         bus.subscribe("translator", "ed-state", "current-system", tx);
 
-        bus.emit("ed-state", "current-system", b"a".to_vec()).unwrap();
-        bus.emit("ed-state", "current-system", b"b".to_vec()).unwrap();
+        bus.emit("ed-state", "current-system", b"a".to_vec())
+            .unwrap();
+        bus.emit("ed-state", "current-system", b"b".to_vec())
+            .unwrap();
 
         assert!(rx.try_recv().is_ok());
         assert!(rx.try_recv().is_err());

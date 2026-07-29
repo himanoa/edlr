@@ -54,7 +54,11 @@ struct ReplayBuffer {
 }
 
 impl ServerState {
-    pub fn new(router: &Router, registry: Option<Registry>, drivers: Option<DriverRegistry>) -> Self {
+    pub fn new(
+        router: &Router,
+        registry: Option<Registry>,
+        drivers: Option<DriverRegistry>,
+    ) -> Self {
         let (tx, _) = broadcast::channel(256);
         let state = Self {
             inner: Arc::new(Mutex::new(ReplayBuffer {
@@ -169,7 +173,8 @@ pub fn handle_rpc_with_drivers(
                     value["filesystem"] = filesystem_result_json(&info.filesystem)["roots"].clone();
                     let bus = registry.bus(&info.manifest.id).unwrap_or_default();
                     value["bus"] = bus_result_json(&bus)["bus"].clone();
-                    value["dashboard"] = dashboard_result_json(&info.dashboard)["dashboard"].clone();
+                    value["dashboard"] =
+                        dashboard_result_json(&info.dashboard)["dashboard"].clone();
                     value["schedules"] =
                         schedules_result_json(&info.schedules)["schedules"].clone();
                     value["dropped"] = dropped_result_json(&info.dropped);
@@ -459,7 +464,10 @@ fn handle_drivers_rpc(
             let manifest = drivers
                 .manifest_of(driver)
                 .ok_or_else(|| format!("unknown driver: {driver}"))?;
-            Ok(capabilities_result_json(&manifest.capabilities, &grant_state))
+            Ok(capabilities_result_json(
+                &manifest.capabilities,
+                &grant_state,
+            ))
         }
         "set-sidecar-config" => {
             let driver = param_str(params, "driver")?;
@@ -1024,13 +1032,9 @@ mod tests {
         // あり、`drivers` が `Some` であることに引きずられて誤って通しては
         // ならない。
         let (_registry, drivers) = test_registries();
-        let err = handle_rpc_with_drivers(
-            None,
-            Some(&drivers),
-            "plugins/list",
-            &serde_json::json!({}),
-        )
-        .unwrap_err();
+        let err =
+            handle_rpc_with_drivers(None, Some(&drivers), "plugins/list", &serde_json::json!({}))
+                .unwrap_err();
         assert_eq!(err, "plugins unavailable");
     }
 
@@ -1055,9 +1059,13 @@ mod tests {
     #[test]
     fn plugins_list_includes_schedules_with_spec_strings_and_next() {
         let registry = crate::plugin::registry::tests::test_registry_with_schedule();
-        let result =
-            handle_rpc_with_drivers(Some(&registry), None, "plugins/list", &serde_json::json!({}))
-                .unwrap();
+        let result = handle_rpc_with_drivers(
+            Some(&registry),
+            None,
+            "plugins/list",
+            &serde_json::json!({}),
+        )
+        .unwrap();
         let schedules = &result["plugins"][0]["schedules"];
         assert_eq!(schedules[0]["name"], "flush");
         assert_eq!(schedules[0]["spec"], "every 60s");
@@ -1067,8 +1075,9 @@ mod tests {
         // 呼び出しごとの `Local::now()` に依存するのでここでは検証しない --
         // `plugin::schedule::tests` / `plugin::registry::tests` が発火計算
         // 自体をテスト済み)。
-        assert!(chrono::DateTime::parse_from_rfc3339(schedules[0]["next"].as_str().unwrap())
-            .is_ok());
+        assert!(
+            chrono::DateTime::parse_from_rfc3339(schedules[0]["next"].as_str().unwrap()).is_ok()
+        );
     }
 
     /// 取りこぼしは黙って失われるのではなく `plugins/list` から見えること。
@@ -1077,9 +1086,13 @@ mod tests {
     #[test]
     fn plugins_list_reports_dropped_counts() {
         let (registry, _drivers) = test_registries();
-        let result =
-            handle_rpc_with_drivers(Some(&registry), None, "plugins/list", &serde_json::json!({}))
-                .unwrap();
+        let result = handle_rpc_with_drivers(
+            Some(&registry),
+            None,
+            "plugins/list",
+            &serde_json::json!({}),
+        )
+        .unwrap();
         let dropped = &result["plugins"][0]["dropped"];
         assert_eq!(dropped["events"], 0);
         assert_eq!(dropped["busDeliveries"], 0);
@@ -1088,9 +1101,13 @@ mod tests {
     #[test]
     fn plugins_list_reports_empty_schedules_array_when_none_declared() {
         let (registry, _drivers) = test_registries();
-        let result =
-            handle_rpc_with_drivers(Some(&registry), None, "plugins/list", &serde_json::json!({}))
-                .unwrap();
+        let result = handle_rpc_with_drivers(
+            Some(&registry),
+            None,
+            "plugins/list",
+            &serde_json::json!({}),
+        )
+        .unwrap();
         assert_eq!(result["plugins"][0]["schedules"], serde_json::json!([]));
     }
 
@@ -1134,7 +1151,8 @@ mod tests {
     /// `test_registry` を再利用する(どちらも wasm をロードせず `push` で
     /// 組み立てる)。
     fn test_registries() -> (Registry, DriverRegistry) {
-        let drivers = crate::driver::registry::tests::test_registry(edlr_driver_channel::Bus::new());
+        let drivers =
+            crate::driver::registry::tests::test_registry(edlr_driver_channel::Bus::new());
         let registry =
             crate::plugin::registry::tests::test_registry_with_bus_request_using(drivers.clone());
         (registry, drivers)
@@ -1244,7 +1262,9 @@ mod tests {
             .unwrap();
         assert_eq!(res.status(), axum::http::StatusCode::NOT_FOUND);
 
-        registry.set_dashboard_grant("widgety", "status", true).unwrap();
+        registry
+            .set_dashboard_grant("widgety", "status", true)
+            .unwrap();
 
         // grant 済み → 200 + CSP + Content-Type
         let res = app
@@ -1322,9 +1342,13 @@ mod tests {
         assert_eq!(result["dashboard"][0]["size"], "small");
 
         // 二重チェック: `plugins/list` を経由しても同じ承認状態が見える
-        let listed =
-            handle_rpc_with_drivers(Some(&registry), None, "plugins/list", &serde_json::json!({}))
-                .unwrap();
+        let listed = handle_rpc_with_drivers(
+            Some(&registry),
+            None,
+            "plugins/list",
+            &serde_json::json!({}),
+        )
+        .unwrap();
         assert_eq!(listed["plugins"][0]["dashboard"][0]["granted"], true);
 
         // dashboard/list は grant 済みウィジェットを URL 付きで返す
@@ -1426,13 +1450,9 @@ mod tests {
         assert_eq!(granted["requests"][0]["kind"], "http");
         assert_eq!(granted["staleGrant"], false);
 
-        let listed = handle_rpc_with_drivers(
-            None,
-            Some(&drivers),
-            "drivers/list",
-            &serde_json::json!({}),
-        )
-        .unwrap();
+        let listed =
+            handle_rpc_with_drivers(None, Some(&drivers), "drivers/list", &serde_json::json!({}))
+                .unwrap();
         assert_eq!(listed["drivers"][0]["capabilities"]["granted"], true);
 
         let revoked = handle_rpc_with_drivers(
@@ -1444,13 +1464,9 @@ mod tests {
         .unwrap();
         assert_eq!(revoked["granted"], false);
 
-        let listed_again = handle_rpc_with_drivers(
-            None,
-            Some(&drivers),
-            "drivers/list",
-            &serde_json::json!({}),
-        )
-        .unwrap();
+        let listed_again =
+            handle_rpc_with_drivers(None, Some(&drivers), "drivers/list", &serde_json::json!({}))
+                .unwrap();
         assert_eq!(listed_again["drivers"][0]["capabilities"]["granted"], false);
     }
 
@@ -1461,7 +1477,8 @@ mod tests {
     /// produce for the plugin arm.
     #[test]
     fn drivers_set_sidecar_config_requires_driver_name_and_config() {
-        let (drivers, _tmp) = crate::driver::registry::tests::test_registry_with_sidecar_and_filesystem();
+        let (drivers, _tmp) =
+            crate::driver::registry::tests::test_registry_with_sidecar_and_filesystem();
 
         let err = handle_rpc_with_drivers(
             None,
@@ -1493,7 +1510,8 @@ mod tests {
 
     #[test]
     fn drivers_set_sidecar_grant_requires_driver_name_and_granted() {
-        let (drivers, _tmp) = crate::driver::registry::tests::test_registry_with_sidecar_and_filesystem();
+        let (drivers, _tmp) =
+            crate::driver::registry::tests::test_registry_with_sidecar_and_filesystem();
 
         let err = handle_rpc_with_drivers(
             None,
@@ -1525,7 +1543,8 @@ mod tests {
 
     #[test]
     fn drivers_sidecar_control_requires_driver_name_and_action() {
-        let (drivers, _tmp) = crate::driver::registry::tests::test_registry_with_sidecar_and_filesystem();
+        let (drivers, _tmp) =
+            crate::driver::registry::tests::test_registry_with_sidecar_and_filesystem();
 
         let err = handle_rpc_with_drivers(
             None,
@@ -1566,7 +1585,8 @@ mod tests {
 
     #[test]
     fn drivers_set_filesystem_config_requires_driver_name_and_config() {
-        let (drivers, _tmp) = crate::driver::registry::tests::test_registry_with_sidecar_and_filesystem();
+        let (drivers, _tmp) =
+            crate::driver::registry::tests::test_registry_with_sidecar_and_filesystem();
 
         let err = handle_rpc_with_drivers(
             None,
@@ -1598,7 +1618,8 @@ mod tests {
 
     #[test]
     fn drivers_set_filesystem_grant_requires_driver_name_and_granted() {
-        let (drivers, _tmp) = crate::driver::registry::tests::test_registry_with_sidecar_and_filesystem();
+        let (drivers, _tmp) =
+            crate::driver::registry::tests::test_registry_with_sidecar_and_filesystem();
 
         let err = handle_rpc_with_drivers(
             None,
@@ -1637,7 +1658,8 @@ mod tests {
     /// which checks the underlying shared buffer.
     #[test]
     fn drivers_set_sidecar_grant_persists_and_returns_the_full_sidecar_array() {
-        let (drivers, _tmp) = crate::driver::registry::tests::test_registry_with_sidecar_and_filesystem();
+        let (drivers, _tmp) =
+            crate::driver::registry::tests::test_registry_with_sidecar_and_filesystem();
 
         handle_rpc_with_drivers(
             None,
@@ -1671,7 +1693,8 @@ mod tests {
     /// undeclared root) rejected the call first.
     #[test]
     fn drivers_set_filesystem_grant_rejects_granting_without_a_configured_path() {
-        let (drivers, _tmp) = crate::driver::registry::tests::test_registry_with_sidecar_and_filesystem();
+        let (drivers, _tmp) =
+            crate::driver::registry::tests::test_registry_with_sidecar_and_filesystem();
 
         let err = handle_rpc_with_drivers(
             None,
@@ -1690,7 +1713,8 @@ mod tests {
     /// that has never been granted, even once a `command` is configured.
     #[test]
     fn drivers_sidecar_control_rejects_starting_an_ungranted_sidecar() {
-        let (drivers, _tmp) = crate::driver::registry::tests::test_registry_with_sidecar_and_filesystem();
+        let (drivers, _tmp) =
+            crate::driver::registry::tests::test_registry_with_sidecar_and_filesystem();
 
         handle_rpc_with_drivers(
             None,
@@ -1727,7 +1751,8 @@ mod tests {
 
     #[test]
     fn drivers_set_sidecar_config_reports_unknown_driver() {
-        let (drivers, _tmp) = crate::driver::registry::tests::test_registry_with_sidecar_and_filesystem();
+        let (drivers, _tmp) =
+            crate::driver::registry::tests::test_registry_with_sidecar_and_filesystem();
         let err = handle_rpc_with_drivers(
             None,
             Some(&drivers),
@@ -1744,7 +1769,8 @@ mod tests {
 
     #[test]
     fn drivers_set_sidecar_grant_reports_unknown_driver() {
-        let (drivers, _tmp) = crate::driver::registry::tests::test_registry_with_sidecar_and_filesystem();
+        let (drivers, _tmp) =
+            crate::driver::registry::tests::test_registry_with_sidecar_and_filesystem();
         let err = handle_rpc_with_drivers(
             None,
             Some(&drivers),
@@ -1757,7 +1783,8 @@ mod tests {
 
     #[test]
     fn drivers_sidecar_control_reports_unknown_driver() {
-        let (drivers, _tmp) = crate::driver::registry::tests::test_registry_with_sidecar_and_filesystem();
+        let (drivers, _tmp) =
+            crate::driver::registry::tests::test_registry_with_sidecar_and_filesystem();
         let err = handle_rpc_with_drivers(
             None,
             Some(&drivers),
@@ -1770,7 +1797,8 @@ mod tests {
 
     #[test]
     fn drivers_set_filesystem_config_reports_unknown_driver() {
-        let (drivers, _tmp) = crate::driver::registry::tests::test_registry_with_sidecar_and_filesystem();
+        let (drivers, _tmp) =
+            crate::driver::registry::tests::test_registry_with_sidecar_and_filesystem();
         let err = handle_rpc_with_drivers(
             None,
             Some(&drivers),
@@ -1787,7 +1815,8 @@ mod tests {
 
     #[test]
     fn drivers_set_filesystem_grant_reports_unknown_driver() {
-        let (drivers, _tmp) = crate::driver::registry::tests::test_registry_with_sidecar_and_filesystem();
+        let (drivers, _tmp) =
+            crate::driver::registry::tests::test_registry_with_sidecar_and_filesystem();
         let err = handle_rpc_with_drivers(
             None,
             Some(&drivers),

@@ -187,8 +187,7 @@ async fn main() {
             // ため、同じディレクトリを共用してはならない。
             let driver_settings_store = SettingsStore::new(settings_dir.join("drivers"));
             let driver_grants_store = GrantsStore::new_for_drivers(grants_dir.clone());
-            let driver_sidecar_config_store =
-                SidecarConfigStore::new(settings_dir.join("drivers"));
+            let driver_sidecar_config_store = SidecarConfigStore::new(settings_dir.join("drivers"));
             // ドライバにも、プラグインのディレクトリ・自身のドライバ
             // ディレクトリをファイルシステムルートとして掴ませない。
             let driver_filesystem_config_store = FilesystemConfigStore::new(
@@ -345,8 +344,9 @@ async fn main() {
     // ワーカースレッドを塞がないよう `spawn_blocking` に逃がしてから待つ。
     if let Some(registry) = registry {
         let registry_for_plugin_shutdown = registry.clone();
-        let _ = tokio::task::spawn_blocking(move || registry_for_plugin_shutdown.shutdown_plugins())
-            .await;
+        let _ =
+            tokio::task::spawn_blocking(move || registry_for_plugin_shutdown.shutdown_plugins())
+                .await;
 
         registry.shutdown_bus_subscribers();
         let _ = tokio::task::spawn_blocking(move || registry.stop_all_sidecars()).await;

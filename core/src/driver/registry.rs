@@ -952,12 +952,12 @@ pub(crate) mod tests {
             retain: false,
             description: String::new(),
         });
-        manifest.capabilities.push(
-            crate::plugin::manifest::CapabilityRequest::Http {
+        manifest
+            .capabilities
+            .push(crate::plugin::manifest::CapabilityRequest::Http {
                 hosts: vec!["https://example.com".into()],
                 reason: "test".into(),
-            },
-        );
+            });
         registry.push(DriverEntry {
             manifest,
             state: DriverState::Running,
@@ -1348,7 +1348,10 @@ pub(crate) mod tests {
             .any(|i| i.running);
         let disabled = matches!(registry.list()[0].state, DriverState::Disabled { .. });
 
-        assert!(disabled, "set_disabled must have completed by the time all threads joined");
+        assert!(
+            disabled,
+            "set_disabled must have completed by the time all threads joined"
+        );
         assert!(
             !running,
             "a driver left Disabled must not have a sidecar running behind it -- \
@@ -1414,8 +1417,8 @@ pub(crate) mod tests {
     /// 要求する)を設定先として使う必要があり、その存在をテスト関数の間ずっと
     /// 保つため(`bare_registry` のように内部で作った `TempDir` をそのまま
     /// drop すると、設定先として使うつもりのディレクトリごと消えてしまう)。
-    pub(crate) fn test_registry_with_sidecar_and_filesystem(
-    ) -> (DriverRegistry, tempfile::TempDir) {
+    pub(crate) fn test_registry_with_sidecar_and_filesystem() -> (DriverRegistry, tempfile::TempDir)
+    {
         let tmp = tempfile::tempdir().unwrap();
         let registry = DriverRegistry::new(
             Arc::new(DriverHost::new().expect("wasmtime engine builds")),

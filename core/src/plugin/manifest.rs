@@ -5,7 +5,7 @@ use std::path::Path;
 
 /// マニフェストの `[[settings]]` テーブル 1 件。
 #[derive(Debug, Clone, PartialEq, serde::Deserialize, serde::Serialize)]
-#[serde(tag = "type", rename_all = "lowercase")]
+#[serde(tag = "type", rename_all = "lowercase", deny_unknown_fields)]
 pub enum SettingField {
     Boolean {
         key: String,
@@ -77,7 +77,7 @@ impl SettingField {
 
 /// プラグインが要求する capability(実行時に許可が必要な外部リソースアクセス)。
 #[derive(Debug, Clone, PartialEq, serde::Deserialize, serde::Serialize)]
-#[serde(tag = "kind", rename_all = "lowercase")]
+#[serde(tag = "kind", rename_all = "lowercase", deny_unknown_fields)]
 pub enum CapabilityRequest {
     Http { hosts: Vec<String>, reason: String },
 }
@@ -88,6 +88,7 @@ pub enum CapabilityRequest {
 /// UI で入力する。承認画面に出る内容と実際に走るプログラムを、ユーザー自身の
 /// 明示的な指定によって一致させるため。
 #[derive(Debug, Clone, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct SidecarRequest {
     pub name: String,
     pub reason: String,
@@ -126,6 +127,7 @@ impl FilesystemMode {
 /// 承認画面に出る内容と実際にアクセスされる場所を、ユーザー自身の指定に
 /// よって一致させるため(`[[sidecar]]` の `command` と同じ原則)。
 #[derive(Debug, Clone, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct FilesystemRequest {
     pub name: String,
     pub reason: String,
@@ -137,6 +139,7 @@ pub struct FilesystemRequest {
 /// **`get` は `subscribe` に宣言したトピックにのみ許される**(「配信は要らないが
 /// 最新値は読みたい」という区別は設けない -- 承認画面に出す情報を増やさないため)。
 #[derive(Debug, Clone, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct BusRequest {
     pub driver: String,
     #[serde(default)]
@@ -173,6 +176,7 @@ impl WidgetSize {
 /// しない -- 不在は Registry が `resolved: false` として UI バッジで報せる
 /// (bus の未解決参照と同じセマンティクス)。
 #[derive(Debug, Clone, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct DashboardWidget {
     pub id: String,
     pub title: String,
@@ -229,6 +233,7 @@ pub struct ScheduleRequest {
 /// 情報だけでは判定できないため、`validate_schedules` が変換後の一覧に対して
 /// 別途行う)。
 #[derive(Debug, Clone, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RawSchedule {
     name: String,
     #[serde(rename = "interval-seconds")]
@@ -890,6 +895,59 @@ fn validate_widget_entry(entry: &str) -> Result<(), ManifestError> {
     Ok(())
 }
 
+/// `Manifest` が知っているトップレベルキー(serde の `rename` 後の名前)。
+/// `unknown_top_level_keys` の既知リストとして使う。
+pub(crate) const MANIFEST_TOP_LEVEL_KEYS: &[&str] = &[
+    "id",
+    "name",
+    "version",
+    "description",
+    "entry",
+    "events",
+    "settings",
+    "capabilities",
+    "sidecar",
+    "filesystem",
+    "bus",
+    "dashboard",
+    "schedule",
+];
+
+/// マニフェスト本文のトップレベルにある、`known` に無いキーの一覧を返す。
+///
+/// トップレベルの構造体には `deny_unknown_fields` を付けていない — 付けると
+/// 新しいフィールドを増やしたときに古い edlr が新しいマニフェストを読めなく
+/// なるため。代わりに、綴り違いや古い/新しいキーを warn で報せる
+/// (issue manifest-rjoa の提案 2)。
+///
+/// パースできない本文は空を返す。呼び出し側は `toml::from_str` の結果として
+/// 既に `ManifestError::Parse` を扱っており、ここで別のエラーを重ねる意味が
+/// ないため。
+pub(crate) fn unknown_top_level_keys(content: &str, known: &[&str]) -> Vec<String> {
+    let Ok(table) = content.parse::<toml::Table>() else {
+        return Vec::new();
+    };
+    table
+        .keys()
+        .filter(|key| !known.contains(&key.as_str()))
+        .cloned()
+        .collect()
+}
+
+/// 知らないトップレベルキーを warn ログに出す。
+pub(crate) fn warn_unknown_top_level_keys(file: &str, id: &str, unknown: &[String]) {
+    for key in unknown {
+        tracing::warn!(
+            manifest = file,
+            id,
+            key = key.as_str(),
+            "unknown top-level key in {file} is ignored — 綴り違い、または \
+             テーブルヘッダ([[settings]] など)より後ろに書いてしまった \
+             トップレベルキーの可能性があります"
+        );
+    }
+}
+
 /// `dir/manifest.toml` を読み込み、検証して返す。
 ///
 /// 検証エラーは `Err` として返す(panic しない)。呼び出し側は当該プラグインのみ
@@ -926,6 +984,28 @@ pub fn load_manifest(dir: &Path) -> Result<Manifest, ManifestError> {
     validate_bus(&mut manifest.bus)?;
     validate_dashboard(&mut manifest.dashboard)?;
     validate_schedules(&manifest.schedules)?;
+
+    warn_unknown_top_level_keys(
+        "manifest.toml",
+        &manifest.id,
+        &unknown_top_level_keys(&content, MANIFEST_TOP_LEVEL_KEYS),
+    );
+
+    // 宣言と実際の読み取り結果が一致しているかを目視できるようにする
+    // (issue manifest-rjoa の提案 3)。`settings=0` のような行が出ていれば、
+    // 「宣言したはずの設定が丸ごと消えている」ことにログだけで気づける。
+    tracing::info!(
+        id = manifest.id.as_str(),
+        events = manifest.events.len(),
+        settings = manifest.settings.len(),
+        capabilities = manifest.capabilities.len(),
+        sidecars = manifest.sidecars.len(),
+        filesystem = manifest.filesystem.len(),
+        bus = manifest.bus.len(),
+        dashboard = manifest.dashboard.len(),
+        schedules = manifest.schedules.len(),
+        "plugin manifest loaded"
+    );
 
     Ok(manifest)
 }
@@ -1271,7 +1351,10 @@ type = "secret"
                 options: vec!["a".into()],
             },
         ] {
-            assert!(!field.is_secret(), "{field:?} must not be treated as secret");
+            assert!(
+                !field.is_secret(),
+                "{field:?} must not be treated as secret"
+            );
         }
     }
 
@@ -2531,6 +2614,147 @@ cron = "not a cron"
         // `cron::Schedule::from_str`, so it surfaces as a TOML parse error
         // (still: a manifest error, so the plugin becomes Disabled).
         assert!(matches!(err, Err(ManifestError::Parse(_))));
+    }
+
+    /// Issue manifest-rjoa の再現。TOML では、テーブルヘッダより後ろに書いた
+    /// キーはそのテーブルの子になる。`[[sidecar]]` の後ろに置いた `settings` は
+    /// `sidecar[0].settings` として解釈され、以前はそのまま黙って捨てられていた。
+    #[test]
+    fn rejects_a_top_level_key_written_after_a_table_header() {
+        let err = try_manifest_from(
+            r#"
+[[sidecar]]
+name = "worker"
+reason = "音声合成を行う"
+port = 51000
+
+settings = [{ key = "voice", label = "Voice", type = "string", default = "a" }]
+"#,
+        );
+        let err = err.expect_err("a stray key inside [[sidecar]] should be rejected");
+        match err {
+            ManifestError::Parse(e) => {
+                let msg = e.to_string();
+                assert!(
+                    msg.contains("settings"),
+                    "error should name the offending key: {msg}"
+                );
+            }
+            other => panic!("expected ManifestError::Parse, got {other:?}"),
+        }
+    }
+
+    /// `[[settings]]` の後ろに書いてしまったトップレベルキーも、同じ経路
+    /// (設定フィールドの知らないキー)で弾かれる。
+    #[test]
+    fn rejects_an_unknown_key_inside_a_settings_table() {
+        let err = try_manifest_from(
+            r#"
+[[settings]]
+key = "greeting"
+label = "Greeting"
+type = "string"
+default = "hello"
+events = ["FSDJump"]
+"#,
+        );
+        let err = err.expect_err("a stray key inside [[settings]] should be rejected");
+        assert!(
+            matches!(err, ManifestError::Parse(_)),
+            "expected ManifestError::Parse, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn rejects_an_unknown_key_inside_a_capabilities_table() {
+        let err = try_manifest_from(
+            r#"
+[[capabilities]]
+kind = "http"
+hosts = ["https://example.com"]
+reason = "r"
+events = ["FSDJump"]
+"#,
+        );
+        let err = err.expect_err("a stray key inside [[capabilities]] should be rejected");
+        assert!(
+            matches!(err, ManifestError::Parse(_)),
+            "expected ManifestError::Parse, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn unknown_top_level_keys_are_reported() {
+        let unknown = unknown_top_level_keys(
+            r#"
+id = "sample-plugin"
+name = "Sample"
+version = "0.1.0"
+entry = "plugin.wasm"
+evens = ["FSDJump"]
+"#,
+            MANIFEST_TOP_LEVEL_KEYS,
+        );
+        assert_eq!(unknown, vec!["evens".to_string()]);
+    }
+
+    #[test]
+    fn a_manifest_using_only_known_top_level_keys_reports_nothing() {
+        let unknown = unknown_top_level_keys(
+            r#"
+id = "sample-plugin"
+name = "Sample"
+version = "0.1.0"
+description = "d"
+entry = "plugin.wasm"
+events = ["*"]
+
+[[settings]]
+key = "a"
+label = "A"
+type = "string"
+default = ""
+
+[[capabilities]]
+kind = "http"
+hosts = ["https://example.com"]
+reason = "r"
+
+[[sidecar]]
+name = "worker"
+reason = "r"
+port = 51000
+
+[[filesystem]]
+name = "logs"
+reason = "r"
+mode = "read"
+
+[[bus]]
+driver = "ed-state"
+subscribe = ["current-system"]
+reason = "r"
+
+[[dashboard]]
+id = "w"
+title = "W"
+entry = "w.html"
+size = "small"
+
+[[schedule]]
+name = "flush"
+interval-seconds = 60
+"#,
+            MANIFEST_TOP_LEVEL_KEYS,
+        );
+        assert!(unknown.is_empty(), "unexpected unknown keys: {unknown:?}");
+    }
+
+    /// 知らないトップレベルキーは(前方互換のため)エラーにはせず、warn で
+    /// 報せるだけ — ロード自体は成功する。
+    #[test]
+    fn an_unknown_top_level_key_does_not_fail_the_load() {
+        assert!(try_manifest_from("evens = [\"FSDJump\"]\n").is_ok());
     }
 
     #[test]

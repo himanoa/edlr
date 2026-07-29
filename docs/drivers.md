@@ -53,6 +53,11 @@
 `retain = false` のトピックは配信専用で、値は保持されない
 (`bus.get` は常に `none`)。
 
+`driver.toml` は `manifest.toml` と同じく、`[[settings]]` / `[[capabilities]]` /
+`[[sidecar]]` / `[[filesystem]]` / `[[topics]]` の知らないキーを拒否する。
+トップレベルキーをテーブルヘッダより後ろに書いてしまう事故については
+[plugins.md](plugins.md#トップレベルキーはテーブルヘッダより前に書く)を参照。
+
 ## プラグイン側の `[[bus]]` 書式と承認フロー
 
 プラグインが特定のドライバと話すには、`manifest.toml` に接続先ごとの

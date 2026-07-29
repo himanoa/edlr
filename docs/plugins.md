@@ -72,6 +72,29 @@ WIT パッケージは `edlr:plugin@0.4.0`。
 設定値は `<settings-dir>/<id>.json` に保存され、未保存キーは manifest の
 `default` にフォールバックする。
 
+### トップレベルキーはテーブルヘッダより前に書く
+
+TOML では、テーブルヘッダ(`[[settings]]` など)より**後ろ**に書いたキーは
+そのテーブルの子として解釈される。つまり:
+
+    [[sidecar]]
+    name = "worker"
+    reason = "..."
+    port = 51000
+
+    events = ["FSDJump"]   # ← sidecar[0].events になる。トップレベルではない
+
+edlr はこれを `[[sidecar]]` の知らないキーとしてロード時に拒否する
+(`unknown field \`events\``)。同様に `[[settings]]` / `[[capabilities]]` /
+`[[filesystem]]` / `[[bus]]` / `[[dashboard]]` / `[[schedule]]` /
+`[[topics]]`(`driver.toml`)も知らないキーを拒否する。
+
+トップレベル自体の綴り違い(`evens = [...]` など)はロードを失敗させず、
+warn ログで報せる。ロード時には読み取り結果のサマリも info ログに出るので、
+宣言したはずの項目が消えていないかはここで確認できる:
+
+    plugin manifest loaded id="sample-plugin" events=1 settings=3 capabilities=0 ...
+
 ### 秘密情報(`type = "secret"`)
 
 API キーのように UI から読み出せてはいけない設定はこの型で宣言する。

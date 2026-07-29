@@ -99,9 +99,10 @@ impl ScheduleStore {
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
         // `SettingsStore::update` と同じく tmp + rename で、途中まで書かれた
         // ファイルを次回起動時に読んでしまわないようにする。
-        let tmp_path = self
-            .dir
-            .join(format!("{plugin_id}.schedule.json.tmp.{}", std::process::id()));
+        let tmp_path = self.dir.join(format!(
+            "{plugin_id}.schedule.json.tmp.{}",
+            std::process::id()
+        ));
         fs::write(&tmp_path, serialized)?;
         fs::rename(&tmp_path, self.path_for(plugin_id))
     }

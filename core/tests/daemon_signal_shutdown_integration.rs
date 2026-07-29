@@ -322,8 +322,7 @@ async fn sigterm_to_daemon_stops_running_sidecars_including_grandchildren() {
 /// トピックは使わない)。
 #[tokio::test(flavor = "multi_thread")]
 async fn sigterm_to_daemon_stops_running_driver_sidecars() {
-    let Some(driver_wasm) = built_example_wasm("examples/drivers/ed-state", "ed_state.wasm")
-    else {
+    let Some(driver_wasm) = built_example_wasm("examples/drivers/ed-state", "ed_state.wasm") else {
         eprintln!("skipping: build the example driver first");
         return;
     };

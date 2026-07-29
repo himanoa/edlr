@@ -436,12 +436,9 @@ impl HostCtx {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone();
         let entries = crate::plugin::bus_runtime::parse_bus(&raw);
-        let entry = entries
-            .get(driver)
-            .filter(|e| e.granted)
-            .ok_or_else(|| {
-                WitBusError::PermissionDenied(format!("bus access to {driver} is not granted"))
-            })?;
+        let entry = entries.get(driver).filter(|e| e.granted).ok_or_else(|| {
+            WitBusError::PermissionDenied(format!("bus access to {driver} is not granted"))
+        })?;
         let topics = match direction {
             BusDirection::Publish => &entry.publish,
             BusDirection::Subscribe => &entry.subscribe,

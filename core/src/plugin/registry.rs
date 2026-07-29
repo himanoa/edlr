@@ -14,8 +14,8 @@ use edlr_driver_process::{InstanceStatus, ProcessDriver, ProcessSpec};
 
 use crate::driver::registry::DriverRegistry;
 use crate::plugin::bus_runtime::{bus_json_string, BusRuntimeEntry};
-use crate::plugin::filesystem::{FilesystemConfig, FilesystemConfigError, FilesystemConfigStore};
 use crate::plugin::dropped::{DropCounters, DroppedCounts};
+use crate::plugin::filesystem::{FilesystemConfig, FilesystemConfigError, FilesystemConfigStore};
 use crate::plugin::fs_runtime::{filesystem_json_string, FsRuntimeEntry};
 use crate::plugin::grants::{GrantState, GrantsError, GrantsStore};
 use crate::plugin::host::{capabilities_json_string, parse_capability_hosts, PluginHost};
@@ -909,10 +909,7 @@ impl Registry {
             .parent()
             .ok_or_else(|| RegistryError::UnknownDashboard(widget.to_string()))?;
         let rel = Path::new(rel_path);
-        if rel
-            .components()
-            .any(|c| !matches!(c, Component::Normal(_)))
-        {
+        if rel.components().any(|c| !matches!(c, Component::Normal(_))) {
             return Err(RegistryError::UnknownDashboard(widget.to_string()));
         }
         Ok(base.join(rel))
@@ -2008,7 +2005,9 @@ pub(crate) mod tests {
     /// `plugins/list` テストがまさにこれ -- `ed-state` を持つ
     /// `DriverRegistry` を渡せば `resolved: true`、持たないものを渡せば
     /// `resolved: false` になる)。
-    pub(crate) fn test_registry_with_bus_request_using(driver_registry: DriverRegistry) -> Registry {
+    pub(crate) fn test_registry_with_bus_request_using(
+        driver_registry: DriverRegistry,
+    ) -> Registry {
         let host = Arc::new(PluginHost::new().expect("host should start"));
         let tmp = tempfile::tempdir().unwrap();
         let settings_store = Arc::new(SettingsStore::new(tmp.path().join("settings")));
@@ -2523,7 +2522,8 @@ pub(crate) mod tests {
             .set_bus_grant("translator", "ed-state", true)
             .expect("granting a declared bus connection should succeed");
         assert!(granted.granted);
-        let parsed = crate::plugin::bus_runtime::parse_bus(&registry.bus_buffer("translator").unwrap());
+        let parsed =
+            crate::plugin::bus_runtime::parse_bus(&registry.bus_buffer("translator").unwrap());
         let entry = parsed.get("ed-state").expect("entry present after grant");
         assert!(entry.granted);
         assert_eq!(entry.subscribe, vec!["current-system".to_string()]);
@@ -2532,8 +2532,11 @@ pub(crate) mod tests {
             .set_bus_grant("translator", "ed-state", false)
             .expect("revoking should succeed");
         assert!(!revoked.granted);
-        let parsed = crate::plugin::bus_runtime::parse_bus(&registry.bus_buffer("translator").unwrap());
-        let entry = parsed.get("ed-state").expect("entry still present after revoke");
+        let parsed =
+            crate::plugin::bus_runtime::parse_bus(&registry.bus_buffer("translator").unwrap());
+        let entry = parsed
+            .get("ed-state")
+            .expect("entry still present after revoke");
         assert!(!entry.granted);
         assert!(
             entry.subscribe.is_empty(),
@@ -3183,9 +3186,9 @@ pub(crate) mod tests {
             manifest: plain_manifest(id),
             state: PluginState::Running,
             settings_json: Arc::new(Mutex::new("{}".to_string())),
-            capabilities_json: Arc::new(Mutex::new(
-                crate::plugin::host::capabilities_json_string(&[]),
-            )),
+            capabilities_json: Arc::new(Mutex::new(crate::plugin::host::capabilities_json_string(
+                &[],
+            ))),
             sidecars_json: Arc::new(Mutex::new("[]".to_string())),
             filesystem_json: Arc::new(Mutex::new("[]".to_string())),
             bus_json: Arc::new(Mutex::new("[]".to_string())),
@@ -3290,9 +3293,9 @@ pub(crate) mod tests {
                 reason: "init failed".to_string(),
             },
             settings_json: Arc::new(Mutex::new("{}".to_string())),
-            capabilities_json: Arc::new(Mutex::new(
-                crate::plugin::host::capabilities_json_string(&[]),
-            )),
+            capabilities_json: Arc::new(Mutex::new(crate::plugin::host::capabilities_json_string(
+                &[],
+            ))),
             sidecars_json: Arc::new(Mutex::new("[]".to_string())),
             filesystem_json: Arc::new(Mutex::new("[]".to_string())),
             bus_json: Arc::new(Mutex::new("[]".to_string())),

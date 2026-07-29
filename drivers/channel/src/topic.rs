@@ -1,7 +1,12 @@
 //! トピック名の検証と、ドライバが宣言するトピック仕様。
 
 /// ドライバが `driver.toml` の `[[topics]]` で宣言する 1 件。
+/// 知らないキーは拒否する(`deny_unknown_fields`)。TOML はテーブルヘッダより
+/// 後ろに書いたキーをそのテーブルの子として解釈するため、これが無いと
+/// `[[topics]]` の後ろに置いたトップレベルキーが黙って捨てられる
+/// (issue manifest-rjoa)。
 #[derive(Debug, Clone, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct TopicSpec {
     pub name: String,
     #[serde(default)]

@@ -194,7 +194,10 @@ mod tests {
         let script = tmp.path().join("parent.sh");
         std::fs::write(
             &script,
-            format!("#!/bin/sh\n(sleep 60 & echo $! > {}); wait\n", pidfile.display()),
+            format!(
+                "#!/bin/sh\n(sleep 60 & echo $! > {}); wait\n",
+                pidfile.display()
+            ),
         )
         .unwrap();
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();

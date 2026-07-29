@@ -103,7 +103,9 @@ impl Bus {
     /// `core` 側(`plugin/registry.rs` の `plugin_threads` など)と同じく
     /// `into_inner()` で回復する。
     fn lock_state(&self) -> MutexGuard<'_, BusState> {
-        self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     pub fn register_driver(
@@ -115,7 +117,12 @@ impl Bus {
         let mut state = self.lock_state();
         state.drivers.insert(
             driver_id.to_string(),
-            DriverSlot { topics, sender, retained: BTreeMap::new(), available: true },
+            DriverSlot {
+                topics,
+                sender,
+                retained: BTreeMap::new(),
+                available: true,
+            },
         );
     }
 
@@ -168,9 +175,7 @@ impl Bus {
         // なので、呼び出し側が再送するか諦めるかを選べる(設計書参照)。
         match slot.sender.try_send(message) {
             Ok(()) => Ok(()),
-            Err(TrySendError::Full(_)) => {
-                Err(BusError::QueueFull(format!("{driver_id}/{topic}")))
-            }
+            Err(TrySendError::Full(_)) => Err(BusError::QueueFull(format!("{driver_id}/{topic}"))),
             Err(TrySendError::Disconnected(_)) => {
                 Err(BusError::DriverUnavailable(driver_id.to_string()))
             }
@@ -324,8 +329,16 @@ mod tests {
 
     fn topics() -> Vec<TopicSpec> {
         vec![
-            TopicSpec { name: "current-system".into(), retain: true, description: String::new() },
-            TopicSpec { name: "ship-status".into(), retain: false, description: String::new() },
+            TopicSpec {
+                name: "current-system".into(),
+                retain: true,
+                description: String::new(),
+            },
+            TopicSpec {
+                name: "ship-status".into(),
+                retain: false,
+                description: String::new(),
+            },
         ]
     }
 
@@ -350,15 +363,21 @@ mod tests {
         .join();
         assert!(result.is_err(), "スレッドは panic しているはず");
 
-        bus.publish("plugin-a", "ed-state", "ship-status", b"still alive".to_vec())
-            .expect("poison 後も publish できること");
+        bus.publish(
+            "plugin-a",
+            "ed-state",
+            "ship-status",
+            b"still alive".to_vec(),
+        )
+        .expect("poison 後も publish できること");
         assert_eq!(rx.recv().unwrap().payload, b"still alive".to_vec());
     }
 
     #[test]
     fn publish_delivers_to_the_driver_queue() {
         let (bus, rx) = bus_with_driver(4);
-        bus.publish("translator", "ed-state", "ship-status", b"hi".to_vec()).unwrap();
+        bus.publish("translator", "ed-state", "ship-status", b"hi".to_vec())
+            .unwrap();
         let msg = rx.try_recv().expect("message queued");
         assert_eq!(msg.from, "translator");
         assert_eq!(msg.topic, "ship-status");
@@ -381,7 +400,8 @@ mod tests {
     #[test]
     fn publish_returns_queue_full_instead_of_dropping() {
         let (bus, _rx) = bus_with_driver(1);
-        bus.publish("p", "ed-state", "ship-status", vec![1]).unwrap();
+        bus.publish("p", "ed-state", "ship-status", vec![1])
+            .unwrap();
         assert!(matches!(
             bus.publish("p", "ed-state", "ship-status", vec![2]),
             Err(BusError::QueueFull(_))
@@ -404,12 +424,16 @@ mod tests {
         let (tx, drx) = sync_channel::<Delivery>(4);
         bus.subscribe("translator", "ed-state", "current-system", tx);
 
-        bus.emit("ed-state", "current-system", b"Sol".to_vec()).unwrap();
+        bus.emit("ed-state", "current-system", b"Sol".to_vec())
+            .unwrap();
 
         let delivery = drx.try_recv().expect("subscriber got the message");
         assert_eq!(delivery.plugin_id, "translator");
         assert_eq!(delivery.payload, b"Sol".to_vec());
-        assert_eq!(bus.get("ed-state", "current-system").unwrap(), Some(b"Sol".to_vec()));
+        assert_eq!(
+            bus.get("ed-state", "current-system").unwrap(),
+            Some(b"Sol".to_vec())
+        );
     }
 
     #[test]
@@ -434,16 +458,24 @@ mod tests {
         let (tx, drx) = sync_channel::<Delivery>(1);
         bus.subscribe("slow", "ed-state", "current-system", tx);
 
-        bus.emit("ed-state", "current-system", b"a".to_vec()).unwrap();
+        bus.emit("ed-state", "current-system", b"a".to_vec())
+            .unwrap();
         // 2 通目はキューが満杯。emit 自体は成功し、retained は必ず更新される。
-        bus.emit("ed-state", "current-system", b"b".to_vec()).unwrap();
+        bus.emit("ed-state", "current-system", b"b".to_vec())
+            .unwrap();
 
-        assert_eq!(bus.get("ed-state", "current-system").unwrap(), Some(b"b".to_vec()));
+        assert_eq!(
+            bus.get("ed-state", "current-system").unwrap(),
+            Some(b"b".to_vec())
+        );
         // 受信側のキューには、先に届いた古い方の "a" だけが残る -- 満杯時に
         // 捨てられるのは後から送ろうとした新しい方の "b" である。
-        let delivery = drx.try_recv().expect("the already-queued older delivery must survive");
+        let delivery = drx
+            .try_recv()
+            .expect("the already-queued older delivery must survive");
         assert_eq!(
-            delivery.payload, b"a".to_vec(),
+            delivery.payload,
+            b"a".to_vec(),
             "emit must drop the newest delivery (the one being sent) on a full queue, \
              not the oldest (the one already queued)"
         );
@@ -476,10 +508,7 @@ mod tests {
         // が購読表からの実際の削除を直接検証する)。
         bus.emit("ed-state", "current-system", b"Jameson".to_vec())
             .unwrap();
-        assert_eq!(
-            drx.try_recv().map(|d| d.payload),
-            Ok(b"Jameson".to_vec())
-        );
+        assert_eq!(drx.try_recv().map(|d| d.payload), Ok(b"Jameson".to_vec()));
     }
 
     #[test]
@@ -515,7 +544,9 @@ mod tests {
     #[test]
     fn emit_with_no_subscribers_succeeds() {
         let (bus, _rx) = bus_with_driver(4);
-        assert!(bus.emit("ed-state", "current-system", b"Sol".to_vec()).is_ok());
+        assert!(bus
+            .emit("ed-state", "current-system", b"Sol".to_vec())
+            .is_ok());
     }
 
     #[test]
@@ -530,7 +561,8 @@ mod tests {
     #[test]
     fn disabling_a_driver_drops_retained_and_fails_calls() {
         let (bus, _rx) = bus_with_driver(4);
-        bus.emit("ed-state", "current-system", b"Sol".to_vec()).unwrap();
+        bus.emit("ed-state", "current-system", b"Sol".to_vec())
+            .unwrap();
         bus.disable_driver("ed-state");
 
         assert!(matches!(
@@ -547,7 +579,11 @@ mod tests {
     fn retained_for_returns_the_last_value() {
         let (bus, _rx) = bus_with_driver(4);
         assert_eq!(bus.retained_for("ed-state", "current-system"), None);
-        bus.emit("ed-state", "current-system", b"Sol".to_vec()).unwrap();
-        assert_eq!(bus.retained_for("ed-state", "current-system"), Some(b"Sol".to_vec()));
+        bus.emit("ed-state", "current-system", b"Sol".to_vec())
+            .unwrap();
+        assert_eq!(
+            bus.retained_for("ed-state", "current-system"),
+            Some(b"Sol".to_vec())
+        );
     }
 }
