@@ -8,3 +8,4 @@ examples/plugins/*/target/
 examples/drivers/*/target/
 .worktrees/
 /.issues/
+dist/
