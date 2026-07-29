@@ -10,11 +10,11 @@ DIST_DIR      := dist
 .PHONY: all install packaging frontend tauri-cli clean
 
 all: frontend
-	cargo build --release -p edlr-ui -p edlr-core
+	cargo build --release -p edlr-ui -p edlr-core --features edlr-ui/custom-protocol
 	@echo "==> バイナリ: target/release/edlr-ui, target/release/edlr"
 
 install: frontend
-	cargo install --path ui/src-tauri
+	cargo install --path ui/src-tauri --features custom-protocol
 	cargo install --path core
 
 packaging: frontend tauri-cli

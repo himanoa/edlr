@@ -18,3 +18,8 @@ libc = "0.2"
 [dev-dependencies]
 tempfile = "3"
 serde_json = "1"
+
+[features]
+# 本番ビルドでフロントエンド資産を埋め込むために必須。
+# これが無効だと devUrl (localhost:5173) を読みに行く。
+custom-protocol = ["tauri/custom-protocol"]
