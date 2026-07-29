@@ -10,6 +10,7 @@ pub mod registry;
 pub mod runner;
 pub(crate) mod schedule;
 pub mod schedule_store;
+pub(crate) mod select_options;
 pub mod settings;
 pub mod sidecar;
 pub mod sidecar_runtime;
@@ -21,8 +22,8 @@ pub use grants::{GrantState, GrantsError, GrantsStore};
 pub use host::PluginHost;
 pub use manifest::{
     load_manifest, matches_event, BusRequest, CapabilityRequest, DashboardWidget, FilesystemMode,
-    FilesystemRequest, Manifest, ManifestError, ScheduleRequest, ScheduleSpec, SettingField,
-    SidecarRequest, WidgetSize,
+    FilesystemRequest, Manifest, ManifestError, OptionsFrom, ScheduleRequest, ScheduleSpec,
+    SelectOption, SettingField, SidecarRequest, WidgetSize,
 };
 pub use registry::{
     FilesystemInfo, PluginEntry, PluginInfo, PluginState, Registry, RegistryError, ScheduleInfo,

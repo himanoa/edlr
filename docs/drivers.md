@@ -53,6 +53,14 @@
 `retain = false` のトピックは配信専用で、値は保持されない
 (`bus.get` は常に `none`)。
 
+retained 値は **`select` 設定の候補源**としても使える。プラグインや他の
+ドライバの `[[settings]]` が `options-from = { driver = "...", topic = "..." }`
+でトピックを指すと、設定画面のドロップダウンがその値から作られる。「選べる
+ものはインストール環境で決まる」設定(音声合成の話者一覧など)のための経路で、
+プラグイン側の `[[bus]]` 宣言・承認は要らない(読むのはデーモンであって
+プラグインではないため)。詳細は
+[plugins.md](plugins.md#ドロップダウンtype--select)。
+
 `driver.toml` は `manifest.toml` と同じく、`[[settings]]` / `[[capabilities]]` /
 `[[sidecar]]` / `[[filesystem]]` / `[[topics]]` の知らないキーを拒否する。
 トップレベルキーをテーブルヘッダより後ろに書いてしまう事故については

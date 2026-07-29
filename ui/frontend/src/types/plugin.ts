@@ -1,9 +1,28 @@
+// `select` の候補 1 件。表示は `label`、保存されるのは `value`
+// (話者一覧のように「アメノちゃん/ギャル」を見せて `uuid:styleId` を保存する
+// ケースがあるため、サーバ側で常に 2 つに開いてから返される)。
+export interface SelectOption {
+  value: string;
+  label: string;
+}
+
 // プラグインマニフェストのシリアライズ形(サーバの `plugins/list` レスポンス)に一致させる型。
 export type SettingField =
   | { type: "boolean"; key: string; label: string; default: boolean }
   | { type: "string"; key: string; label: string; default: string }
   | { type: "number"; key: string; label: string; default: number }
-  | { type: "select"; key: string; label: string; default: string; options: string[] }
+  // 候補は静的(マニフェストの `options`)でも動的(`options-from` でドライバの
+  // retain トピックを指す)でもよいが、サーバは常に解決済みの `{value,label}` の
+  // 配列にして返す。**`options: null` は「動的な候補をまだ取得できていない」**
+  // (ドライバが未インストール・無効化・まだ一度も emit していない)を表す。
+  | {
+      type: "select";
+      key: string;
+      label: string;
+      default: string;
+      options: SelectOption[] | null;
+      optionsFrom?: { driver: string; topic: string };
+    }
   // API キーなどの秘密情報。`default` を持たない(マニフェストに秘密情報を
   // 書けてしまう余地を作らないため)。値はサーバから返ってこない
   // (write-only)ので、設定済みかどうかは `PluginInfo.secretsSet` で判断する。

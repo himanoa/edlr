@@ -97,7 +97,7 @@ WIT パッケージは `edlr:plugin@0.4.0`。
 | `description` | | 説明文(省略可) |
 | `entry` | ✓ | `plugins-dir/<id>/` からの相対パスで wasm ファイルを指す |
 | `events` | | 購読するイベント名の配列。`"*"` は全 journal イベント、`"status"` は Status.json 更新にマッチ(省略時は空 = 何も受け取らない) |
-| `[[settings]]` | | 設定項目。`type` は `boolean` / `string` / `number` / `select` / `secret` / `map` のいずれかで、それぞれ `key` / `label` / `default`(select はさらに `options`)を持つ。`secret` と `map` は `default` を取らない(下記) |
+| `[[settings]]` | | 設定項目。`type` は `boolean` / `string` / `number` / `select` / `secret` / `map` のいずれかで、それぞれ `key` / `label` / `default`(select はさらに `options` か `options-from`)を持つ。`secret` と `map` は `default` を取らない(下記) |
 | `[[capabilities]]` | | HTTP 通信の要求([capabilities.md](capabilities.md#capabilitydriver-http)) |
 | `[[sidecar]]` | | サイドカープロセスの要求([capabilities.md](capabilities.md#サイドカープロセスdriver-process)) |
 | `[[filesystem]]` | | ファイルアクセスの要求([capabilities.md](capabilities.md#ファイルアクセスdriver-fs)) |
@@ -129,6 +129,58 @@ warn ログで報せる。ロード時には読み取り結果のサマリも in
 宣言したはずの項目が消えていないかはここで確認できる:
 
     plugin manifest loaded id="sample-plugin" events=1 settings=3 capabilities=0 ...
+
+### ドロップダウン(`type = "select"`)
+
+候補の書き方は 2 通りあり、**どちらか一方だけ**を書く(両方書いても、どちらも
+書かなくてもロードは失敗する)。
+
+**静的な候補(`options`)** — 選べる値がマニフェストを書く時点で決まっている場合:
+
+    [[settings]]
+    key = "mode"
+    label = "モード"
+    type = "select"
+    default = "quiet"
+    options = ["quiet", "verbose", { value = "debug", label = "デバッグ(冗長)" }]
+
+要素は文字列でも `{ value, label }` でもよい。文字列を書いた場合は表示名と
+保存値が同じになる。
+
+**動的な候補(`options-from`)** — 選べる値がインストール環境で決まる場合。
+ドライバが retain トピックへ載せた値を候補として引く:
+
+    [[settings]]
+    key = "default-speaker"
+    label = "既定の話者"
+    type = "select"
+    default = ""
+    options-from = { driver = "coeiroink", topic = "speakers" }
+
+ドライバ側は、そのトピックへ JSON 配列を `emit` する。要素は文字列か
+`{"value":..,"label":..}`:
+
+    [{"value": "a1b2:0", "label": "アメノちゃん/ノーマル"},
+     {"value": "a1b2:3", "label": "アメノちゃん/ギャル"}]
+
+押さえておくべき点:
+
+- **`[[bus]]` の宣言も承認も要らない。** ここで retained 値を読むのは
+  プラグインではなくデーモンで、返す先は設定画面である。プラグイン自身が
+  同じトピックを読みたいなら、これまで通り `[[bus]]` の宣言と承認が要る
+- **候補は保存時に照合されない。** 候補は非同期に届き、ドライバの無効化で
+  消えもするので、照合すると「ドライバが起動するまで設定を保存できない
+  時間帯」ができてしまう。値は文字列であることだけ検証される
+- **候補は設定画面を開いたときに取得される。** ドライバを起動した直後に
+  候補を出したい場合は画面を開き直す
+- 候補を取得できないとき(ドライバが未インストール・無効化済み・まだ一度も
+  `emit` していない)、UI は現在値だけを表示して編集不可にし、どのドライバの
+  どのトピックが未着かを表示する。保存済みの設定値は消えない
+- `options-from` が指すドライバやトピックが実在するかは、マニフェストの
+  ロード時には検証しない(ドライバの後入れ・入れ替えを許すため)
+
+`options-from` は `driver.toml` の `[[settings]]` でも同じように使える。
+ドライバが自分で `emit` したトピックを、自分の設定の候補源にしてよい。
 
 ### 秘密情報(`type = "secret"`)
 

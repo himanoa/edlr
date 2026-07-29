@@ -208,6 +208,7 @@ pub fn start_plugins(
         filesystem_config_store.clone(),
         process_driver,
         drivers.clone(),
+        bus.clone(),
         plugins_dir.to_path_buf(),
     );
 

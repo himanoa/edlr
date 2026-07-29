@@ -141,18 +141,37 @@ impl SettingsStore {
                     });
                 }
             }
-            SettingField::Select { key, options, .. } => {
+            SettingField::Select {
+                key,
+                options,
+                options_from,
+                ..
+            } => {
                 let Some(s) = value.as_str() else {
                     return Err(SettingsError::TypeMismatch {
                         key: key.clone(),
                         expected: "string",
                     });
                 };
-                if !options.iter().any(|o| o == s) {
-                    return Err(SettingsError::NotAnOption {
-                        key: key.clone(),
-                        value: s.to_string(),
-                    });
+                // **`options-from` の select は候補と照合しない。** 候補は
+                // ドライバの retain トピック越しに非同期で届き、ドライバの
+                // 無効化で消えもする。照合すると同じ操作がタイミングで成否を
+                // 変え、「ドライバが起動するまで設定を保存できない時間帯」が
+                // できてしまう。UI はドロップダウンなので、綴りを間違える経路は
+                // そちらで塞がっている(設計書「保存時の検証」参照)。
+                //
+                // マニフェスト検証(`validate_settings`)が両方指定を弾いて
+                // いるので、`options_from` が Some なら `options` は None。
+                if options_from.is_none() {
+                    let in_options = options
+                        .as_ref()
+                        .is_some_and(|list| list.iter().any(|o| o.value == s));
+                    if !in_options {
+                        return Err(SettingsError::NotAnOption {
+                            key: key.clone(),
+                            value: s.to_string(),
+                        });
+                    }
                 }
             }
             // `string -> string` に限る。値に number/bool/入れ子を許すと、
@@ -307,7 +326,8 @@ mod tests {
                     key: "mode".into(),
                     label: "Mode".into(),
                     default: "a".into(),
-                    options: vec!["a".into(), "b".into()],
+                    options: Some(vec!["a".into(), "b".into()]),
+                    options_from: None,
                 },
             ],
             capabilities: vec![],
@@ -753,6 +773,66 @@ mod tests {
             err,
             SettingsError::NotAnOption { key, value }
                 if key == "mode" && value == "not-an-option"
+        ));
+    }
+
+    /// `options-from` の select は候補と照合しない。候補は非同期に届くので、
+    /// 照合すると「ドライバが起動するまで保存できない時間帯」ができてしまう
+    /// (設計書「保存時の検証」参照)。
+    #[test]
+    fn update_accepts_any_string_for_a_select_backed_by_a_driver_topic() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = SettingsStore::new(tmp.path().join("settings"));
+        let mut manifest = sample_manifest();
+        manifest.settings.push(SettingField::Select {
+            key: "speaker".into(),
+            label: "話者".into(),
+            default: String::new(),
+            options: None,
+            options_from: Some(crate::plugin::OptionsFrom {
+                driver: "coeiroink".into(),
+                topic: "speakers".into(),
+            }),
+        });
+
+        let mut values = serde_json::Map::new();
+        values.insert("speaker".to_string(), serde_json::json!("a1b2:3"));
+
+        store
+            .update(&manifest, &values)
+            .expect("a value should be accepted even with no candidates on the bus");
+
+        let effective = store.effective(&manifest);
+        assert_eq!(effective.get("speaker"), Some(&serde_json::json!("a1b2:3")));
+    }
+
+    /// 照合しないのは候補との突き合わせだけで、型は変わらず string。
+    #[test]
+    fn update_still_rejects_a_non_string_for_a_select_backed_by_a_driver_topic() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = SettingsStore::new(tmp.path().join("settings"));
+        let mut manifest = sample_manifest();
+        manifest.settings.push(SettingField::Select {
+            key: "speaker".into(),
+            label: "話者".into(),
+            default: String::new(),
+            options: None,
+            options_from: Some(crate::plugin::OptionsFrom {
+                driver: "coeiroink".into(),
+                topic: "speakers".into(),
+            }),
+        });
+
+        let mut values = serde_json::Map::new();
+        values.insert("speaker".to_string(), serde_json::json!(3));
+
+        let err = store
+            .update(&manifest, &values)
+            .expect_err("a non-string should still be rejected");
+        assert!(matches!(
+            err,
+            SettingsError::TypeMismatch { key, expected }
+                if key == "speaker" && expected == "string"
         ));
     }
 

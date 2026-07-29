@@ -3,6 +3,73 @@ use std::fmt;
 use std::fs;
 use std::path::Path;
 
+/// `select` の候補 1 件。
+///
+/// TOML でも JSON でも **`"foo"` と `{ value = "...", label = "..." }` の両方**を
+/// 受ける。前者は `value` と `label` が同じ値になる。候補がただの文字列でしか
+/// ない場合(大半)にドライバ側もマニフェスト側も冗長に書かずに済ませつつ、
+/// 表示名と保存値を分けたい場合(話者一覧なら「アメノちゃん/ギャル」を見せて
+/// `uuid:styleId` を保存する)に対応するため。
+///
+/// シリアライズは常に `{ value, label }` の形で行う -- UI が 2 つの形を
+/// 場合分けせずに済むように。
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct SelectOption {
+    pub value: String,
+    pub label: String,
+}
+
+/// 表示名と保存値が同じ候補を短く作る。TOML の `"foo"` 形式と同じ意味。
+impl From<&str> for SelectOption {
+    fn from(s: &str) -> Self {
+        SelectOption {
+            value: s.to_string(),
+            label: s.to_string(),
+        }
+    }
+}
+
+/// `SelectOption` の生の serde 表現(文字列形式と object 形式の両受け)。
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawLabeledOption {
+    value: String,
+    label: String,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(untagged)]
+enum RawSelectOption {
+    Plain(String),
+    Labeled(RawLabeledOption),
+}
+
+impl<'de> serde::Deserialize<'de> for SelectOption {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        Ok(match RawSelectOption::deserialize(deserializer)? {
+            RawSelectOption::Plain(s) => SelectOption {
+                value: s.clone(),
+                label: s,
+            },
+            RawSelectOption::Labeled(o) => SelectOption {
+                value: o.value,
+                label: o.label,
+            },
+        })
+    }
+}
+
+/// `select` の候補源として指すドライバの retain トピック。
+#[derive(Debug, Clone, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct OptionsFrom {
+    pub driver: String,
+    pub topic: String,
+}
+
 /// マニフェストの `[[settings]]` テーブル 1 件。
 #[derive(Debug, Clone, PartialEq, serde::Deserialize, serde::Serialize)]
 #[serde(tag = "type", rename_all = "lowercase", deny_unknown_fields)]
@@ -22,11 +89,37 @@ pub enum SettingField {
         label: String,
         default: f64,
     },
+    /// ドロップダウン。候補は **マニフェストに直接書く(`options`)か、ドライバの
+    /// retain トピックから引く(`options-from`)かのどちらか一方**で、両方指定・
+    /// 両方省略はいずれも `validate_settings` が弾く。
+    ///
+    /// `options-from` は「候補がインストール環境で決まる」設定のためにある
+    /// (COEIROINK の話者一覧のように、何が選べるかは動かしてみないと分から
+    /// ない)。解決は RPC 応答を組み立てる時点で行われ、`options` に埋められる
+    /// (`crate::plugin::select_options::resolve`)。解決できなければ `None` の
+    /// まま返り、UI が「候補を取得できません」を出す。
     Select {
         key: String,
         label: String,
         default: String,
-        options: Vec<String>,
+        /// 静的な候補、または `options-from` から解決済みの候補。
+        ///
+        /// **`skip_serializing_if` を付けていない**のは意図的で、未解決を
+        /// `null` として RPC に出すため。フィールドごと消すと、UI 側で
+        /// 「未解決」と「そもそも select ではない」が同じ `undefined` になる。
+        #[serde(default)]
+        options: Option<Vec<SelectOption>>,
+        /// 候補源となるドライバの retain トピック。
+        ///
+        /// TOML では `options-from`、RPC 応答では `optionsFrom`
+        /// (他の RPC フィールドが camelCase なのに合わせる)。
+        #[serde(
+            rename = "optionsFrom",
+            alias = "options-from",
+            default,
+            skip_serializing_if = "Option::is_none"
+        )]
+        options_from: Option<OptionsFrom>,
     },
     /// API キーなどの秘密情報。**`default` を持たない**(マニフェストに
     /// 秘密情報を書けてしまう余地を作らないため)。値は常に空文字列から始まる。
@@ -547,6 +640,9 @@ pub enum ManifestError {
     MissingEntry,
     /// `settings` 内で `key` が重複している。
     DuplicateKey,
+    /// `settings` の内容が不正(`select` の候補指定の排他違反・空の
+    /// `options`・`options-from` の字種違反など)。
+    BadSetting(String),
     /// `capabilities` の内容が不正(host の形式・空リストなど)。
     BadCapability(String),
     /// `sidecar` の内容が不正(name の形式・重複・reason 空など)。
@@ -577,6 +673,7 @@ impl fmt::Display for ManifestError {
             ManifestError::BadId => write!(f, "manifest id must match [a-z0-9-]+"),
             ManifestError::MissingEntry => write!(f, "entry file does not exist"),
             ManifestError::DuplicateKey => write!(f, "duplicate settings key"),
+            ManifestError::BadSetting(msg) => write!(f, "invalid setting: {msg}"),
             ManifestError::BadCapability(msg) => write!(f, "invalid capability request: {msg}"),
             ManifestError::BadSidecar(msg) => write!(f, "invalid sidecar request: {msg}"),
             ManifestError::BadFilesystem(msg) => write!(f, "invalid filesystem request: {msg}"),
@@ -595,6 +692,63 @@ pub(crate) fn is_valid_id(id: &str) -> bool {
         && id
             .chars()
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+}
+
+/// `[[settings]]` を検証する。`key` の一意性と、`select` の候補指定を見る。
+///
+/// プラグインとドライバの両方のローダから呼ばれる(`[[settings]]` の書式は
+/// 両者で共通のため)。
+pub(crate) fn validate_settings(settings: &[SettingField]) -> Result<(), ManifestError> {
+    let mut seen = HashSet::new();
+    for setting in settings {
+        if !seen.insert(setting.key()) {
+            return Err(ManifestError::DuplicateKey);
+        }
+
+        let SettingField::Select {
+            key,
+            options,
+            options_from,
+            ..
+        } = setting
+        else {
+            continue;
+        };
+
+        match (options, options_from) {
+            (Some(_), Some(_)) => {
+                return Err(ManifestError::BadSetting(format!(
+                    "select {key} must specify exactly one of options or options-from, not both"
+                )));
+            }
+            (None, None) => {
+                return Err(ManifestError::BadSetting(format!(
+                    "select {key} must specify one of options or options-from"
+                )));
+            }
+            // 空の候補は「選べる値が無いドロップダウン」でしかなく、書いた人の
+            // 意図(まだ埋めていない)と結果(常に何も選べない)がずれる。
+            (Some(list), None) if list.is_empty() => {
+                return Err(ManifestError::BadSetting(format!(
+                    "select {key} options must not be empty"
+                )));
+            }
+            (Some(_), None) => {}
+            (None, Some(from)) => {
+                if !is_valid_id(&from.driver) {
+                    return Err(ManifestError::BadSetting(format!(
+                        "select {key} options-from driver must match [a-z0-9-]+"
+                    )));
+                }
+                if !is_valid_id(&from.topic) {
+                    return Err(ManifestError::BadSetting(format!(
+                        "select {key} options-from topic must match [a-z0-9-]+"
+                    )));
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 /// capability の host エントリを検証する。
@@ -982,12 +1136,7 @@ pub fn load_manifest(dir: &Path) -> Result<Manifest, ManifestError> {
         return Err(ManifestError::MissingEntry);
     }
 
-    let mut seen = HashSet::new();
-    for setting in &manifest.settings {
-        if !seen.insert(setting.key()) {
-            return Err(ManifestError::DuplicateKey);
-        }
-    }
+    validate_settings(&manifest.settings)?;
 
     validate_capabilities(&mut manifest.capabilities)?;
     validate_sidecars(&mut manifest.sidecars)?;
@@ -1136,7 +1285,8 @@ options = ["a", "b"]
                 key: "mode".into(),
                 label: "Mode".into(),
                 default: "a".into(),
-                options: vec!["a".into(), "b".into()],
+                options: Some(vec!["a".into(), "b".into()]),
+                options_from: None,
             }
         );
     }
@@ -1425,7 +1575,8 @@ a = "b"
                 key: "sel".into(),
                 label: "Sel".into(),
                 default: "a".into(),
-                options: vec!["a".into()],
+                options: Some(vec!["a".into()]),
+                options_from: None,
             },
             SettingField::Map {
                 key: "m".into(),
@@ -2848,5 +2999,208 @@ interval-seconds = 0
 "#,
         );
         assert!(matches!(err, Err(ManifestError::Parse(_))));
+    }
+
+    #[test]
+    fn select_accepts_options_from_a_driver_topic() {
+        let m = manifest_from(
+            r#"
+[[settings]]
+key = "speaker"
+label = "話者"
+type = "select"
+default = ""
+options-from = { driver = "coeiroink", topic = "speakers" }
+"#,
+        );
+
+        assert_eq!(
+            m.settings[0],
+            SettingField::Select {
+                key: "speaker".into(),
+                label: "話者".into(),
+                default: String::new(),
+                options: None,
+                options_from: Some(OptionsFrom {
+                    driver: "coeiroink".into(),
+                    topic: "speakers".into(),
+                }),
+            }
+        );
+    }
+
+    /// 静的な候補は `"foo"` と `{ value, label }` を混ぜて書ける。
+    #[test]
+    fn static_options_accept_both_plain_strings_and_labeled_objects() {
+        let m = manifest_from(
+            r#"
+[[settings]]
+key = "mode"
+label = "Mode"
+type = "select"
+default = "a"
+options = ["a", { value = "b", label = "そのB" }]
+"#,
+        );
+
+        let SettingField::Select { options, .. } = &m.settings[0] else {
+            panic!("expected a select field");
+        };
+        assert_eq!(
+            options.as_deref(),
+            Some(
+                [
+                    SelectOption {
+                        value: "a".into(),
+                        label: "a".into()
+                    },
+                    SelectOption {
+                        value: "b".into(),
+                        label: "そのB".into()
+                    },
+                ]
+                .as_slice()
+            )
+        );
+    }
+
+    #[test]
+    fn select_rejects_both_options_and_options_from() {
+        let err = try_manifest_from(
+            r#"
+[[settings]]
+key = "speaker"
+label = "話者"
+type = "select"
+default = ""
+options = ["a"]
+options-from = { driver = "coeiroink", topic = "speakers" }
+"#,
+        );
+        assert!(
+            matches!(&err, Err(ManifestError::BadSetting(msg)) if msg.contains("not both")),
+            "expected BadSetting, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn select_rejects_neither_options_nor_options_from() {
+        let err = try_manifest_from(
+            r#"
+[[settings]]
+key = "speaker"
+label = "話者"
+type = "select"
+default = ""
+"#,
+        );
+        assert!(
+            matches!(&err, Err(ManifestError::BadSetting(msg)) if msg.contains("must specify one of")),
+            "expected BadSetting, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn select_rejects_empty_static_options() {
+        let err = try_manifest_from(
+            r#"
+[[settings]]
+key = "mode"
+label = "Mode"
+type = "select"
+default = ""
+options = []
+"#,
+        );
+        assert!(
+            matches!(&err, Err(ManifestError::BadSetting(msg)) if msg.contains("must not be empty")),
+            "expected BadSetting, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn select_rejects_options_from_with_a_bad_driver_id() {
+        let err = try_manifest_from(
+            r#"
+[[settings]]
+key = "speaker"
+label = "話者"
+type = "select"
+default = ""
+options-from = { driver = "COEIROINK", topic = "speakers" }
+"#,
+        );
+        assert!(
+            matches!(&err, Err(ManifestError::BadSetting(msg)) if msg.contains("driver must match")),
+            "expected BadSetting, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn select_rejects_options_from_with_a_bad_topic() {
+        let err = try_manifest_from(
+            r#"
+[[settings]]
+key = "speaker"
+label = "話者"
+type = "select"
+default = ""
+options-from = { driver = "coeiroink", topic = "Speakers!" }
+"#,
+        );
+        assert!(
+            matches!(&err, Err(ManifestError::BadSetting(msg)) if msg.contains("topic must match")),
+            "expected BadSetting, got {err:?}"
+        );
+    }
+
+    /// RPC 応答は静的・動的のどちらでも `{value,label}` の配列に揃え、未解決は
+    /// `null` で出す(UI が 1 つの経路で描けるように)。
+    #[test]
+    fn select_serializes_options_as_value_label_pairs() {
+        let field = SettingField::Select {
+            key: "mode".into(),
+            label: "Mode".into(),
+            default: "a".into(),
+            options: Some(vec!["a".into()]),
+            options_from: None,
+        };
+
+        assert_eq!(
+            serde_json::to_value(&field).unwrap(),
+            serde_json::json!({
+                "type": "select",
+                "key": "mode",
+                "label": "Mode",
+                "default": "a",
+                "options": [{ "value": "a", "label": "a" }],
+            })
+        );
+    }
+
+    #[test]
+    fn an_unresolved_select_serializes_options_as_null_and_keeps_options_from() {
+        let field = SettingField::Select {
+            key: "speaker".into(),
+            label: "話者".into(),
+            default: String::new(),
+            options: None,
+            options_from: Some(OptionsFrom {
+                driver: "coeiroink".into(),
+                topic: "speakers".into(),
+            }),
+        };
+
+        assert_eq!(
+            serde_json::to_value(&field).unwrap(),
+            serde_json::json!({
+                "type": "select",
+                "key": "speaker",
+                "label": "話者",
+                "default": "",
+                "options": null,
+                "optionsFrom": { "driver": "coeiroink", "topic": "speakers" },
+            })
+        );
     }
 }
