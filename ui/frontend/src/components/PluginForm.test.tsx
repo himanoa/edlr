@@ -15,7 +15,16 @@ function makePlugin(overrides: Partial<PluginInfo> = {}): PluginInfo {
       { type: "boolean", key: "enabled", label: "有効", default: true },
       { type: "string", key: "endpoint", label: "エンドポイント", default: "http://localhost" },
       { type: "number", key: "volume", label: "音量", default: 80 },
-      { type: "select", key: "voice", label: "音声", default: "Amber", options: ["Amber", "Blue"] },
+      {
+        type: "select",
+        key: "voice",
+        label: "音声",
+        default: "Amber",
+        options: [
+          { value: "Amber", label: "Amber" },
+          { value: "Blue", label: "Blue" },
+        ],
+      },
     ],
     values: { enabled: true, endpoint: "http://localhost", volume: 80, voice: "Amber" },
     capabilities: { requests: [], granted: false, staleGrant: false },

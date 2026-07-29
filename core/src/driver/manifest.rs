@@ -6,8 +6,8 @@ use edlr_driver_channel::TopicSpec;
 
 use crate::plugin::manifest::{
     is_valid_id, unknown_top_level_keys, validate_capabilities, validate_filesystem,
-    validate_sidecars, warn_unknown_top_level_keys, CapabilityRequest, FilesystemRequest,
-    ManifestError, SettingField, SidecarRequest,
+    validate_settings, validate_sidecars, warn_unknown_top_level_keys, CapabilityRequest,
+    FilesystemRequest, ManifestError, SettingField, SidecarRequest,
 };
 
 /// `DriverManifest` が知っているトップレベルキー(serde の `rename` 後の名前)。
@@ -125,12 +125,7 @@ pub fn load_driver_manifest(dir: &Path) -> Result<DriverManifest, ManifestError>
         return Err(ManifestError::MissingEntry);
     }
 
-    let mut seen = HashSet::new();
-    for setting in &manifest.settings {
-        if !seen.insert(setting.key()) {
-            return Err(ManifestError::DuplicateKey);
-        }
-    }
+    validate_settings(&manifest.settings)?;
 
     validate_capabilities(&mut manifest.capabilities)?;
     validate_sidecars(&mut manifest.sidecars)?;

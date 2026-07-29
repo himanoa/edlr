@@ -351,24 +351,75 @@ function Field({
     case "map":
       return <MapField field={field} value={value} disabled={disabled} onCommit={onChange} />;
     case "select":
-      return (
-        <label htmlFor={id} className="form-row">
-          <span>{field.label}</span>
-          <select
-            id={id}
-            value={String(value)}
-            disabled={disabled}
-            onChange={(e) => onChange(e.target.value)}
-          >
-            {field.options.map((o) => (
-              <option key={o} value={o}>
-                {o}
-              </option>
-            ))}
-          </select>
-        </label>
-      );
+      return <SelectField field={field} value={value} disabled={disabled} onChange={onChange} />;
   }
+}
+
+/**
+ * `select` の描画。候補の取得状況で 3 通りに分かれる:
+ *
+ * - **候補あり** — 通常のドロップダウン
+ * - **`options === null`** — `options-from` が指すドライバから候補を取れて
+ *   いない(未インストール・無効化・まだ一度も emit していない)。現在値だけを
+ *   出して編集不可にする。設定値そのものは触らない — ドライバが戻れば
+ *   そのまま使えるはずの値を、こちらの都合で消してはいけない
+ * - **現在値が候補に無い** — 候補は取れたが、保存済みの値がその中にない
+ *   (ドライバ側の一覧が変わった)。現在値を先頭に足したうえで警告する。
+ *   選択肢から落とすと、開いた瞬間に別の値へ化けたように見えてしまう
+ */
+function SelectField({
+  field,
+  value,
+  disabled,
+  onChange,
+}: {
+  field: Extract<SettingField, { type: "select" }>;
+  value: unknown;
+  disabled: boolean;
+  onChange: (v: unknown) => void;
+}) {
+  const id = `field-${field.key}`;
+  const current = String(value ?? "");
+  const options = field.options;
+
+  if (options === null) {
+    const source = field.optionsFrom;
+    return (
+      <label htmlFor={id} className="form-row">
+        <span>{field.label}</span>
+        <select id={id} value={current} disabled onChange={() => {}}>
+          <option value={current}>{current}</option>
+        </select>
+        <p className="form-error">
+          {source
+            ? `候補を取得できません(ドライバ ${source.driver} のトピック ${source.topic} が未着です)`
+            : "候補を取得できません"}
+        </p>
+      </label>
+    );
+  }
+
+  const missing = current !== "" && !options.some((o) => o.value === current);
+  const shown = missing ? [{ value: current, label: current }, ...options] : options;
+
+  return (
+    <label htmlFor={id} className="form-row">
+      <span>{field.label}</span>
+      <select
+        id={id}
+        value={current}
+        disabled={disabled}
+        onChange={(e) => onChange(e.target.value)}
+      >
+        {shown.map((o) => (
+          <option key={o.value} value={o.value}>
+            {o.label}
+          </option>
+        ))}
+      </select>
+      {missing && <p className="form-error">保存済みの値が現在の候補にありません</p>}
+    </label>
+  );
 }
 
 export default function PluginForm({

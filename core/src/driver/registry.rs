@@ -189,7 +189,13 @@ impl DriverRegistry {
 
         snapshot
             .into_iter()
-            .map(|(manifest, state)| {
+            .map(|(mut manifest, state)| {
+                // `options-from` の select の候補を、いま retain されている値から
+                // 解決して埋める。ドライバ自身が emit したトピックを自分の設定の
+                // 候補源にする形(COEIROINK の話者一覧)を成立させるために、
+                // プラグイン側(`crate::plugin::registry::Registry::list`)と
+                // 同じ解決をここでも行う。
+                crate::plugin::select_options::resolve(&mut manifest.settings, &self.bus);
                 let settings_manifest = manifest.as_settings_manifest();
                 let values = self.settings_store.effective(&settings_manifest);
                 let grant_state = self.grants_store.state(&settings_manifest);

@@ -10,6 +10,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use edlr_driver_channel::Bus;
 use edlr_driver_process::{InstanceStatus, ProcessDriver, ProcessSpec};
 
 use crate::driver::registry::DriverRegistry;
@@ -335,6 +336,11 @@ pub struct Registry {
     /// `DriverRegistry` は `Clone` で安価に持ち回れる(`DriverRegistry` 自身の
     /// ドキュメント参照)。
     driver_registry: DriverRegistry,
+    /// プラグイン間バスの実体。`list()` が `options-from` を持つ select の候補を
+    /// retain トピックから解決するために保持する
+    /// (`crate::plugin::select_options::resolve`)。`Bus` は `Clone` で内部を
+    /// 共有するので、ドライバ側に配線したのと同じ実体を指す。
+    bus: Bus,
     plugins_dir: PathBuf,
     /// `crate::plugin::runner::spawn_bus_subscriber` の各インスタンスが共有
     /// する shutdown フラグ。`shutdown_bus_subscribers` が立て、各購読タスクは
@@ -390,6 +396,7 @@ impl Registry {
         filesystem_config_store: Arc<FilesystemConfigStore>,
         process_driver: Arc<ProcessDriver>,
         driver_registry: DriverRegistry,
+        bus: Bus,
         plugins_dir: PathBuf,
     ) -> Self {
         Registry {
@@ -405,6 +412,7 @@ impl Registry {
             filesystem_runtime_locks: Arc::new(Mutex::new(HashMap::new())),
             bus_runtime_locks: Arc::new(Mutex::new(HashMap::new())),
             driver_registry,
+            bus,
             plugins_dir,
             bus_subscriber_shutdown: Arc::new(AtomicBool::new(false)),
             plugin_threads: Arc::new(Mutex::new(HashMap::new())),
@@ -616,7 +624,10 @@ impl Registry {
 
         snapshot
             .into_iter()
-            .map(|(manifest, state)| {
+            .map(|(mut manifest, state)| {
+                // `options-from` の select の候補を、いま retain されている値から
+                // 解決して埋める(未解決なら `options` は None のまま)。
+                crate::plugin::select_options::resolve(&mut manifest.settings, &self.bus);
                 // 秘密情報は RPC 応答から落とす(設定済みかどうかだけ返す)。
                 let (values, secrets_set) =
                     split_secrets(&manifest, self.settings_store.effective(&manifest));
@@ -1901,6 +1912,7 @@ pub(crate) mod tests {
             filesystem_config_store,
             process_driver,
             driver_registry,
+            edlr_driver_channel::Bus::new(),
             tmp.path().join("plugins"),
         )
     }
@@ -1985,6 +1997,100 @@ pub(crate) mod tests {
         }
     }
 
+    /// `options-from` の select を 1 件だけ持つプラグイン `speaky` を、渡された
+    /// `Bus` 付きで載せた `Registry`。
+    fn test_registry_with_dynamic_select(bus: edlr_driver_channel::Bus) -> Registry {
+        let host = Arc::new(PluginHost::new().expect("host should start"));
+        let tmp = tempfile::tempdir().unwrap();
+        let settings_store = Arc::new(SettingsStore::new(tmp.path().join("settings")));
+        let grants_store = Arc::new(GrantsStore::new(tmp.path().join("grants")));
+        let sidecar_config_store = Arc::new(SidecarConfigStore::new(tmp.path().join("settings")));
+        let filesystem_config_store = Arc::new(FilesystemConfigStore::new(
+            tmp.path().join("settings"),
+            Vec::new(),
+        ));
+        let process_driver = Arc::new(ProcessDriver::new(
+            Duration::from_millis(200),
+            Duration::from_millis(0),
+        ));
+        let registry = Registry::new(
+            host,
+            settings_store,
+            grants_store,
+            sidecar_config_store,
+            filesystem_config_store,
+            process_driver,
+            empty_driver_registry(tmp.path()),
+            bus,
+            tmp.path().join("plugins"),
+        );
+        let mut manifest = manifest_with_bus("speaky");
+        manifest.bus.clear();
+        manifest.settings = vec![SettingField::Select {
+            key: "speaker".into(),
+            label: "話者".into(),
+            default: String::new(),
+            options: None,
+            options_from: Some(crate::plugin::OptionsFrom {
+                driver: "coeiroink".into(),
+                topic: "speakers".into(),
+            }),
+        }];
+        registry.push(PluginEntry {
+            manifest,
+            state: PluginState::Running,
+            settings_json: Arc::new(Mutex::new("{}".to_string())),
+            capabilities_json: Arc::new(Mutex::new(crate::plugin::host::capabilities_json_string(
+                &[],
+            ))),
+            sidecars_json: Arc::new(Mutex::new("[]".to_string())),
+            filesystem_json: Arc::new(Mutex::new("[]".to_string())),
+            bus_json: Arc::new(Mutex::new("[]".to_string())),
+        });
+        registry
+    }
+
+    fn listed_options(registry: &Registry) -> Option<Vec<crate::plugin::SelectOption>> {
+        let infos = registry.list();
+        let SettingField::Select { options, .. } = &infos[0].manifest.settings[0] else {
+            panic!("expected a select field");
+        };
+        options.clone()
+    }
+
+    #[test]
+    fn list_fills_in_select_options_from_the_retained_value() {
+        let bus = edlr_driver_channel::Bus::new();
+        let (tx, _rx) = std_mpsc::sync_channel(4);
+        bus.register_driver(
+            "coeiroink",
+            vec![edlr_driver_channel::TopicSpec {
+                name: "speakers".into(),
+                retain: true,
+                description: String::new(),
+            }],
+            tx,
+        );
+        bus.emit("coeiroink", "speakers", br#"["Ame","Tsuina"]"#.to_vec())
+            .expect("emit should succeed");
+
+        let registry = test_registry_with_dynamic_select(bus);
+
+        assert_eq!(
+            listed_options(&registry),
+            Some(vec!["Ame".into(), "Tsuina".into()])
+        );
+    }
+
+    /// ドライバが居ない(未インストール・無効化済み)ときは `options` を
+    /// `None` のままにする。UI はこれを見て「候補を取得できません」を出す。
+    #[test]
+    fn list_leaves_select_options_unresolved_without_a_driver() {
+        let registry = test_registry_with_dynamic_select(edlr_driver_channel::Bus::new());
+
+        assert_eq!(listed_options(&registry), None);
+    }
+
     /// `[[bus]]` を 1 件持つプラグインだけを載せた `Registry`。
     /// `DriverRegistry` には何も登録しないので、`bus("translator")` の
     /// `resolved` は必ず `false` になる。
@@ -2029,6 +2135,7 @@ pub(crate) mod tests {
             filesystem_config_store,
             process_driver,
             driver_registry,
+            edlr_driver_channel::Bus::new(),
             tmp.path().join("plugins"),
         );
         registry.push(PluginEntry {
@@ -2073,6 +2180,7 @@ pub(crate) mod tests {
             filesystem_config_store,
             process_driver,
             driver_registry,
+            edlr_driver_channel::Bus::new(),
             tmp.path().join("plugins"),
         );
         registry.push(PluginEntry {
@@ -2183,6 +2291,7 @@ pub(crate) mod tests {
             filesystem_config_store,
             process_driver,
             empty_driver_registry(tmp.path()),
+            edlr_driver_channel::Bus::new(),
             tmp.path().join("plugins"),
         );
 
@@ -2585,6 +2694,7 @@ pub(crate) mod tests {
             filesystem_config_store,
             process_driver,
             empty_driver_registry(tmp.path()),
+            edlr_driver_channel::Bus::new(),
             tmp.path().join("plugins"),
         );
 
@@ -3097,6 +3207,7 @@ pub(crate) mod tests {
             filesystem_config_store,
             process_driver,
             empty_driver_registry(tmp.path()),
+            edlr_driver_channel::Bus::new(),
             tmp.path().join("plugins"),
         );
 
