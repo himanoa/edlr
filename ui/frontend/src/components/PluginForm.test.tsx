@@ -176,6 +176,104 @@ test("leaving a secret field empty does not overwrite the stored value", async (
   expect(onChange).not.toHaveBeenCalled();
 });
 
+function makeMapPlugin(values: Record<string, string> = {}): PluginInfo {
+  return makePlugin({
+    settings: [{ type: "map", key: "aliases", label: "表示名の置き換え" }],
+    values: { aliases: values },
+  });
+}
+
+test("a map renders one key/value row per stored entry", () => {
+  render(<PluginForm plugin={makeMapPlugin({ Sol: "太陽系" })} onChange={vi.fn()} />);
+
+  const keys = screen.getAllByLabelText("表示名の置き換え のキー") as HTMLInputElement[];
+  const vals = screen.getAllByLabelText("表示名の置き換え の値") as HTMLInputElement[];
+  expect(keys.map((i) => i.value)).toEqual(["Sol"]);
+  expect(vals.map((i) => i.value)).toEqual(["太陽系"]);
+});
+
+test("a map with no entries renders no rows", () => {
+  render(<PluginForm plugin={makeMapPlugin()} onChange={vi.fn()} />);
+  expect(screen.queryByLabelText("表示名の置き換え のキー")).not.toBeInTheDocument();
+});
+
+test("adding a row does not save until the key is filled in", async () => {
+  const onChange = vi.fn().mockResolvedValue(undefined);
+  render(<PluginForm plugin={makeMapPlugin()} onChange={onChange} />);
+
+  await userEvent.click(screen.getByRole("button", { name: "行を追加" }));
+  expect(screen.getAllByLabelText("表示名の置き換え のキー")).toHaveLength(1);
+  expect(onChange).not.toHaveBeenCalled();
+
+  // 値だけ入れて離れても、キーが空の行は保存対象にならない。
+  await userEvent.type(screen.getByLabelText("表示名の置き換え の値"), "太陽系");
+  await userEvent.tab();
+  expect(onChange).not.toHaveBeenCalled();
+});
+
+test("filling in a new row saves the whole map object", async () => {
+  const onChange = vi.fn().mockResolvedValue(undefined);
+  render(<PluginForm plugin={makeMapPlugin({ Sol: "太陽系" })} onChange={onChange} />);
+
+  await userEvent.click(screen.getByRole("button", { name: "行を追加" }));
+  const keys = screen.getAllByLabelText("表示名の置き換え のキー");
+  const vals = screen.getAllByLabelText("表示名の置き換え の値");
+  await userEvent.type(keys[1], "Deciat");
+  await userEvent.type(vals[1], "デシアト");
+  await userEvent.tab();
+
+  expect(onChange).toHaveBeenCalledWith("aliases", { Sol: "太陽系", Deciat: "デシアト" });
+});
+
+test("editing a value commits on Enter", async () => {
+  const onChange = vi.fn().mockResolvedValue(undefined);
+  render(<PluginForm plugin={makeMapPlugin({ Sol: "太陽系" })} onChange={onChange} />);
+
+  const value = screen.getByLabelText("表示名の置き換え の値");
+  await userEvent.clear(value);
+  await userEvent.type(value, "ソル{Enter}");
+
+  expect(onChange).toHaveBeenCalledTimes(1);
+  expect(onChange).toHaveBeenCalledWith("aliases", { Sol: "ソル" });
+});
+
+test("removing a row saves the map without that entry", async () => {
+  const onChange = vi.fn().mockResolvedValue(undefined);
+  render(
+    <PluginForm plugin={makeMapPlugin({ Sol: "太陽系", Deciat: "デシアト" })} onChange={onChange} />,
+  );
+
+  const remove = screen.getAllByRole("button", { name: "削除" });
+  await userEvent.click(remove[0]);
+
+  expect(onChange).toHaveBeenCalledWith("aliases", { Deciat: "デシアト" });
+});
+
+test("duplicate keys are reported instead of silently keeping the last one", async () => {
+  const onChange = vi.fn().mockResolvedValue(undefined);
+  render(<PluginForm plugin={makeMapPlugin({ Sol: "太陽系" })} onChange={onChange} />);
+
+  await userEvent.click(screen.getByRole("button", { name: "行を追加" }));
+  const keys = screen.getAllByLabelText("表示名の置き換え のキー");
+  const vals = screen.getAllByLabelText("表示名の置き換え の値");
+  await userEvent.type(keys[1], "Sol");
+  await userEvent.type(vals[1], "別の名前");
+  await userEvent.tab();
+
+  expect(await screen.findByText(/キーが重複/)).toBeInTheDocument();
+  expect(onChange).not.toHaveBeenCalled();
+});
+
+test("a failed save on a map surfaces the error", async () => {
+  const onChange = vi.fn().mockRejectedValue(new Error("save failed"));
+  render(<PluginForm plugin={makeMapPlugin({ Sol: "太陽系" })} onChange={onChange} />);
+
+  const remove = screen.getByRole("button", { name: "削除" });
+  await userEvent.click(remove);
+
+  expect(await screen.findByText("save failed")).toBeInTheDocument();
+});
+
 test("blurring a string field without editing does not call onChange", async () => {
   const onChange = vi.fn().mockResolvedValue(undefined);
   const plugin = makePlugin();

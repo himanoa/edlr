@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { PluginInfo, SettingField } from "../types/plugin";
 
 // `PluginInfo` の一部だけを要求する形にしてある。`DriverInfo`(bus を持たない)
@@ -11,7 +11,14 @@ function mergedValues(plugin: FormPlugin): Record<string, unknown> {
   const defaults: Record<string, unknown> = {};
   for (const field of plugin.settings) {
     // `secret` は `default` を持たず、値もサーバから返ってこない。
-    defaults[field.key] = field.type === "secret" ? "" : field.default;
+    // `map` も `default` を持たない(常に空オブジェクトから始まる)。
+    if (field.type === "secret") {
+      defaults[field.key] = "";
+    } else if (field.type === "map") {
+      defaults[field.key] = {};
+    } else {
+      defaults[field.key] = field.default;
+    }
   }
   return { ...defaults, ...plugin.values };
 }
@@ -124,6 +131,183 @@ function DraftField({
   );
 }
 
+/** 編集中の 1 行。`id` は行を消したりキーを書き換えたりしても安定した React key。 */
+interface MapRow {
+  id: number;
+  key: string;
+  value: string;
+}
+
+/** 行の一覧を保存形(`string -> string`)に畳む。キーが空の行は含めない。 */
+function toEntries(rows: MapRow[]): Record<string, string> {
+  const entries: Record<string, string> = {};
+  for (const row of rows) {
+    if (row.key !== "") {
+      entries[row.key] = row.value;
+    }
+  }
+  return entries;
+}
+
+/**
+ * 「同じマップか」の比較に使う正規形。キーの並び順は無視する — サーバが返す
+ * オブジェクトのキー順は保存時の並びと一致するとは限らないので、順序の違いだけで
+ * 「変わった」と誤判定して保存や行の組み直しが走らないようにする。
+ */
+function canonical(value: unknown): string {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return "";
+  }
+  const entries = Object.entries(value as Record<string, unknown>).map(
+    ([k, v]) => [k, String(v ?? "")] as const,
+  );
+  entries.sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+  return JSON.stringify(entries);
+}
+
+function toRows(value: unknown, nextId: () => number): MapRow[] {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return [];
+  }
+  return Object.entries(value as Record<string, unknown>).map(([key, v]) => ({
+    id: nextId(),
+    key,
+    value: String(v ?? ""),
+  }));
+}
+
+/**
+ * `string -> string` のマップの編集欄。
+ *
+ * 他のフィールドと違って値がひとつではないので、行の追加・削除と各セルの
+ * 編集を全部まとめて「そのキーの値(オブジェクト)ひとつ」として保存する。
+ * 保存のタイミングは他のテキスト入力と同じく blur / Enter(行の削除だけは
+ * その場で確定する — 押した時点で意図が確定しているため)。
+ *
+ * - **キーが空の行は保存対象に含めない**。行を足した直後の空行で保存が走ったり、
+ *   サーバ側の「空キーは弾く」に引っ掛かったりしないようにするため。
+ *   行そのものは消さない(入力途中で消えたら編集できない)
+ * - **キーが重複したら保存せずその場で報せる**。片方を黙って捨てると、
+ *   書いたはずの行が消える理由がユーザーからは分からない
+ */
+function MapField({
+  field,
+  value,
+  disabled,
+  onCommit,
+}: {
+  field: Extract<SettingField, { type: "map" }>;
+  value: unknown;
+  disabled: boolean;
+  onCommit: (v: unknown) => void;
+}) {
+  const nextId = useRef(0);
+  const makeId = () => nextId.current++;
+  const [rows, setRows] = useState<MapRow[]>(() => toRows(value, makeId));
+  const [duplicate, setDuplicate] = useState<string | null>(null);
+
+  const rowsRef = useRef(rows);
+  rowsRef.current = rows;
+
+  // 外から値が変わったとき(保存失敗で巻き戻された・plugin prop が差し替わった)
+  // に追従する。`DraftField` と同じ理由で、毎レンダーではなく値の変化時だけ。
+  //
+  // ただし、いま並んでいる行を畳んだ結果と一致する値なら組み直さない — 自分が
+  // 保存した値が返ってきただけであり、ここで行を作り直すと React が行ごと
+  // 差し替えて、編集途中の入力欄がフォーカスごと消えてしまう(キーを入れた
+  // 直後に値を打ち始めると、その打鍵が丸ごと消える)。
+  useEffect(() => {
+    if (canonical(toEntries(rowsRef.current)) === canonical(value ?? {})) {
+      return;
+    }
+    setRows(toRows(value, makeId));
+    setDuplicate(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [canonical(value)]);
+
+  const commit = (next: MapRow[]) => {
+    // キーが空の行は「まだ書いていない」であって「空のキー」ではないので、
+    // 保存対象からは外すが行としては残す。
+    const filled = next.filter((row) => row.key !== "");
+    const entries = toEntries(next);
+    if (Object.keys(entries).length !== filled.length) {
+      // 後勝ちで黙って潰すと、書いたはずの行が消えた理由が分からない。
+      const dup = filled.find((row, i) => filled.findIndex((r) => r.key === row.key) !== i);
+      setDuplicate(dup?.key ?? "");
+      return;
+    }
+    setDuplicate(null);
+    if (canonical(entries) === canonical(value ?? {})) {
+      // 変わっていないなら保存しない(編集せずに blur しただけ、など)。
+      return;
+    }
+    onCommit(entries);
+  };
+
+  const editRow = (id: number, patch: Partial<MapRow>) => {
+    setRows((current) => current.map((row) => (row.id === id ? { ...row, ...patch } : row)));
+  };
+
+  return (
+    <fieldset className="map-field">
+      <legend>{field.label}</legend>
+      {rows.map((row) => (
+        <div key={row.id} className="map-row">
+          <input
+            type="text"
+            aria-label={`${field.label} のキー`}
+            value={row.key}
+            disabled={disabled}
+            onChange={(e) => editRow(row.id, { key: e.target.value })}
+            onBlur={() => commit(rows)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault();
+                commit(rows);
+              }
+            }}
+          />
+          <input
+            type="text"
+            aria-label={`${field.label} の値`}
+            value={row.value}
+            disabled={disabled}
+            onChange={(e) => editRow(row.id, { value: e.target.value })}
+            onBlur={() => commit(rows)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault();
+                commit(rows);
+              }
+            }}
+          />
+          <button
+            type="button"
+            disabled={disabled}
+            onClick={() => {
+              const next = rows.filter((r) => r.id !== row.id);
+              setRows(next);
+              commit(next);
+            }}
+          >
+            削除
+          </button>
+        </div>
+      ))}
+      <button
+        type="button"
+        disabled={disabled}
+        onClick={() => setRows((current) => [...current, { id: makeId(), key: "", value: "" }])}
+      >
+        行を追加
+      </button>
+      {duplicate !== null && (
+        <p className="form-error">キーが重複しています: {duplicate}</p>
+      )}
+    </fieldset>
+  );
+}
+
 function Field({
   field,
   value,
@@ -164,6 +348,8 @@ function Field({
           onCommit={onChange}
         />
       );
+    case "map":
+      return <MapField field={field} value={value} disabled={disabled} onCommit={onChange} />;
     case "select":
       return (
         <label htmlFor={id} className="form-row">

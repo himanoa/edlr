@@ -113,6 +113,32 @@ body {
   border-radius: 4px;
   width: 14rem;
 }
+.map-field {
+  border: 1px solid #2b313b;
+  border-radius: 6px;
+  padding: 0.5rem 0.75rem 0.75rem;
+  margin: 0.35rem 0;
+}
+.map-field legend {
+  padding: 0 0.4rem;
+  color: #7fb3d8;
+  font-weight: 600;
+}
+.map-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.2rem 0;
+}
+.map-row input[type="text"] {
+  background: #14171c;
+  border: 1px solid #2b313b;
+  color: inherit;
+  padding: 0.3rem 0.5rem;
+  border-radius: 4px;
+  flex: 1 1 0;
+  min-width: 0;
+}
 .badge-plugin-running { background: #1d3b2a; color: #7fd8a2; }
 .badge-plugin-disabled { background: #3b1d1d; color: #d87f7f; }
 .plugin-card h2 {

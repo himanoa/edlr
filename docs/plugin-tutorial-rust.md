@@ -273,7 +273,7 @@ type = "number"
 default = 0
 ```
 
-`type` は `boolean` / `string` / `number` / `select` / `secret`。GUI の
+`type` は `boolean` / `string` / `number` / `select` / `secret` / `map`。GUI の
 Plugins ページはこの宣言だけを見てフォームを描く。値は
 `<settings-dir>/<id>.json` に保存され、未保存のキーは `default` に落ちる。
 

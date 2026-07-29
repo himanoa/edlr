@@ -7,7 +7,10 @@ export type SettingField =
   // API キーなどの秘密情報。`default` を持たない(マニフェストに秘密情報を
   // 書けてしまう余地を作らないため)。値はサーバから返ってこない
   // (write-only)ので、設定済みかどうかは `PluginInfo.secretsSet` で判断する。
-  | { type: "secret"; key: string; label: string };
+  | { type: "secret"; key: string; label: string }
+  // ユーザーが UI で行を追加・削除する `string -> string` のマップ。`default` を
+  // 持たない(常に空オブジェクトから始まる)。
+  | { type: "map"; key: string; label: string };
 
 export interface CapabilityRequest {
   kind: "http";

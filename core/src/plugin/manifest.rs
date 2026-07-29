@@ -43,6 +43,14 @@ pub enum SettingField {
     /// 秘密情報が読み出せてしまう」経路であって、プラグインからの秘匿では
     /// ない -- そもそも秘密情報を渡す相手がそのプラグインである。
     Secret { key: String, label: String },
+    /// ユーザーが UI からキーと値のペアを動的に追加・削除できる設定項目。
+    /// 値は **`string -> string` の JSON オブジェクト**に限る(値に number /
+    /// bool / 入れ子は許さない -- 単純さを優先し、必要になってから広げる)。
+    ///
+    /// **`default` を持たない**: 何件のペアが要るかを決めるのはユーザーで
+    /// あって、マニフェスト側が初期の行を用意する意味がないため。値は常に
+    /// 空オブジェクト `{}` から始まる。
+    Map { key: String, label: String },
 }
 
 impl SettingField {
@@ -53,6 +61,7 @@ impl SettingField {
             SettingField::Number { key, .. } => key,
             SettingField::Select { key, .. } => key,
             SettingField::Secret { key, .. } => key,
+            SettingField::Map { key, .. } => key,
         }
     }
 
@@ -66,6 +75,8 @@ impl SettingField {
             SettingField::Select { default, .. } => serde_json::Value::String(default.clone()),
             // 秘密情報にマニフェスト由来の初期値はない。
             SettingField::Secret { .. } => serde_json::Value::String(String::new()),
+            // 行はユーザーが増やす。マニフェスト由来の初期値はない。
+            SettingField::Map { .. } => serde_json::Value::Object(serde_json::Map::new()),
         }
     }
 
@@ -1325,6 +1336,72 @@ type = "secret"
         assert_eq!(field.default_value(), serde_json::json!(""));
     }
 
+    /// `map` は `default` を取らない(常に空オブジェクトから始まる)。
+    #[test]
+    fn map_setting_is_parsed_and_defaults_to_an_empty_object() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin_dir = tmp.path().join("map-plugin");
+        fs::create_dir_all(&plugin_dir).unwrap();
+        write_entry(&plugin_dir, "plugin.wasm");
+        write_manifest(
+            &plugin_dir,
+            r#"
+id = "map-plugin"
+name = "Map"
+version = "0.1.0"
+entry = "plugin.wasm"
+
+[[settings]]
+key = "aliases"
+label = "表示名の置き換え"
+type = "map"
+"#,
+        );
+
+        let manifest = load_manifest(&plugin_dir).expect("map settings should parse");
+        assert_eq!(manifest.settings.len(), 1);
+        assert_eq!(
+            manifest.settings[0],
+            SettingField::Map {
+                key: "aliases".into(),
+                label: "表示名の置き換え".into(),
+            }
+        );
+        assert_eq!(manifest.settings[0].key(), "aliases");
+        assert!(!manifest.settings[0].is_secret());
+        assert_eq!(manifest.settings[0].default_value(), serde_json::json!({}));
+    }
+
+    /// `map` に `default` を書いたらマニフェストごと拒否する
+    /// (`deny_unknown_fields` の既存方針。空から始まる型なので初期値は無い)。
+    #[test]
+    fn map_setting_with_a_default_is_rejected() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin_dir = tmp.path().join("map-default-plugin");
+        fs::create_dir_all(&plugin_dir).unwrap();
+        write_entry(&plugin_dir, "plugin.wasm");
+        write_manifest(
+            &plugin_dir,
+            r#"
+id = "map-default-plugin"
+name = "Map Default"
+version = "0.1.0"
+entry = "plugin.wasm"
+
+[[settings]]
+key = "aliases"
+label = "Aliases"
+type = "map"
+
+[settings.default]
+a = "b"
+"#,
+        );
+
+        let err = load_manifest(&plugin_dir).expect_err("a default on map should be rejected");
+        assert!(matches!(err, ManifestError::Parse(_)), "got: {err}");
+    }
+
     /// 他の型は `secret` 扱いされない(`is_secret` の取り違えを防ぐ)。
     #[test]
     fn non_secret_settings_are_not_marked_secret() {
@@ -1349,6 +1426,10 @@ type = "secret"
                 label: "Sel".into(),
                 default: "a".into(),
                 options: vec!["a".into()],
+            },
+            SettingField::Map {
+                key: "m".into(),
+                label: "M".into(),
             },
         ] {
             assert!(
