@@ -29,8 +29,11 @@ Rust の主要プロジェクトに倣い、**機能名モジュール + 依存�
 
 ```
 core/src/
-├── manifest/    # パース・検証・fingerprint(純粋。I/O は load_manifest だけ端に)
-├── grants/      # grant 状態遷移の判定(純粋)+ Storage trait + ディスク実装
+├── manifest/    # TOML → Manifest のパースと全体整合の検証(純粋。I/O は load_manifest だけ端に)
+├── capability/  # capability の要求と承認(純粋 + ディスク実装)
+│   ├── request.rs      # 各種 Request 型と検証(manifest.rs から移動)
+│   ├── fingerprint.rs  # 要求内容のハッシュ(再承認の要否判定)
+│   └── grants.rs       # GrantState・失効判定・Storage trait・ディスク実装
 ├── settings/    # 設定の検証・マージ(純粋)+ Storage trait + ディスク実装
 ├── schedule/    # 発火計算(純粋)+ 永続化
 ├── rpc/         # RPC 解釈・JSON 整形(純粋関数群)
@@ -41,11 +44,22 @@ core/src/
 └── server/      # axum/WS。rpc/ を呼ぶだけの薄い層(命令的)
 ```
 
+「capability」は要求(manifest で宣言)と承認(ユーザーが UI で許可、
+fingerprint が変わると失効)を対で扱う1概念なので、grant を独立モジュールに
+せず capability のサブモジュールに置く。manifest はこれらの型を use して
+組み立てる側に回り、依存方向は `manifest → capability`(両方純粋)。
+
+「命令的」と付けたモジュールは**副作用の実行を担当する場所**
+(ディスク永続化・Mutex・プロセス起動停止・スレッド・チャネル・wasm 呼び出し・
+ネットワーク)。時間がかかる・失敗しうる・順序が意味を持つ操作をここへ集める。
+ただし汚くてよい場所ではなく、「手続きを綺麗にする作法」(後述)を適用して、
+判断は純関数に抽出し、命令的関数には短い実行手順の羅列だけを残す。
+
 規約は2つ:
 
 1. **純粋モジュールは命令的モジュールを import しない**。`manifest`/`rpc` 等から
    `runner`/`server`/`std::fs` が見えたらレビューで弾く
-2. **trait は使う機能のモジュールに置く**(`grants::Storage` など)。
+2. **trait は使う機能のモジュールに置く**(`capability::GrantStorage` など)。
    中央の `ports/` ディレクトリは作らない
 
 ## trait DI
@@ -54,7 +68,7 @@ core/src/
 
 | trait | 置き場所 | 既存の実装者 | モックで純粋テストになるもの |
 |---|---|---|---|
-| `grants::Storage` | grants/ | `GrantsStore` | grant 遷移・fingerprint 検証の全パターン |
+| `capability::GrantStorage` | capability/ | `GrantsStore` | grant 遷移・fingerprint 検証の全パターン |
 | `settings::Storage` | settings/ | `SettingsStore` | 値の検証・マージ・secret の write-only 規則 |
 | `registry::ProcessControl` | registry/ | `ProcessDriver` | sidecar start/stop/restart の状態判定、取消と起動の競合系 |
 | `registry::BusPort` | registry/ | `edlr_driver_channel::Bus` | select options 解決、bus grant 反映 |
@@ -95,9 +109,9 @@ edlr の `next_action`/`LoopAction` はその縮小版であり、本リファ�
 | Phase | 領域 | 主な作業 |
 |---|---|---|
 | 0 | 共通語彙 | 4 trait を既存具象型から逆算して定義し、既存型に impl を付けるだけ(挙動不変が自明) |
-| 1 | manifest | テストをファイル分離。`validate_*` 群を `manifest/validate.rs`、fingerprint を `manifest/fingerprint.rs` へ。ほぼ純粋なので構造整理が主 |
+| 1 | manifest + capability | テストをファイル分離。capability の Request 型・検証・fingerprint を `capability/` へ移動し、manifest はパースと全体整合の検証だけに。ほぼ純粋なので構造整理が主 |
 | 2 | rpc + server | 着手前に代表 RPC 応答の pin テストを追加。巨大 match をメソッド単位の小関数(params 解釈 → Registry 呼び出し → JSON 整形)に分解、`*_result_json` 群を `rpc/render.rs` へ。server は WS/HTTP 配線だけ残す |
-| 3 | schedule + settings + grants | 判定ロジックを純関数に抽出、Storage trait 越しに永続化。モックによる純粋テストをここで初めて追加 |
+| 3 | schedule + settings + capability::grants | 判定ロジックを純関数に抽出、Storage trait 越しに永続化。モックによる純粋テストをここで初めて追加 |
 | 4 | registry(plugin + driver 同時) | 神オブジェクト解体の本丸。`GrantService` / `SidecarService` / `FilesystemService` / `BusService` / `ThreadSupervisor` に分割し、`Registry` は薄い facade に。plugin/driver の同型コードをジェネリック共通化。runner 向けの境界(`ThreadSupervisor` の口)をここで確定 |
 | 5 | runner + host | ループ判定の関数抽出を拡大(`fire_all_due`・shutdown 系)、wasmtime 配線と `HostCtx` の分離 |
 | 6 | 仕上げ | journal 等の中規模ファイルを同じ作法に揃える。温存していた旧パス `pub use` を一括削除し、`use` 文を新パスへ置換。モジュールドキュメント整備 |
