@@ -2,10 +2,10 @@
 id: select-retain-085r
 title: select 型設定の候補をドライバの retain トピックから動的に引けるようにする
 summary: select の options が manifest 固定のため、インストール環境で決まる候補(COEIROINK の話者一覧など)を設定 UI に出せない / ドライバの retain トピックを候補源にする案 / 未着手
-status: open
+status: closed
 labels: ui
 created: 2026-07-29T13:03:45Z
-updated: 2026-07-29T13:04:23Z
+updated: 2026-07-29T13:27:20Z
 ---
 
 ## 何が困るか
