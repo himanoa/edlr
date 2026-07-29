@@ -1,11 +1,11 @@
 ---
 id: cargo-tauri-build-beforebuildcommand-cwd-khuz
 title: cargo tauri build の beforeBuildCommand が cwd 不一致で失敗する
-summary: beforeBuildCommand の `pnpm --dir frontend build` が cwd=ui/frontend で実行され ui/frontend/frontend を探して ENOENT / Makefile ではフック無効化で回避済み・conf 未修正
-status: open
+summary: before フックの `pnpm --dir frontend` が cwd=ui/frontend で二重パスになり ENOENT / HookCommand オブジェクト形式(script+cwd)に変更して修正済み
+status: closed
 labels: build
 created: 2026-07-29T18:11:35Z
-updated: 2026-07-29T18:11:56Z
+updated: 2026-07-29T18:15:45Z
 ---
 
 ## どこで踏んだか
@@ -38,3 +38,16 @@ tauri-cli (v2.11.4) は before フックを `ui/` ではなく `ui/frontend`(fro
 - もしくは cwd に依存しないよう `pnpm --dir <絶対 or conf 相対の正しいパス>` に統一する
 
 どちらにするかは、普段 `tauri dev` をどこから起動しているかに合わせて決めるのがよさそう。
+
+## 対応(2026-07-30)
+
+`tauri.conf.json` の両フックを HookCommand オブジェクト形式に変更して修正:
+
+```json
+"beforeBuildCommand": { "script": "pnpm build", "cwd": "../frontend" }
+```
+
+(`beforeDevCommand` も同様)。`cwd` は tauri.conf.json のディレクトリ基準で
+解決されることを、`ui/` と `ui/src-tauri/` の両方から `cargo tauri build
+--no-bundle` を実行して確認済み。どこから起動しても `ui/frontend` で
+`pnpm build` が走る。
