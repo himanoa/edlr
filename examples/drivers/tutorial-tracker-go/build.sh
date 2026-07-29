@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # tutorial-tracker を wasm コンポーネントへビルドする。
 #
-# ビルド対象の world は `plugin` ではなく `driver-guest`(= `plugin` に WASI の
-# import 一式を足したもの)。Go/TinyGo の標準ライブラリは、プラグインが何も
-# 呼ばなくても WASI を import するため、`plugin` を直接対象にするとコンポーネント
-# 化が失敗する。詳細は docs/plugin-tutorial-tinygo.md の 6 章を参照。
+# ビルド対象の world は `driver` ではなく `driver-guest`(= `driver` に WASI の
+# import 一式を足したもの)。Go/TinyGo の標準ライブラリは、ドライバが何も
+# 呼ばなくても WASI を import するため、`driver` を直接対象にするとコンポーネント
+# 化が失敗する。バインディングの生成は逆に `--world driver` で行う。
+# 詳細は docs/plugin-tutorial-tinygo.md の 6 章を参照。
 #
 # 必要なもの:
 #   - TinyGo 0.34 以降(https://tinygo.org、0.41.1 で確認)
