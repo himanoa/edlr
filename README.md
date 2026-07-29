@@ -64,17 +64,26 @@ cd ui/src-tauri && cargo tauri dev
 The Tauri app spawns the daemon automatically if it is not already running.
 See [docs/ui.md](docs/ui.md) for details.
 
-### Try a plugin
+### Write a plugin
 
-`examples/plugins/hello-logger` is a minimal plugin that logs the events it
-subscribes to. Build it, drop it into `~/.config/edlr/plugins/`, and restart
-the daemon — the walkthrough is in
-[docs/plugins.md](docs/plugins.md#hello-logger-サンプルのビルドと配置).
+Step-by-step tutorials take you from an empty directory to a plugin that
+filters on settings, calls an HTTP API, runs on a schedule, and talks to a
+driver you wrote yourself: [docs/plugin-tutorial-rust.md](docs/plugin-tutorial-rust.md)
+(Rust) and [docs/plugin-tutorial-tinygo.md](docs/plugin-tutorial-tinygo.md)
+(TinyGo). Elite Dangerous is not needed — the Journal is a text file you can
+write yourself.
+
+For a smaller taste, `examples/plugins/hello-logger` is a minimal plugin that
+logs the events it subscribes to; build it, drop it into
+`~/.config/edlr/plugins/`, and restart the daemon
+([docs/plugins.md](docs/plugins.md#hello-logger-サンプルのビルドと配置)).
 
 ## Documentation
 
 | Document | Contents |
 | --- | --- |
+| [docs/plugin-tutorial-rust.md](docs/plugin-tutorial-rust.md) | Tutorial: writing a plugin in Rust, from scratch to bus integration |
+| [docs/plugin-tutorial-tinygo.md](docs/plugin-tutorial-tinygo.md) | The same tutorial in TinyGo |
 | [docs/cli.md](docs/cli.md) | CLI flags, journal read-position persistence, the `replay` flag |
 | [docs/plugins.md](docs/plugins.md) | Plugin system: WIT interface, `manifest.toml`, plugin layout, settings RPC |
 | [docs/capabilities.md](docs/capabilities.md) | Capabilities and approval flow: HTTP (`driver-http`), sidecar processes (`driver-process`), filesystem access (`driver-fs`) |
@@ -94,7 +103,8 @@ Documentation under `docs/` is currently written in Japanese.
 - `ui/` — GUI client: `frontend/` (React + Vite SPA) and `src-tauri/`
   (thin Tauri 2 shell)
 - `examples/` — sample plugins (`hello-logger`, `state-reader`,
-  `inara-uploader`) and drivers (`ed-state`)
+  `inara-uploader`, `tutorial-jump-log-{rs,go}`) and drivers (`ed-state`,
+  `tutorial-tracker-{rs,go}`)
 - `scripts/` — `install-examples.sh` builds the bundled plugins/drivers and
   installs them into the daemon's `plugins-dir` / `drivers-dir`
 

@@ -26,7 +26,7 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 #
 # 種別:
 #   rust-plugin / rust-driver -- cargo で wasm32-wasip2 向けにビルドする
-#   go-plugin                 -- 同梱の build.sh(TinyGo)を使う
+#   go-plugin / go-driver     -- 同梱の build.sh(TinyGo)を使う
 #
 # ここに載っていない `examples/plugins/*`(busy-loop / init-trap / memory-hog /
 # http-caller / hello-logger)は manifest.toml を持たないテスト用フィクスチャで、
@@ -35,6 +35,10 @@ COMPONENTS=(
   "state-reader|rust-plugin|examples/plugins/state-reader|state_reader.wasm|plugin.wasm"
   "inara-uploader|go-plugin|examples/plugins/inara-uploader|plugin.wasm|plugin.wasm"
   "ed-state|rust-driver|examples/drivers/ed-state|ed_state.wasm|driver.wasm"
+  "tutorial-jump-log-rs|rust-plugin|examples/plugins/tutorial-jump-log-rs|tutorial_jump_log.wasm|plugin.wasm"
+  "tutorial-tracker-rs|rust-driver|examples/drivers/tutorial-tracker-rs|tutorial_tracker.wasm|driver.wasm"
+  "tutorial-jump-log-go|go-plugin|examples/plugins/tutorial-jump-log-go|plugin.wasm|plugin.wasm"
+  "tutorial-tracker-go|go-driver|examples/drivers/tutorial-tracker-go|driver.wasm|driver.wasm"
 )
 
 config_home="${XDG_CONFIG_HOME:-$HOME/.config}"
@@ -70,11 +74,11 @@ usage() {
 }
 
 list_components() {
-  printf '%-16s %-12s %s\n' NAME KIND SOURCE
+  printf '%-22s %-12s %s\n' NAME KIND SOURCE
   local entry name kind dir
   for entry in "${COMPONENTS[@]}"; do
     IFS='|' read -r name kind dir _ _ <<<"$entry"
-    printf '%-16s %-12s %s\n' "$name" "$kind" "$dir"
+    printf '%-22s %-12s %s\n' "$name" "$kind" "$dir"
   done
 }
 
@@ -130,7 +134,7 @@ install_component() {
         built="$(build_rust "$dir" "$artifact")"
       fi
       ;;
-    go-plugin)
+    go-plugin|go-driver)
       if [[ $dry_run -eq 1 ]]; then
         echo "    (dry-run) ./build.sh (in $dir)"
         built="$src/$artifact"
@@ -150,8 +154,8 @@ install_component() {
   # ドライバは drivers/、プラグインは plugins/ 配下。
   local dest_parent
   case "$kind" in
-    rust-driver) dest_parent="$prefix/drivers" ;;
-    *)           dest_parent="$prefix/plugins" ;;
+    rust-driver|go-driver) dest_parent="$prefix/drivers" ;;
+    *)                     dest_parent="$prefix/plugins" ;;
   esac
   local dest="$dest_parent/$name"
 
@@ -162,8 +166,8 @@ install_component() {
   # マニフェスト(プラグインは manifest.toml、ドライバは driver.toml)。
   local descriptor
   case "$kind" in
-    rust-driver) descriptor="driver.toml" ;;
-    *)           descriptor="manifest.toml" ;;
+    rust-driver|go-driver) descriptor="driver.toml" ;;
+    *)                     descriptor="manifest.toml" ;;
   esac
   [[ -f "$src/$descriptor" || $dry_run -eq 1 ]] || die "$dir/$descriptor が無い"
   run cp "$src/$descriptor" "$dest/$descriptor"

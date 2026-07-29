@@ -1,5 +1,10 @@
 # プラグイン
 
+**初めてプラグインを書くなら、先に手順を追う形の入門を読むとよい**:
+[plugin-tutorial-rust.md](plugin-tutorial-rust.md)(Rust)/
+[plugin-tutorial-tinygo.md](plugin-tutorial-tinygo.md)(TinyGo)。
+この文書は書き上げた後に仕様を引くためのリファレンスである。
+
 `edlr` は起動時に `--plugins-dir` 配下を走査し、見つかった各プラグイン(WASM
 コンポーネント)をロードして専用スレッドで駆動する。プラグインホスト
 (wasmtime エンジン)の初期化に失敗した場合はその旨を warn ログに出し、
