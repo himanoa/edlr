@@ -2,10 +2,10 @@
 id: info-host-log-debug-efeq
 title: デーモンのログレベルが INFO 固定で host-log の debug がどこにも出ない
 summary: デーモンが LevelFilter::INFO を固定で掛けており RUST_LOG が効かないため、プラグインの host-log debug が stderr にも GUI にも出ない / 未着手
-status: open
+status: closed
 labels: 
 created: 2026-07-29T07:03:44Z
-updated: 2026-07-29T07:04:17Z
+updated: 2026-07-29T07:53:14Z
 ---
 
 ## 現象
