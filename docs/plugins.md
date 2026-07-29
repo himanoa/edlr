@@ -67,7 +67,7 @@ WIT パッケージは `edlr:plugin@0.4.0`。
 | `description` | | 説明文(省略可) |
 | `entry` | ✓ | `plugins-dir/<id>/` からの相対パスで wasm ファイルを指す |
 | `events` | | 購読するイベント名の配列。`"*"` は全 journal イベント、`"status"` は Status.json 更新にマッチ(省略時は空 = 何も受け取らない) |
-| `[[settings]]` | | 設定項目。`type` は `boolean` / `string` / `number` / `select` / `secret` のいずれかで、それぞれ `key` / `label` / `default`(select はさらに `options`)を持つ。`secret` だけは `default` を取らない(下記) |
+| `[[settings]]` | | 設定項目。`type` は `boolean` / `string` / `number` / `select` / `secret` / `map` のいずれかで、それぞれ `key` / `label` / `default`(select はさらに `options`)を持つ。`secret` と `map` は `default` を取らない(下記) |
 | `[[capabilities]]` | | HTTP 通信の要求([capabilities.md](capabilities.md#capabilitydriver-http)) |
 | `[[sidecar]]` | | サイドカープロセスの要求([capabilities.md](capabilities.md#サイドカープロセスdriver-process)) |
 | `[[filesystem]]` | | ファイルアクセスの要求([capabilities.md](capabilities.md#ファイルアクセスdriver-fs)) |
@@ -125,6 +125,30 @@ API キーのように UI から読み出せてはいけない設定はこの型
 **ディスク上は平文である**。`<settings-dir>/<id>.json` の保護は OS の
 パーミッションに委ねており、OS のキーリング等との連携は未対応。この型が守るのは
 「UI や RPC 越しに秘密情報が読み出せてしまう」経路。
+
+### 項目が増減する設定(`type = "map"`)
+
+「システム名 → 表示名」の置き換え表のように、**何件になるかがユーザー次第**の
+設定はこの型で宣言する。UI に行の追加・削除ボタンが出て、キーと値のペアを
+その場で増やせる。
+
+    [[settings]]
+    key = "aliases"
+    label = "表示名の置き換え"
+    type = "map"
+
+- 値は **`string -> string` の JSON オブジェクト**に限る。値に数値・真偽値・
+  入れ子のオブジェクトは書けない(受け取る側が行ごとに形を場合分けせずに
+  済むようにするため。必要になれば後から広げられる)
+- **`default` を書けない**(書くとマニフェストのロードが失敗する)。何件の
+  ペアが要るかを決めるのはユーザーなので、値は常に空オブジェクト `{}` から
+  始まる
+- **キー名に制約は課さない**(空白や記号を含んでよい)。ただし**空文字列の
+  キーは拒否する**。UI 側でも、キーが空の行は保存対象から外し、キーが重複
+  している間は保存せずその場で報せる
+- プラグインへは `host-settings.get-all` の JSON にそのままオブジェクトとして
+  載る(`{"aliases": {"Sol": "太陽系"}}`)。`secret` と違い読み出し応答からも
+  隠されない
 
 ## スケジュール(`[[schedule]]`)
 

@@ -62,6 +62,11 @@ pub enum SettingsError {
     TypeMismatch { key: String, expected: &'static str },
     /// Select フィールドの値が `options` に含まれていない。
     NotAnOption { key: String, value: String },
+    /// Map フィールドのエントリに空文字列のキーが含まれている。
+    /// `TypeMismatch` と分けているのは、UI で「行を足したが名前を入力して
+    /// いない」という具体的な状況を、型違いと同じ文言で報せると直しようが
+    /// ないため(キー名にそれ以外の制約は課さない)。
+    EmptyMapKey { key: String },
     /// ディレクトリ作成やファイル書き込みに失敗した。
     Io(std::io::Error),
     /// 保存直前の JSON シリアライズに失敗した。
@@ -80,6 +85,9 @@ impl fmt::Display for SettingsError {
                     f,
                     "settings key {key} value {value:?} is not one of the allowed options"
                 )
+            }
+            SettingsError::EmptyMapKey { key } => {
+                write!(f, "settings key {key} must not contain an empty entry key")
             }
             SettingsError::Io(e) => write!(f, "failed to write settings: {e}"),
             SettingsError::Serialize(e) => write!(f, "failed to serialize settings: {e}"),
@@ -145,6 +153,27 @@ impl SettingsStore {
                         key: key.clone(),
                         value: s.to_string(),
                     });
+                }
+            }
+            // `string -> string` に限る。値に number/bool/入れ子を許すと、
+            // プラグイン側が受け取る形が行ごとに変わってしまう。
+            SettingField::Map { key, .. } => {
+                let Some(entries) = value.as_object() else {
+                    return Err(SettingsError::TypeMismatch {
+                        key: key.clone(),
+                        expected: "map",
+                    });
+                };
+                for (entry_key, entry_value) in entries {
+                    if entry_key.is_empty() {
+                        return Err(SettingsError::EmptyMapKey { key: key.clone() });
+                    }
+                    if !entry_value.is_string() {
+                        return Err(SettingsError::TypeMismatch {
+                            key: key.clone(),
+                            expected: "map",
+                        });
+                    }
                 }
             }
         }
@@ -298,6 +327,151 @@ mod tests {
             label: "API Key".into(),
         });
         manifest
+    }
+
+    /// `sample_manifest` に `map` 型を 1 件足したもの。
+    fn manifest_with_map() -> Manifest {
+        let mut manifest = sample_manifest();
+        manifest.settings.push(SettingField::Map {
+            key: "aliases".into(),
+            label: "Aliases".into(),
+        });
+        manifest
+    }
+
+    #[test]
+    fn map_defaults_to_an_empty_object_and_stores_string_pairs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = SettingsStore::new(tmp.path().join("settings"));
+        let manifest = manifest_with_map();
+
+        assert_eq!(
+            store.effective(&manifest).get("aliases"),
+            Some(&serde_json::json!({}))
+        );
+
+        let mut values = serde_json::Map::new();
+        values.insert(
+            "aliases".into(),
+            serde_json::json!({"Sol": "太陽系", "Shinrarta Dezhra": "本拠"}),
+        );
+        store
+            .update(&manifest, &values)
+            .expect("a string -> string object should be accepted");
+
+        assert_eq!(
+            store.effective(&manifest).get("aliases"),
+            Some(&serde_json::json!({"Sol": "太陽系", "Shinrarta Dezhra": "本拠"}))
+        );
+    }
+
+    #[test]
+    fn map_rejects_non_object_values() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = SettingsStore::new(tmp.path().join("settings"));
+        let manifest = manifest_with_map();
+
+        for bad in [
+            serde_json::json!("Sol=太陽系"),
+            serde_json::json!(["Sol", "太陽系"]),
+            serde_json::json!(42),
+        ] {
+            let mut values = serde_json::Map::new();
+            values.insert("aliases".into(), bad.clone());
+            let err = store
+                .update(&manifest, &values)
+                .expect_err("a non-object value should be rejected for a map field");
+            assert!(
+                matches!(
+                    err,
+                    SettingsError::TypeMismatch { ref key, expected: "map" } if key == "aliases"
+                ),
+                "{bad} should be a map type mismatch, got: {err}"
+            );
+        }
+    }
+
+    /// 値に文字列以外(number/bool/入れ子)を許さない。
+    #[test]
+    fn map_rejects_non_string_values() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = SettingsStore::new(tmp.path().join("settings"));
+        let manifest = manifest_with_map();
+
+        for bad in [
+            serde_json::json!({"a": 1}),
+            serde_json::json!({"a": true}),
+            serde_json::json!({"a": {"b": "c"}}),
+            serde_json::json!({"a": null}),
+        ] {
+            let mut values = serde_json::Map::new();
+            values.insert("aliases".into(), bad.clone());
+            let err = store
+                .update(&manifest, &values)
+                .expect_err("a non-string map value should be rejected");
+            assert!(
+                matches!(
+                    err,
+                    SettingsError::TypeMismatch { ref key, expected: "map" } if key == "aliases"
+                ),
+                "{bad} should be a map type mismatch, got: {err}"
+            );
+        }
+    }
+
+    /// キー名に制約は課さないが、空文字列キーだけは弾く(UI 上で行を
+    /// 消したのか未入力なのか区別がつかなくなるため)。
+    #[test]
+    fn map_rejects_an_empty_key() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = SettingsStore::new(tmp.path().join("settings"));
+        let manifest = manifest_with_map();
+
+        let mut values = serde_json::Map::new();
+        values.insert("aliases".into(), serde_json::json!({"": "太陽系"}));
+
+        let err = store
+            .update(&manifest, &values)
+            .expect_err("an empty map key should be rejected");
+        assert!(
+            matches!(err, SettingsError::EmptyMapKey { ref key } if key == "aliases"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn map_accepts_an_empty_object_to_clear_every_entry() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = SettingsStore::new(tmp.path().join("settings"));
+        let manifest = manifest_with_map();
+
+        let mut values = serde_json::Map::new();
+        values.insert("aliases".into(), serde_json::json!({"Sol": "太陽系"}));
+        store.update(&manifest, &values).unwrap();
+
+        let mut cleared = serde_json::Map::new();
+        cleared.insert("aliases".into(), serde_json::json!({}));
+        store
+            .update(&manifest, &cleared)
+            .expect("clearing every entry should be allowed");
+
+        assert_eq!(
+            store.effective(&manifest).get("aliases"),
+            Some(&serde_json::json!({}))
+        );
+    }
+
+    /// `map` は秘密情報ではない(読み出し応答から消えない)。
+    #[test]
+    fn map_values_are_visible_in_read_responses() {
+        let manifest = manifest_with_map();
+        let mut values = serde_json::Map::new();
+        values.insert("aliases".into(), serde_json::json!({"Sol": "太陽系"}));
+
+        let (visible, configured) = split_secrets(&manifest, values.clone());
+
+        assert_eq!(visible, values);
+        assert!(configured.is_empty());
     }
 
     #[test]
