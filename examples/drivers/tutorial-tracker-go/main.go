@@ -39,7 +39,8 @@ func onMessage(from string, topic string, payload cm.List[uint8]) {
 
 	system := string(payload.Slice())
 	count++
-	// デーモンのログレベルは INFO 固定なので、debug では何も見えない。
+	// 動作確認に使うログなので info。デーモンの既定ログレベルは info で、
+	// debug は `RUST_LOG=debug` を付けたときだけ出る。
 	hostlog.Log(hostlog.LevelInfo,
 		fmt.Sprintf("visit #%d from %s: %s", count, from, system))
 

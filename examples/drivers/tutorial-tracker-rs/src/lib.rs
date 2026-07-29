@@ -38,7 +38,8 @@ impl Guest for Component {
             *c += 1;
             *c
         });
-        // デーモンのログレベルは INFO 固定なので、debug では何も見えない。
+        // 動作確認に使うログなので info。デーモンの既定ログレベルは info で、
+        // debug は `RUST_LOG=debug` を付けたときだけ出る。
         host_log::log(
             host_log::Level::Info,
             &format!("visit #{count} from {from}: {system}"),

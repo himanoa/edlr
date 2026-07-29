@@ -20,6 +20,9 @@ impl Guest for Component {
         if topic != "set-system" {
             return;
         }
+        // 1 メッセージごとに出る追跡用のログなので debug。デーモンの既定
+        // ログレベルは info なので、これを見るには `RUST_LOG=debug` を付けて
+        // デーモンを起動する(docs/plugins.md の「ログレベル」参照)。
         host_log::log(
             host_log::Level::Debug,
             &format!("system update from {from}"),

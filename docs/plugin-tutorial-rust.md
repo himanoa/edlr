@@ -231,9 +231,12 @@ INFO edlr_core::plugin::host: jumped to Sol (8.19 ly) plugin_id="tutorial-jump-l
 1 行目の `events=1` などは manifest の読み取り結果。**宣言したはずの項目が
 0 になっていたら、そこが読めていない**(綴り違いなど)。
 
-**`host-log` の `Debug` はどこにも出ない。** デーモンのログレベルは INFO 固定で
-(`RUST_LOG` も効かない)、GUI へ転送されるのも INFO 以上。動作確認に使う
-ログは `Info` 以上で出すこと。
+**`host-log` の `Debug` は既定では出ない。** デーモンのログレベルは既定 `info`
+で、stderr にも GUI にも `Info` 以上しか出ない。`Debug` も見たいなら
+`RUST_LOG=debug` を付けてデーモンを起動する(閾値は stderr と GUI で共通なので
+GUI の Logs 画面にも出る)。詳しくは
+[plugins.md の「ログレベル」](plugins.md#ログレベルhost-log)。
+このチュートリアルでは `RUST_LOG` 無しで確認できるよう `Info` を使う。
 
 ### うまくいかないとき
 
