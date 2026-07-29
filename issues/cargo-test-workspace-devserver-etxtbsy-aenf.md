@@ -4,7 +4,8 @@ title: cargo test --workspace が devserver のテストで ETXTBSY で落ちる
 summary: tempdir に書いた sh スクリプトを spawn する devserver のテストが、他スレッドの fork と競合して Text file busy で落ちる(単体実行では通る) / 未着手
 status: open
 labels: flaky-test
-updated: 2026-07-29T07:53:14Z
+created: 2026-07-29T07:52:47Z
+updated: 2026-07-29T07:53:24Z
 ---
 
 ## 現象
