@@ -69,8 +69,9 @@ func onEvent(ev plugin.Event) {
 		return
 	}
 	if jump.Distance < settings.MinDistance {
-		// debug ではなく info。デーモンのログレベルは INFO 固定で、debug は
-		// どこにも出ない(チュートリアル 2 章の「確認する」参照)。
+		// debug ではなく info。デーモンの既定ログレベルは info なので、debug に
+		// すると `RUST_LOG=debug` 無しでは見えない
+		// (チュートリアル 2 章の「確認する」参照)。
 		logf(hostlog.LevelInfo, "skipping %s (%.2f ly < %.2f ly)",
 			jump.System, jump.Distance, settings.MinDistance)
 		return

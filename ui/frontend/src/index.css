@@ -278,6 +278,9 @@ body {
 
 /* Logs: デーモンログ行 */
 .log-level { min-width: 3.2rem; text-transform: uppercase; font-size: 0.75rem; }
+/* debug/trace は RUST_LOG=debug のときだけ届く(既定は info 以上) */
+.log-level-trace { color: #6d7a86; }
+.log-level-debug { color: #8f9aa6; }
 .log-level-info { color: #7fb3d8; }
 .log-level-warn { color: #e0b429; }
 .log-level-error { color: #e05555; }

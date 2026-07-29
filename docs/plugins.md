@@ -47,6 +47,36 @@ WIT パッケージは `edlr:plugin@0.4.0`。
 `wit_bindgen::generate!` がパス指定なら自動追随、Go/TinyGo は
 `wit-bindgen-go generate` での `gen/` 再生成が必要)。
 
+## ログレベル(`host-log`)
+
+プラグイン/ドライバが `host-log` に出したログは、そのままデーモンの
+`tracing` イベントになる(`core/src/plugin/host.rs`)。WIT のレベルは
+1 対 1 で対応する:
+
+| `host-log` のレベル | デーモンのログ |
+| --- | --- |
+| `error` | `ERROR` |
+| `warn` | `WARN` |
+| `info` | `INFO` |
+| `debug` | `DEBUG` |
+
+**既定では `info` 以上だけが出る。** 閾値は環境変数 `RUST_LOG` で上書きでき、
+`RUST_LOG` が未設定・空・書式不正のときは `info` にフォールバックする
+(ログ指定のミスで起動できなくなることはない)。
+
+    # プラグインの debug ログまで出す
+    RUST_LOG=debug cargo run -p edlr-core --bin edlr -- --journal-dir <PATH>
+
+    # プラグインホストのログだけ debug、他は info のまま
+    RUST_LOG=info,edlr_core::plugin::host=debug cargo run -p edlr-core --bin edlr
+
+閾値はデーモンのレジストリ全体に掛かるので、**stderr と GUI の Logs 画面は
+必ず同じものを見る**。`RUST_LOG=debug` を付ければ GUI にも debug 行が出る。
+
+プラグイン単位でレベルを変える口は今のところ無い(`RUST_LOG` の
+ターゲット指定はホスト側モジュール名に対するもので、プラグイン id では
+絞れない)。
+
 ## plugins-dir のレイアウト
 
     <plugins-dir>/

@@ -76,8 +76,9 @@ impl Guest for Component {
             return;
         }
         if distance < settings.min_distance {
-            // debug ではなく info。デーモンのログレベルは INFO 固定で、
-            // debug はどこにも出ない(チュートリアル 2 章の「確認する」参照)。
+            // debug ではなく info。デーモンの既定ログレベルは info なので、
+            // debug にすると `RUST_LOG=debug` 無しでは見えない
+            // (チュートリアル 2 章の「確認する」参照)。
             host_log::log(
                 host_log::Level::Info,
                 &format!("skipping {system} ({distance:.2} ly < {:.2} ly)", settings.min_distance),

@@ -59,15 +59,19 @@ struct Args {
 
 #[tokio::main]
 async fn main() {
-    // stderr への従来の fmt 出力に加え、GUI(WS クライアント)へ INFO 以上を
-    // 転送する LogLayer を重ねる(`edlr_core::logs` 参照)。レジストリ全体に
-    // INFO フィルタを掛けるのは、従来の `fmt().init()` の既定(INFO 以上)を
-    // 保つため。
+    // stderr への従来の fmt 出力に加え、GUI(WS クライアント)へログを転送する
+    // LogLayer を重ねる(`edlr_core::logs` 参照)。
+    //
+    // 閾値はレジストリ全体に掛ける `env_filter()` ただ一箇所で決まる:
+    // 既定は従来どおり info、`RUST_LOG` があればそれで上書きする。stderr と
+    // GUI で閾値を分けていないので、`RUST_LOG=debug` を付ければプラグインの
+    // `host-log` debug が両方に出る(以前は INFO 固定で、WIT にある debug
+    // レベルが黙って捨てられていた -- issue `info-host-log-debug-efeq`)。
     use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::util::SubscriberInitExt;
     let (log_layer, log_rx) = edlr_core::logs::log_channel();
     tracing_subscriber::registry()
-        .with(tracing_subscriber::filter::LevelFilter::INFO)
+        .with(edlr_core::logs::env_filter())
         .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
         .with(log_layer)
         .init();
