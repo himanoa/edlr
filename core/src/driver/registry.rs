@@ -19,13 +19,13 @@ use crate::driver::host::DriverHost;
 use crate::driver::manifest::DriverManifest;
 use crate::plugin::filesystem::{FilesystemConfig, FilesystemConfigStore};
 use crate::plugin::grants::{GrantState, GrantsError, GrantsStore};
-use crate::plugin::host::capabilities_json_string;
 use crate::plugin::registry::{FilesystemInfo, RegistryError, SidecarAction, SidecarInfo};
 use crate::plugin::settings::{SettingsError, SettingsStore};
 use crate::plugin::sidecar::{SidecarConfig, SidecarConfigStore};
-use crate::plugin::sidecar_runtime::{implicit_http_hosts, parse_sidecars, SidecarRuntimeEntry};
 use crate::registry::entries::{EntryTable, IdLocks};
 use crate::registry::filesystem::DiskFilesystemService;
+use crate::registry::grants::DiskGrantService;
+use crate::registry::settings::DiskSettingsService;
 use crate::registry::sidecar::DiskSidecarService;
 
 /// ドライバ 1 件の現在の駆動状態。`crate::plugin::registry::PluginState` と対称。
@@ -87,6 +87,27 @@ impl fmt::Display for DriverRegistryError {
 
 impl std::error::Error for DriverRegistryError {}
 
+/// `registry::settings::SettingsService`/`registry::grants::GrantService`
+/// (共通実装、`RegistryError` を返す)から `DriverRegistryError` への写像。
+/// `values`/`set_values`/`set_capabilities` の wrapper 3箇所で使う
+/// (タスクブリーフのとおり、エラー enum 写像は wrapper 側の責務)。
+///
+/// 呼び出し元はいずれも `E::Subject::unknown_error` を通じて
+/// `RegistryError::UnknownDriver` を返す `DriverEntry`(`RegistrySubject` for
+/// `DriverManifest`)越しに使われているため、ここで実際に来るのは
+/// `UnknownDriver`/`Settings`/`Grants` の3種類だけ。
+fn to_driver_error(err: RegistryError) -> DriverRegistryError {
+    match err {
+        RegistryError::UnknownDriver(id) => DriverRegistryError::UnknownDriver(id),
+        RegistryError::Settings(e) => DriverRegistryError::Settings(e),
+        RegistryError::Grants(e) => DriverRegistryError::Grants(e),
+        other => unreachable!(
+            "settings/grant サービスは driver 側では UnknownDriver/Settings/Grants しか \
+             返さないはず: {other}"
+        ),
+    }
+}
+
 /// 起動中ドライバ一覧の共有ビュー。`crate::plugin::registry::Registry` と対称。
 ///
 /// 内部で `DriverHost` の `Arc` も保持している。理由は `Registry` が
@@ -108,20 +129,24 @@ pub struct DriverRegistry {
     /// `crate::plugin::registry::Registry` と同じ
     /// `registry::sidecar::SidecarService` を `RegistrySubject`
     /// (`DriverManifest`)越しに共有する(Phase 4 タスク6で統合)。
-    /// `capabilities_lock` のみ、下のフィールドとして `DriverRegistry` 自身
-    /// にも残す(`set_capabilities` が使うのと**同一の** `Arc` をこの
-    /// サービスにも注入している)。
+    /// `capabilities_lock`(`new` 内のローカル変数)の `Arc` は `grant_service`
+    /// にも同一のものを注入している(`registry::grants::GrantService` の
+    /// ドキュメントコメント参照。`Registry` 自身はこの `Arc` をフィールドとし
+    /// ては保持しない -- `crate::plugin::registry::Registry` と同じ流儀)。
     sidecar_service: DiskSidecarService<DriverEntry>,
+    /// capability 承認群(`set_capabilities` / `effective_hosts`)の実体。
+    /// `crate::plugin::registry::Registry` と同じ
+    /// `registry::grants::GrantService` を `SidecarEntry`(`DriverEntry`)越しに
+    /// 共有する(Phase 4 タスク8で統合)。dashboard 群はこのインスタンスでは
+    /// 使わない(`GrantService<G, PluginEntry>` 限定の impl のため呼べない)。
+    grant_service: DiskGrantService<DriverEntry>,
+    /// settings 群(`values` / `set_values`)の実体。`crate::plugin::registry::Registry`
+    /// と同じ `registry::settings::SettingsService` を `SettingsEntry`
+    /// (`DriverEntry`)越しに共有する(Phase 4 タスク8で統合)。
+    settings_service: DiskSettingsService<DriverEntry>,
     /// プラグイン間バスの実体。`set_disabled` が `disable_driver` を呼ぶために
     /// 保持する。
     bus: Bus,
-    /// `set_capabilities` の「`GrantsStore::set` への永続化」と「共有
-    /// `capabilities_json` バッファへの上書き」を 1 つの臨界区間として直列化
-    /// するロック。理由は `crate::plugin::registry::Registry::capabilities_lock`
-    /// のドキュメントコメントと同じ。`sidecar_service` にも同一の `Arc` を
-    /// 注入している(`registry::sidecar::SidecarService` のドキュメント
-    /// コメント参照)。
-    capabilities_lock: Arc<Mutex<()>>,
     drivers_dir: PathBuf,
 }
 
@@ -153,6 +178,13 @@ impl DriverRegistry {
             capabilities_lock.clone(),
             IdLocks::new(),
         );
+        let grant_service = DiskGrantService::new(
+            entries.clone(),
+            grants_store.clone(),
+            capabilities_lock.clone(),
+            drivers_dir.clone(),
+        );
+        let settings_service = DiskSettingsService::new(entries.clone(), settings_store.clone());
         DriverRegistry {
             entries,
             _host: host,
@@ -160,8 +192,9 @@ impl DriverRegistry {
             grants_store,
             filesystem_service,
             sidecar_service,
+            grant_service,
+            settings_service,
             bus,
-            capabilities_lock,
             drivers_dir,
         }
     }
@@ -216,17 +249,6 @@ impl DriverRegistry {
             .collect()
     }
 
-    /// `id` のドライバの manifest クローンを返す(`entries` ロック保持は
-    /// このルックアップの間だけ)。
-    fn find_manifest(&self, id: &str) -> Result<DriverManifest, DriverRegistryError> {
-        self.entries
-            .find(
-                |entry| entry.manifest.id == id,
-                |entry| entry.manifest.clone(),
-            )
-            .ok_or_else(|| DriverRegistryError::UnknownDriver(id.to_string()))
-    }
-
     /// `id` のドライバの manifest クローンを返す(存在しなければ `None`)。
     pub fn manifest_of(&self, id: &str) -> Option<DriverManifest> {
         self.entries.find(
@@ -236,106 +258,52 @@ impl DriverRegistry {
     }
 
     /// `id` のドライバの effective settings(`SettingsStore` 由来)を返す。
+    /// 実体は `registry::settings::SettingsService::effective`(Phase 4
+    /// タスク8で抽出)。**plugin 側と違い秘密情報を剥がさない**(`split_secrets`
+    /// を適用しない -- Task 1 の pin
+    /// `pin_drivers_set_settings_does_not_strip_secret_value` が防衛)。
     pub fn values(
         &self,
         id: &str,
     ) -> Result<serde_json::Map<String, serde_json::Value>, DriverRegistryError> {
-        let manifest = self.find_manifest(id)?;
-        Ok(self
-            .settings_store
-            .effective(&manifest.as_settings_manifest()))
+        self.settings_service
+            .effective(id)
+            .map(|(_manifest, values)| values)
+            .map_err(to_driver_error)
     }
 
     /// `id` のドライバの settings を検証・永続化し、稼働中ドライバが参照する
-    /// 共有 `settings_json` も新しい effective 値で上書きする。
-    /// `crate::plugin::registry::Registry::set_values` と同じ流儀。
+    /// 共有 `settings_json` も新しい effective 値で上書きする。実体は
+    /// `registry::settings::SettingsService::update_and_effective`(Phase 4
+    /// タスク8で抽出)。plugin 側と違い、戻り値からも秘密情報を剥がさない
+    /// (`values` のドキュメントコメント参照)。
     pub fn set_values(
         &self,
         id: &str,
         values: &serde_json::Map<String, serde_json::Value>,
     ) -> Result<serde_json::Map<String, serde_json::Value>, DriverRegistryError> {
-        let (manifest, settings_json) = self
-            .entries
-            .find(
-                |entry| entry.manifest.id == id,
-                |entry| (entry.manifest.clone(), entry.settings_json.clone()),
-            )
-            .ok_or_else(|| DriverRegistryError::UnknownDriver(id.to_string()))?;
-
-        let settings_manifest = manifest.as_settings_manifest();
-        let effective = self
-            .settings_store
-            .update_and_effective(&settings_manifest, values)
-            .map_err(DriverRegistryError::Settings)?;
-
-        let settings_json_string =
-            serde_json::to_string(&serde_json::Value::Object(effective.clone()))
-                .unwrap_or_else(|_| "{}".to_string());
-        *settings_json
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = settings_json_string;
-
-        Ok(effective)
+        self.settings_service
+            .update_and_effective(id, values)
+            .map(|(_manifest, effective)| effective)
+            .map_err(to_driver_error)
     }
 
     /// `id` のドライバの capability 承認/取消を `GrantsStore` に永続化し、
-    /// 稼働中ドライバが参照する共有 `capabilities_json` も更新する。
-    /// `crate::plugin::registry::Registry::set_capabilities` と同じ流儀
-    /// (承認済みサイドカーの暗黙 127.0.0.1 許可を合流させるのも同様)。
+    /// 稼働中ドライバが参照する共有 `capabilities_json` も更新する。実体は
+    /// `registry::grants::GrantService::set_capabilities`(Phase 4 タスク8で
+    /// 統合。ロック規律・"live な `sidecars_json` バッファを読み再計算はし
+    /// ない"という不変条件のドキュメントは移動先のコメント参照)。
     pub fn set_capabilities(
         &self,
         id: &str,
         granted: bool,
     ) -> Result<GrantState, DriverRegistryError> {
-        let (manifest, capabilities_json, sidecars_json) = self
-            .entries
-            .find(
-                |entry| entry.manifest.id == id,
-                |entry| {
-                    (
-                        entry.manifest.clone(),
-                        entry.capabilities_json.clone(),
-                        entry.sidecars_json.clone(),
-                    )
-                },
-            )
-            .ok_or_else(|| DriverRegistryError::UnknownDriver(id.to_string()))?;
-
-        let _capabilities_guard = self
-            .capabilities_lock
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-
-        let settings_manifest = manifest.as_settings_manifest();
-        let state = self
-            .grants_store
-            .set(&settings_manifest, granted)
-            .map_err(DriverRegistryError::Grants)?;
-
-        let mut effective_hosts = if state.granted {
-            settings_manifest.capability_hosts()
-        } else {
-            Vec::new()
-        };
-        let sidecar_entries: Vec<SidecarRuntimeEntry> = parse_sidecars(
-            &sidecars_json
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner()),
-        )
-        .into_values()
-        .collect();
-        effective_hosts.extend(implicit_http_hosts(&sidecar_entries));
-
-        let capabilities_json_string = capabilities_json_string(&effective_hosts);
-        *capabilities_json
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = capabilities_json_string;
-
-        Ok(state)
+        self.grant_service
+            .set_capabilities(id, granted)
+            .map_err(to_driver_error)
     }
 
-    /// `id` のドライバの manifest クローンを返す(`RegistryError` 版)。
-    /// `find_manifest` と同じルックアップだが、サイドカー/ファイルアクセス
+    /// サイドカー/ファイルアクセス
     /// 系のメソッド群は `crate::plugin::registry::Registry` の対応メソッドと
     /// エラー型を揃えるため(`SidecarInfo`/`FilesystemInfo`/`SidecarAction`/
     /// `RegistryError` は既にプラグイン・ドライバ両レイヤーで共有されている
@@ -1082,7 +1050,9 @@ pub(crate) mod tests {
             manifest,
             state: DriverState::Running,
             settings_json: Arc::new(Mutex::new("{}".to_string())),
-            capabilities_json: Arc::new(Mutex::new(capabilities_json_string(&[]))),
+            capabilities_json: Arc::new(Mutex::new(crate::plugin::host::capabilities_json_string(
+                &[],
+            ))),
             sidecars_json: Arc::new(Mutex::new("[]".to_string())),
             filesystem_json: Arc::new(Mutex::new("[]".to_string())),
         });

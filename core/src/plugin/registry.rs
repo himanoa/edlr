@@ -28,6 +28,7 @@ use crate::registry::bus::DiskBusService;
 use crate::registry::entries::{EntryTable, IdLocks};
 use crate::registry::filesystem::DiskFilesystemService;
 use crate::registry::grants::DiskGrantService;
+use crate::registry::settings::DiskSettingsService;
 use crate::registry::sidecar::DiskSidecarService;
 use crate::registry::supervisor::ThreadSupervisor;
 
@@ -262,7 +263,10 @@ pub struct Registry {
     /// `registry::grants::GrantService`(Phase 4 タスク7で抽出)。
     /// `capabilities_lock` は同一の `Arc` を `sidecar_service` にも注入して
     /// いる(下のフィールドドキュメント参照)。
-    grant_service: DiskGrantService,
+    grant_service: DiskGrantService<PluginEntry>,
+    /// settings 群(`values` / `set_values`)の実体。
+    /// `registry::settings::SettingsService`(Phase 4 タスク8で抽出)。
+    settings_service: DiskSettingsService<PluginEntry>,
     /// プラグイン間バスの実体。`list()` が `options-from` を持つ select の候補を
     /// retain トピックから解決するために保持する
     /// (`crate::plugin::select_options::resolve`)。`Bus` は `Clone` で内部を
@@ -317,6 +321,7 @@ impl Registry {
             capabilities_lock.clone(),
             plugins_dir.clone(),
         );
+        let settings_service = DiskSettingsService::new(entries.clone(), settings_store.clone());
         Registry {
             entries,
             _host: host,
@@ -326,6 +331,7 @@ impl Registry {
             sidecar_service,
             bus_service,
             grant_service,
+            settings_service,
             bus,
             plugins_dir,
             supervisor: ThreadSupervisor::new(),
@@ -556,63 +562,37 @@ impl Registry {
     }
 
     /// `id` のプラグインの effective settings(`SettingsStore` 由来)を返す。
-    ///
-    /// `list()` と同様、`entries` ロックは manifest のクローン取得のみに使い、
-    /// ロックを解放してから `SettingsStore::effective` を呼ぶ。
+    /// 実体は `registry::settings::SettingsService::effective`(Phase 4
+    /// タスク8で抽出)。秘密情報を読み出し応答から落とすのはここ(plugin
+    /// wrapper)の役目 -- driver 側(`crate::driver::registry::DriverRegistry::values`)
+    /// は落とさない(`split_secrets` のドキュメント参照)。
     pub fn values(
         &self,
         id: &str,
     ) -> Result<serde_json::Map<String, serde_json::Value>, RegistryError> {
-        let manifest = self.find_manifest(id)?;
-        // 秘密情報は読み出し応答に載せない(`split_secrets` 参照)。
-        let (visible, _secrets_set) =
-            split_secrets(&manifest, self.settings_store.effective(&manifest));
+        let (manifest, effective) = self.settings_service.effective(id)?;
+        let (visible, _secrets_set) = split_secrets(&manifest, effective);
         Ok(visible)
     }
 
     /// `id` のプラグインの settings を検証・永続化し、稼働中プラグインが参照
-    /// する共有 `settings_json` も新しい effective 値で上書きする。
+    /// する共有 `settings_json` も新しい effective 値で上書きする。実体は
+    /// `registry::settings::SettingsService::update_and_effective`(Phase 4
+    /// タスク8で抽出。ロック規律のドキュメントは移動先参照)。
     ///
     /// 検証(`SettingsStore::update`)に失敗した場合は何も変更されず、
     /// `RegistryError::Settings` を返す。
     ///
-    /// `entries` ロックは manifest と `settings_json` の共有ハンドル
-    /// (`Arc<Mutex<String>>`)を取得する間だけ保持し、
-    /// `SettingsStore::update_and_effective` によるファイル I/O はロックを
-    /// 解放した後に行う。書き込み先の `settings_json` は `Arc` のクローンな
-    /// ので、`entries` ロックを再取得せずに書き込んでも実行中プラグインが
-    /// 参照しているのと同じセルを更新できる。`update_and_effective` は
-    /// `SettingsStore` 内部ロックの下で書き込みと直後の読み出しをまとめて
-    /// 行うため、他スレッドの並行 `set_values` が割り込んでここでの
-    /// `effective` が「自分が書いた値」とずれることはない。
+    /// プラグインへ渡すバッファ(`settings_json`)には秘密情報も含める --
+    /// 渡す相手はそのプラグイン自身なので、ここで落としたら意味が無い
+    /// (`SettingsService::update_and_effective` が書き込む値そのもの)。
+    /// RPC の応答にだけ `split_secrets` で秘密情報を落とす。
     pub fn set_values(
         &self,
         id: &str,
         values: &serde_json::Map<String, serde_json::Value>,
     ) -> Result<serde_json::Map<String, serde_json::Value>, RegistryError> {
-        let (manifest, settings_json) = self
-            .entries
-            .find(
-                |entry| entry.manifest.id == id,
-                |entry| (entry.manifest.clone(), entry.settings_json.clone()),
-            )
-            .ok_or_else(|| RegistryError::UnknownPlugin(id.to_string()))?;
-
-        let effective = self
-            .settings_store
-            .update_and_effective(&manifest, values)
-            .map_err(RegistryError::Settings)?;
-
-        // プラグインへ渡すバッファには秘密情報も含める -- 渡す相手は
-        // そのプラグイン自身なので、ここで落としたら意味が無い。
-        let settings_json_string =
-            serde_json::to_string(&serde_json::Value::Object(effective.clone()))
-                .unwrap_or_else(|_| "{}".to_string());
-        *settings_json
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = settings_json_string;
-
-        // RPC の応答には載せない。
+        let (manifest, effective) = self.settings_service.update_and_effective(id, values)?;
         let (visible, _secrets_set) = split_secrets(&manifest, effective);
         Ok(visible)
     }
@@ -624,17 +604,6 @@ impl Registry {
     /// ない"という不変条件のドキュメントは移動先のコメント参照。
     pub fn set_capabilities(&self, id: &str, granted: bool) -> Result<GrantState, RegistryError> {
         self.grant_service.set_capabilities(id, granted)
-    }
-
-    /// `id` のプラグインの manifest クローンを返す(`entries` ロック保持は
-    /// このルックアップの間だけ)。
-    fn find_manifest(&self, id: &str) -> Result<Manifest, RegistryError> {
-        self.entries
-            .find(
-                |entry| entry.manifest.id == id,
-                |entry| entry.manifest.clone(),
-            )
-            .ok_or_else(|| RegistryError::UnknownPlugin(id.to_string()))
     }
 
     /// `id` のプラグインの `capabilities_json` 共有バッファが現在載せている

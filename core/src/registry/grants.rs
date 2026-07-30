@@ -4,18 +4,30 @@
 //! から抽出した。分析(`docs/superpowers/specs/2026-07-31-phase4-registry-analysis.md`
 //! §5)のとおり、spec 自体には dashboard 群の置き場が無いが、実体は
 //! 「grants(承認の読み書き)+ `is_file` の 1 発チェック」なので、grants と
-//! 同じサービスへ同居させる。`BusService` と同じく、この 2 群は**plugin
-//! 専用**(driver 側の `set_capabilities` 統合は Task 8)なので、
-//! `SidecarEntry` のようなエントリ trait は導入せず `PluginEntry` を具象の
-//! まま持つ(`.claude/rules/trait-di.md` の「必要が実証されたときだけ増やす」)。
+//! 同じサービスへ同居させる。
+//!
+//! タスク8で `set_capabilities`(+ `effective_hosts`)だけを
+//! `registry::sidecar::SidecarEntry` 越しにジェネリック化し、
+//! `crate::driver::registry::DriverRegistry::set_capabilities` もこのサービス
+//! に統合した(driver 版と byte 同一だったのは分析 §3 のとおり: 差は
+//! projection(`RegistrySubject::as_settings_manifest`)とエラー enum 変換の
+//! 2点だけ、どちらも呼び出し側 wrapper の責務)。dashboard 群は引き続き
+//! **plugin 専用**なので、`impl<G: GrantStorage> GrantService<G, PluginEntry>`
+//! に閉じ込めて `PluginEntry` を具象のまま扱う
+//! (`.claude/rules/trait-di.md` の「必要が実証されたときだけ増やす」)。
+//!
+//! `SidecarEntry` を再利用したのは、`manifest()`/`capabilities_json()`/
+//! `sidecars_json()` の3点が `set_capabilities` に必要な面と完全に一致する
+//! ため(新しい entry trait を増やさない)。
 //!
 //! `capabilities_lock` はコンストラクタ注入の共有 `Arc<Mutex<()>>`。plugin 側
-//! `Registry` は、自分自身が `refresh_sidecar_runtime`(`SidecarService` 側に
-//! 移設済み)で使うのと**同一の** `Arc` を、この `GrantService` にも渡す
-//! (`registry::sidecar::SidecarService` のドキュメントコメント参照)。
-//! `set_capabilities` は `capabilities_lock` だけを取り id 別ロックにもその
-//! マップにも触れないため、ロック取得順序(id 別ロック → `capabilities_lock`
-//! の一方向のみ)を保ったまま両者を共存させられる。
+//! `Registry`/driver 側 `DriverRegistry` は、それぞれ自分自身が
+//! `refresh_sidecar_runtime`(`SidecarService` 側)で使うのと**同一の** `Arc`
+//! を、自分の `GrantService` にも渡す(`registry::sidecar::SidecarService`
+//! のドキュメントコメント参照。plugin と driver で `Arc` を共有するわけでは
+//! ない)。`set_capabilities` は `capabilities_lock` だけを取り id 別ロックにも
+//! そのマップにも触れないため、ロック取得順序(id 別ロック →
+//! `capabilities_lock` の一方向のみ)を保ったまま両者を共存させられる。
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -27,28 +39,36 @@ use crate::plugin::registry::{DashboardInfo, PluginEntry, PluginState, RegistryE
 use crate::plugin::sidecar_runtime::{implicit_http_hosts, parse_sidecars, SidecarRuntimeEntry};
 use crate::plugin::{CapabilityRequest, Manifest};
 use crate::registry::entries::EntryTable;
+use crate::registry::sidecar::SidecarEntry;
+use crate::registry::subject::RegistrySubject;
 
 /// capability 承認群(`capabilities` / `set_capabilities` / `effective_hosts`)
 /// と、ダッシュボードウィジェット群(`dashboard` / `set_dashboard_grant` /
 /// `dashboard_widgets_for_ui` / `dashboard_asset_path` / `events_of` /
 /// `build_dashboard_infos`)を束ねるサービス。
 ///
+/// `G: GrantStorage` はディスク実装(`GrantsStore`)を挿すためのジェネリクス。
+/// `E: SidecarEntry` は plugin/driver どちらの `EntryTable` 要素も受け付ける
+/// ためのジェネリクス(`set_capabilities`/`effective_hosts` 用。dashboard 群は
+/// `PluginEntry` 限定 -- 下の `impl` 参照)。
+///
 /// `plugins_dir` は `build_dashboard_infos`/`dashboard_asset_path` の
 /// `is_file()` チェックと entry パス組み立て専用(元の `Registry` から
 /// クローンを受け取る -- `Registry` 自身は `plugins_dir()` アクセサ用に
-/// フィールドを引き続き保持する)。
-pub(crate) struct GrantService<G: GrantStorage> {
-    entries: EntryTable<PluginEntry>,
+/// フィールドを引き続き保持する)。driver 側インスタンスは dashboard 群を
+/// 使わないため実質未使用だが、`drivers_dir` を渡すだけでコストは無い。
+pub(crate) struct GrantService<G: GrantStorage, E: SidecarEntry> {
+    entries: EntryTable<E>,
     grants_store: Arc<G>,
     capabilities_lock: Arc<Mutex<()>>,
     plugins_dir: PathBuf,
 }
 
-/// 手書き `Clone`: `derive(Clone)` は `G` 自体に `Clone` を要求してしまうが、
+/// 手書き `Clone`: `derive(Clone)` は `G`/`E` 自体に `Clone` を要求してしまうが、
 /// 実際に clone が要るのは `Arc`/`EntryTable`/`PathBuf`(いずれも中身の型に
 /// 関わらず `Clone`)だけなので、要らない境界を足さないよう手で書く
 /// (`BusService`/`SidecarService` と同じ理由)。
-impl<G: GrantStorage> Clone for GrantService<G> {
+impl<G: GrantStorage, E: SidecarEntry> Clone for GrantService<G, E> {
     fn clone(&self) -> Self {
         Self {
             entries: self.entries.clone(),
@@ -59,12 +79,13 @@ impl<G: GrantStorage> Clone for GrantService<G> {
     }
 }
 
-/// ディスク実装(`GrantsStore`)を挿した公開面。
-pub(crate) type DiskGrantService = GrantService<crate::plugin::grants::GrantsStore>;
+/// ディスク実装(`GrantsStore`)を挿した公開面。plugin/driver どちらの
+/// `EntryTable` 要素かは呼び出し側が `E` で指定する。
+pub(crate) type DiskGrantService<E> = GrantService<crate::plugin::grants::GrantsStore, E>;
 
-impl<G: GrantStorage> GrantService<G> {
+impl<G: GrantStorage, E: SidecarEntry> GrantService<G, E> {
     pub(crate) fn new(
-        entries: EntryTable<PluginEntry>,
+        entries: EntryTable<E>,
         grants_store: Arc<G>,
         capabilities_lock: Arc<Mutex<()>>,
         plugins_dir: PathBuf,
@@ -78,16 +99,119 @@ impl<G: GrantStorage> GrantService<G> {
     }
 
     /// `id` の manifest クローンを返す(`entries` ロック保持はこの
-    /// ルックアップの間だけ)。`Registry::find_manifest` と同じ流儀。
-    fn find_manifest(&self, id: &str) -> Result<Manifest, RegistryError> {
+    /// ルックアップの間だけ)。未登録 id のエラーは `E::Subject::unknown_error`
+    /// に委ねる(`UnknownPlugin` vs `UnknownDriver`)。
+    fn find_manifest(&self, id: &str) -> Result<E::Subject, RegistryError> {
         self.entries
             .find(
-                |entry| entry.manifest.id == id,
-                |entry| entry.manifest.clone(),
+                |entry| entry.manifest().id() == id,
+                |entry| entry.manifest().clone(),
             )
-            .ok_or_else(|| RegistryError::UnknownPlugin(id.to_string()))
+            .ok_or_else(|| E::Subject::unknown_error(id))
     }
 
+    /// `id` のプラグイン/ドライバの capability 承認/取消を `GrantsStore` に
+    /// 永続化し、稼働中プラグイン/ドライバが参照する共有 `capabilities_json`
+    /// も更新する。
+    ///
+    /// `entries` ロックは manifest と `capabilities_json`/`sidecars_json` の
+    /// 共有ハンドルを取得する間だけ保持し、`GrantsStore::set` のファイル I/O
+    /// はロックを解放した後に行う(他プラグイン/ドライバの
+    /// settings/capabilities 操作や `set_disabled` までブロックしないため)。
+    ///
+    /// 一方で、「ディスクへの永続化」と「共有バッファへの反映」の 2 ステップは
+    /// 同じ呼び出しの中で不可分に行う必要がある。呼び出しごとに
+    /// `capabilities_lock` を取り、`GrantsStore::set` の呼び出しから
+    /// `capabilities_json` バッファへの書き込みまでを 1 つの臨界区間として
+    /// 保持する(交互実行による fail-open な不整合を避ける -- 分析 §6
+    /// リスク2)。
+    ///
+    /// `capabilities_json` は `refresh_sidecar_runtime`(`SidecarService` 側)
+    /// とも書き込み先を共有しており、同じ `capabilities_lock` を取ってから
+    /// 書くので両者の書き込みが交互実行で食い違うことはない
+    /// (`SidecarService::refresh_sidecar_runtime` のドキュメントコメント
+    /// 参照。ロック取得順序は常に「id 別ロック → `capabilities_lock`」の
+    /// 一方向のみで、この関数は `capabilities_lock` だけを取り id 別ロックに
+    /// もそのマップにも触れないため、両者を合わせてもデッドロックしない)。
+    /// この関数自身はサイドカーの設定/承認を変更しないので、現在の
+    /// `sidecars_json` バッファをそのまま読み(**再計算はしない**)、そこから
+    /// 暗黙許可ホストを合流させる。
+    pub(crate) fn set_capabilities(
+        &self,
+        id: &str,
+        granted: bool,
+    ) -> Result<GrantState, RegistryError> {
+        let (subject, capabilities_json, sidecars_json) = self
+            .entries
+            .find(
+                |entry| entry.manifest().id() == id,
+                |entry| {
+                    (
+                        entry.manifest().clone(),
+                        entry.capabilities_json().clone(),
+                        entry.sidecars_json().clone(),
+                    )
+                },
+            )
+            .ok_or_else(|| E::Subject::unknown_error(id))?;
+
+        let _capabilities_guard = self
+            .capabilities_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let settings_manifest = subject.as_settings_manifest();
+        let state = self
+            .grants_store
+            .set(&settings_manifest, granted)
+            .map_err(RegistryError::Grants)?;
+
+        let mut effective_hosts = if state.granted {
+            settings_manifest.capability_hosts()
+        } else {
+            Vec::new()
+        };
+        let sidecar_entries: Vec<SidecarRuntimeEntry> = parse_sidecars(
+            &sidecars_json
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+        )
+        .into_values()
+        .collect();
+        effective_hosts.extend(implicit_http_hosts(&sidecar_entries));
+
+        let capabilities_json_string = capabilities_json_string(&effective_hosts);
+        *capabilities_json
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = capabilities_json_string;
+
+        Ok(state)
+    }
+
+    /// `id` のプラグイン/ドライバの `capabilities_json` 共有バッファが現在
+    /// 載せている実効許可ホストを返す(テスト用アクセサ)。
+    /// `driver-http.send` が実際に参照するのと同じ値。
+    pub(crate) fn effective_hosts(&self, id: &str) -> Result<Vec<String>, RegistryError> {
+        let capabilities_json = self
+            .entries
+            .find(
+                |entry| entry.manifest().id() == id,
+                |entry| entry.capabilities_json().clone(),
+            )
+            .ok_or_else(|| E::Subject::unknown_error(id))?;
+        let raw = capabilities_json
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        Ok(parse_capability_hosts(&raw))
+    }
+}
+
+/// dashboard 群(`capabilities` の読み出しも含む)は **plugin 専用**。
+/// `PluginEntry` に閉じ込めることで、`E::Subject` が常に `Manifest` である
+/// ことを型で保証する(`DashboardInfo`/`CapabilityRequest` は `Manifest` 前提
+/// の型のため)。
+impl<G: GrantStorage> GrantService<G, PluginEntry> {
     /// `manifest.dashboard` の宣言順に `DashboardInfo` を組み立てる。承認は
     /// `GrantsStore::dashboard_state` から、`resolved` は `plugins_dir` 配下の
     /// entry ファイルが実在するかどうかから決める。
@@ -218,119 +342,5 @@ impl<G: GrantStorage> GrantService<G> {
         let manifest = self.find_manifest(id)?;
         let grant_state = self.grants_store.state(&manifest);
         Ok((manifest.capabilities.clone(), grant_state))
-    }
-
-    /// `id` のプラグインの capability 承認/取消を `GrantsStore` に永続化し、
-    /// 稼働中プラグインが参照する共有 `capabilities_json` も更新する。
-    ///
-    /// `entries` ロックは manifest と `capabilities_json` の共有ハンドルを
-    /// 取得する間だけ保持し、`GrantsStore::set` のファイル I/O はロックを
-    /// 解放した後に行う(`set_values` と同じ流儀。`entries` ロックをファイル
-    /// I/O の間保持すると、他プラグインの settings/capabilities 操作や
-    /// `set_disabled` までブロックしてしまうため)。
-    ///
-    /// 一方で、「ディスクへの永続化」と「共有バッファへの反映」の 2 ステップは
-    /// 同じ呼び出しの中で不可分に行う必要がある。呼び出しごとに
-    /// `capabilities_lock` を取り、`GrantsStore::set` の呼び出しから
-    /// `capabilities_json` バッファへの書き込みまでを 1 つの臨界区間として
-    /// 保持する。これが無いと、2 つの同時呼び出し(例: 2 つの RPC クライアントが
-    /// 同じプラグインを同時に許可/取消)が
-    /// `A.set(true) → B.set(false) → B が buffer に false を書く →
-    /// A が buffer に true を書く` のように交互実行され、ディスク上は
-    /// 取消済みなのに稼働中プラグインのバッファは許可済みのまま、という
-    /// fail-open な不整合が起こりうる(このロックはそれぞれの呼び出しの
-    /// 「永続化 + バッファ反映」を丸ごと直列化することで、ディスクとバッファの
-    /// 最終状態が必ず「最後にこの臨界区間を抜けた呼び出し」の結果で一致する
-    /// ことを保証する)。
-    ///
-    /// `GrantsStore` 自身も内部に別の `Mutex<()>` を持つが、それは
-    /// `GrantsStore::set` 単体(ファイル書き込みとその直後の読み出し)の
-    /// アトミック性のためのものであり、バッファ書き込みまでは面倒を見ない。
-    /// そのため `capabilities_lock` は `GrantsStore` の内部ロックとは別に
-    /// `GrantService` 側で持つ(`GrantsStore` に `capabilities_json` の形を
-    /// 知らせたくない、という関心の分離の意味もある)。2 つのロックの取得
-    /// 順序は常に `capabilities_lock` → (`GrantsStore` 内部ロック) の一方向
-    /// のみなのでデッドロックの心配もない。
-    ///
-    /// `capabilities_json` は `refresh_sidecar_runtime`(`SidecarService` 側。
-    /// サイドカーの設定変更・承認変更のたびに、承認済みサイドカーの暗黙
-    /// 127.0.0.1 許可を織り込んで書き直す)とも書き込み先を共有している。
-    /// そちらも同じ `capabilities_lock` を取ってから書くので、「http
-    /// capability の承認/取消」と「サイドカーの設定/承認変更」が同時に
-    /// 起きても、このバッファへの 2 つの書き込みが交互実行で食い違うことは
-    /// ない(`SidecarService::refresh_sidecar_runtime` のドキュメント
-    /// コメント参照。ロック取得順序は常に「id 別ロック(プラグイン単位)→
-    /// `capabilities_lock`」の一方向のみで、この関数は `capabilities_lock`
-    /// だけを取り id 別ロックにもそのマップにも触れないため、両者を合わせても
-    /// デッドロックしない)。この関数自身はサイドカーの設定/承認を変更しない
-    /// ので、現在の `sidecars_json` バッファをそのまま読み(**再計算はしない
-    /// -- 分析 §6 リスク2**)、そこから暗黙許可ホストを合流させる。
-    pub(crate) fn set_capabilities(
-        &self,
-        id: &str,
-        granted: bool,
-    ) -> Result<GrantState, RegistryError> {
-        let (manifest, capabilities_json, sidecars_json) = self
-            .entries
-            .find(
-                |entry| entry.manifest.id == id,
-                |entry| {
-                    (
-                        entry.manifest.clone(),
-                        entry.capabilities_json.clone(),
-                        entry.sidecars_json.clone(),
-                    )
-                },
-            )
-            .ok_or_else(|| RegistryError::UnknownPlugin(id.to_string()))?;
-
-        let _capabilities_guard = self
-            .capabilities_lock
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-
-        let state = self
-            .grants_store
-            .set(&manifest, granted)
-            .map_err(RegistryError::Grants)?;
-
-        let mut effective_hosts = if state.granted {
-            manifest.capability_hosts()
-        } else {
-            Vec::new()
-        };
-        let sidecar_entries: Vec<SidecarRuntimeEntry> = parse_sidecars(
-            &sidecars_json
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner()),
-        )
-        .into_values()
-        .collect();
-        effective_hosts.extend(implicit_http_hosts(&sidecar_entries));
-
-        let capabilities_json_string = capabilities_json_string(&effective_hosts);
-        *capabilities_json
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = capabilities_json_string;
-
-        Ok(state)
-    }
-
-    /// `id` のプラグインの `capabilities_json` 共有バッファが現在載せている
-    /// 実効許可ホストを返す(テスト用アクセサ)。`driver-http.send` が実際に
-    /// 参照するのと同じ値。
-    pub(crate) fn effective_hosts(&self, id: &str) -> Result<Vec<String>, RegistryError> {
-        let capabilities_json = self
-            .entries
-            .find(
-                |entry| entry.manifest.id == id,
-                |entry| entry.capabilities_json.clone(),
-            )
-            .ok_or_else(|| RegistryError::UnknownPlugin(id.to_string()))?;
-        let raw = capabilities_json
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone();
-        Ok(parse_capability_hosts(&raw))
     }
 }
