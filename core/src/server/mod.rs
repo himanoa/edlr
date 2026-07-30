@@ -1,4 +1,4 @@
-use crate::driver::{DriverRegistry, DriverState};
+use crate::driver::DriverRegistry;
 use crate::event::Event;
 use crate::plugin::Registry;
 use crate::router::Router;
@@ -184,149 +184,20 @@ fn handle_drivers_rpc(
     params: &serde_json::Value,
 ) -> Result<serde_json::Value, String> {
     match method {
-        "list" => Ok(serde_json::json!({
-            "driversDir": drivers.drivers_dir().to_string_lossy(),
-            "drivers": drivers.list().into_iter().map(|info| {
-                let mut value = serde_json::json!({
-                    "id": info.manifest.id,
-                    "name": info.manifest.name,
-                    "version": info.manifest.version,
-                    "description": info.manifest.description,
-                    "topics": info.manifest.topics,
-                    "settings": info.manifest.settings,
-                    "values": info.values,
-                    "capabilities": capabilities_result_json(&info.manifest.capabilities, &info.grant_state),
-                    "sidecars": sidecars_result_json(&info.sidecars)["sidecars"],
-                    "filesystem": filesystem_result_json(&info.filesystem)["roots"],
-                });
-                // `plugins/list` と同じ流儀: `reason` は `Disabled` のときだけ
-                // 載せる(`ui/frontend/src/types/plugin.ts` の `reason?: string`、
-                // `Drivers.tsx` の「無効: {driver.reason}」表示が診断情報を
-                // 拾えるように -- 最終レビューで見つかった Minor な取りこぼし。
-                // 以前はここで `state` を文字列に潰すだけで `reason` を運んで
-                // いなかった)。
-                match info.state {
-                    DriverState::Running => {
-                        value["state"] = serde_json::json!("running");
-                    }
-                    DriverState::Disabled { reason } => {
-                        value["state"] = serde_json::json!("disabled");
-                        value["reason"] = serde_json::json!(reason);
-                    }
-                }
-                value
-            }).collect::<Vec<_>>(),
-        })),
-        "get-settings" => {
-            let driver = param_str(params, "driver")?;
-            let values = drivers.values(driver).map_err(|e| e.to_string())?;
-            Ok(serde_json::Value::Object(values))
-        }
-        "set-settings" => {
-            let driver = param_str(params, "driver")?;
-            let values = params
-                .get("values")
-                .and_then(|v| v.as_object())
-                .ok_or_else(|| "params.values must be an object".to_string())?;
-            let updated = drivers
-                .set_values(driver, values)
-                .map_err(|e| e.to_string())?;
-            Ok(serde_json::Value::Object(updated))
-        }
-        "set-capabilities" => {
-            let driver = param_str(params, "driver")?;
-            let granted = params
-                .get("granted")
-                .and_then(|v| v.as_bool())
-                .ok_or_else(|| "params.granted must be a bool".to_string())?;
-            let grant_state = drivers
-                .set_capabilities(driver, granted)
-                .map_err(|e| e.to_string())?;
-            let manifest = drivers
-                .manifest_of(driver)
-                .ok_or_else(|| format!("unknown driver: {driver}"))?;
-            Ok(capabilities_result_json(
-                &manifest.capabilities,
-                &grant_state,
-            ))
-        }
-        "set-sidecar-config" => {
-            let driver = param_str(params, "driver")?;
-            let name = param_str(params, "name")?;
-            let config: crate::plugin::SidecarConfig = serde_json::from_value(
-                params
-                    .get("config")
-                    .cloned()
-                    .ok_or_else(|| "params.config must be an object".to_string())?,
-            )
-            .map_err(|e| format!("params.config is invalid: {e}"))?;
-            let sidecars = drivers
-                .set_sidecar_config(driver, name, &config)
-                .map_err(|e| e.to_string())?;
-            Ok(sidecars_result_json(&sidecars))
-        }
-        "set-sidecar-grant" => {
-            let driver = param_str(params, "driver")?;
-            let name = param_str(params, "name")?;
-            let granted = params
-                .get("granted")
-                .and_then(|v| v.as_bool())
-                .ok_or_else(|| "params.granted must be a bool".to_string())?;
-            let sidecars = drivers
-                .set_sidecar_grant(driver, name, granted)
-                .map_err(|e| e.to_string())?;
-            Ok(sidecars_result_json(&sidecars))
-        }
-        "sidecar-control" => {
-            let driver = param_str(params, "driver")?;
-            let name = param_str(params, "name")?;
-            let action = match param_str(params, "action")? {
-                "start" => crate::plugin::SidecarAction::Start,
-                "stop" => crate::plugin::SidecarAction::Stop,
-                "restart" => crate::plugin::SidecarAction::Restart,
-                other => return Err(format!("unknown action: {other}")),
-            };
-            let sidecars = drivers
-                .control_sidecar(driver, name, action)
-                .map_err(|e| e.to_string())?;
-            Ok(sidecars_result_json(&sidecars))
-        }
-        "set-filesystem-config" => {
-            let driver = param_str(params, "driver")?;
-            let name = param_str(params, "name")?;
-            let config: crate::plugin::FilesystemConfig = serde_json::from_value(
-                params
-                    .get("config")
-                    .cloned()
-                    .ok_or_else(|| "params.config must be an object".to_string())?,
-            )
-            .map_err(|e| format!("params.config is invalid: {e}"))?;
-            let roots = drivers
-                .set_filesystem_config(driver, name, &config)
-                .map_err(|e| e.to_string())?;
-            Ok(filesystem_result_json(&roots))
-        }
-        "set-filesystem-grant" => {
-            let driver = param_str(params, "driver")?;
-            let name = param_str(params, "name")?;
-            let granted = params
-                .get("granted")
-                .and_then(|v| v.as_bool())
-                .ok_or_else(|| "params.granted must be a bool".to_string())?;
-            let roots = drivers
-                .set_filesystem_grant(driver, name, granted)
-                .map_err(|e| e.to_string())?;
-            Ok(filesystem_result_json(&roots))
-        }
+        "list" => rpc_drivers::list(drivers, params),
+        "get-settings" => rpc_drivers::get_settings(drivers, params),
+        "set-settings" => rpc_drivers::set_settings(drivers, params),
+        "set-capabilities" => rpc_drivers::set_capabilities(drivers, params),
+        "set-sidecar-config" => rpc_drivers::set_sidecar_config(drivers, params),
+        "set-sidecar-grant" => rpc_drivers::set_sidecar_grant(drivers, params),
+        "sidecar-control" => rpc_drivers::sidecar_control(drivers, params),
+        "set-filesystem-config" => rpc_drivers::set_filesystem_config(drivers, params),
+        "set-filesystem-grant" => rpc_drivers::set_filesystem_grant(drivers, params),
         other => Err(format!("unknown method: drivers/{other}")),
     }
 }
 
-// `handle_drivers_rpc` が使う分だけ残す(`plugins/*` 側は rpc_plugins.rs に
-// 移った)。
-use crate::rpc::params::param_str;
-use crate::rpc::render::{capabilities_result_json, filesystem_result_json, sidecars_result_json};
-
+mod rpc_drivers;
 mod rpc_plugins;
 
 /// ダッシュボードウィジェット向け SDK。`include_str!` でバイナリに埋め込み、
