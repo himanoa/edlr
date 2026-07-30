@@ -5,7 +5,7 @@ summary: cargo test --workspace 実行時に respawn_notifies_ready_again 等が
 status: open
 labels: flaky-test
 created: 2026-07-30T15:10:34Z
-updated: 2026-07-30T15:11:07Z
+updated: 2026-07-30T20:41:18Z
 ---
 
 ## どこで踏んだか
@@ -33,3 +33,8 @@ ETXTBSY(`cargo-test-workspace-devserver-etxtbsy-aenf`)と同じく
 
 - ポートを OS 任せ(bind 0)にして実ポートを読み取る形へテストを直す
 - あるいは該当テストに `#[serial]` 相当の直列化(既存依存だけで可能な範囲で)
+
+## 追加観測(2026-07-31, Phase 5 セッション)
+
+- `respawn_notifies_ready_again` が full workspace 実行で1回 transient fail(単体再実行でパス)— 既知パターンの再発
+- 新顔: core 統合テスト `sigterm_to_daemon_stops_running_driver_sidecars` も並列 full workspace 実行時に1回だけ transient fail(単体・再実行では安定パス)。driver sidecar の spawn を伴うテストなので同系統(並列 cargo test + プロセス spawn)とみられる。対処するときはこのテストも同じ直し方(bind 0 / 直列化)の対象に含めること
