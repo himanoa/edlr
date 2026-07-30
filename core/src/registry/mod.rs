@@ -5,6 +5,8 @@
 
 use edlr_driver_process::{InstanceStatus, ProcessError, ProcessSpec};
 
+pub(crate) mod entries;
+
 /// サイドカープロセス制御の口。実運用の実装は
 /// [`edlr_driver_process::ProcessDriver`]。
 ///

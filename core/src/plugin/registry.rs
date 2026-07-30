@@ -31,6 +31,7 @@ use crate::plugin::{
     BusRequest, CapabilityRequest, DashboardWidget, FilesystemRequest, Manifest, ScheduleSpec,
     SettingsError, SidecarRequest,
 };
+use crate::registry::entries::{EntryTable, IdLocks};
 
 /// `Registry::shutdown_plugins` が 1 プラグインの `JoinHandle` を待つ上限。
 /// `edlr_config::PLUGIN_ON_STOP_GRACE_SECS` のドキュメントコメント参照
@@ -245,7 +246,7 @@ impl std::error::Error for RegistryError {}
 /// `Registry` を(プラグインを動かし続けたい間は)保持し続ける必要がある。
 #[derive(Clone)]
 pub struct Registry {
-    entries: Arc<Mutex<Vec<PluginEntry>>>,
+    entries: EntryTable<PluginEntry>,
     _host: Arc<PluginHost>,
     settings_store: Arc<SettingsStore>,
     grants_store: Arc<GrantsStore>,
@@ -299,7 +300,7 @@ pub struct Registry {
     /// マップの Mutex にも触れない。したがって「entries → マップの Mutex →
     /// id 別ロック → capabilities_lock」の一方向のみが成立し、循環しないので
     /// デッドロックしない。
-    sidecar_runtime_locks: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
+    sidecar_runtime_locks: IdLocks,
     /// `set_filesystem_config` / `set_filesystem_grant` が呼ぶ
     /// `refresh_filesystem_runtime`(`filesystem_json` の作り直し)の臨界
     /// 区間を **プラグイン ID ごとに** 直列化するロックのマップ。
@@ -319,7 +320,7 @@ pub struct Registry {
     /// もう一方のマップ・id 別ロックを取ることは無く、
     /// `refresh_filesystem_runtime` は `capabilities_json` に触れないため
     /// `capabilities_lock` も取らない。
-    filesystem_runtime_locks: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
+    filesystem_runtime_locks: IdLocks,
     /// `set_bus_grant` が呼ぶ `refresh_bus_runtime`(`bus_json` の作り直し)の
     /// 臨界区間を **プラグイン ID ごとに** 直列化するロックのマップ。
     ///
@@ -331,7 +332,7 @@ pub struct Registry {
     /// を保持し続けてしまう(fail-open)。資源が独立している(バス承認 vs.
     /// プロセス起動/ディレクトリアクセス)以上、分けてもロック順序の一方向性は
     /// 壊れない。
-    bus_runtime_locks: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
+    bus_runtime_locks: IdLocks,
     /// バス接続先の解決状況(`BusInfo::resolved`)を答えるために保持する。
     /// `DriverRegistry` は `Clone` で安価に持ち回れる(`DriverRegistry` 自身の
     /// ドキュメント参照)。
@@ -400,7 +401,7 @@ impl Registry {
         plugins_dir: PathBuf,
     ) -> Self {
         Registry {
-            entries: Arc::new(Mutex::new(Vec::new())),
+            entries: EntryTable::new(),
             _host: host,
             settings_store,
             grants_store,
@@ -408,9 +409,9 @@ impl Registry {
             filesystem_config_store,
             process_driver,
             capabilities_lock: Arc::new(Mutex::new(())),
-            sidecar_runtime_locks: Arc::new(Mutex::new(HashMap::new())),
-            filesystem_runtime_locks: Arc::new(Mutex::new(HashMap::new())),
-            bus_runtime_locks: Arc::new(Mutex::new(HashMap::new())),
+            sidecar_runtime_locks: IdLocks::new(),
+            filesystem_runtime_locks: IdLocks::new(),
+            bus_runtime_locks: IdLocks::new(),
             driver_registry,
             bus,
             plugins_dir,
@@ -584,10 +585,7 @@ impl Registry {
     }
 
     pub(crate) fn push(&self, entry: PluginEntry) {
-        self.entries
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .push(entry);
+        self.entries.push(entry);
     }
 
     /// プラグインを走査した元ディレクトリ。
@@ -597,12 +595,12 @@ impl Registry {
 
     /// 現在登録されている全プラグインの `(manifest, state)` を返す。
     pub fn snapshot(&self) -> Vec<(Manifest, PluginState)> {
-        self.entries
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .iter()
-            .map(|entry| (entry.manifest.clone(), entry.state.clone()))
-            .collect()
+        self.entries.with_entries(|entries| {
+            entries
+                .iter()
+                .map(|entry| (entry.manifest.clone(), entry.state.clone()))
+                .collect()
+        })
     }
 
     /// 現在登録されている全プラグインの `PluginInfo`(manifest・state・
@@ -614,13 +612,12 @@ impl Registry {
     /// れるものを含む)が settings のディスク I/O の間ブロックされないように
     /// するため。
     pub fn list(&self) -> Vec<PluginInfo> {
-        let snapshot: Vec<(Manifest, PluginState)> = self
-            .entries
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .iter()
-            .map(|entry| (entry.manifest.clone(), entry.state.clone()))
-            .collect();
+        let snapshot: Vec<(Manifest, PluginState)> = self.entries.with_entries(|entries| {
+            entries
+                .iter()
+                .map(|entry| (entry.manifest.clone(), entry.state.clone()))
+                .collect()
+        });
 
         snapshot
             .into_iter()
@@ -867,13 +864,12 @@ impl Registry {
     /// (`(plugin_id, plugin_name, state, info)`)。grant の有無での絞り込みは
     /// 呼び出し側(server.rs)の責務。
     pub fn dashboard_widgets_for_ui(&self) -> Vec<(String, String, PluginState, DashboardInfo)> {
-        let snapshot: Vec<(Manifest, PluginState)> = self
-            .entries
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .iter()
-            .map(|entry| (entry.manifest.clone(), entry.state.clone()))
-            .collect();
+        let snapshot: Vec<(Manifest, PluginState)> = self.entries.with_entries(|entries| {
+            entries
+                .iter()
+                .map(|entry| (entry.manifest.clone(), entry.state.clone()))
+                .collect()
+        });
 
         snapshot
             .into_iter()
@@ -931,29 +927,21 @@ impl Registry {
     /// を引く/挿入する間だけ保持し、返した `Arc<Mutex<()>>` の実際の臨界
     /// 区間(呼び出し側が別途 `.lock()` する)の間は保持しない。
     fn sidecar_runtime_lock_for(&self, id: &str) -> Arc<Mutex<()>> {
-        Self::lock_for(&self.sidecar_runtime_locks, id)
+        self.sidecar_runtime_locks.lock_for(id)
     }
 
     /// `id` 用のファイルアクセス実行時ロック(`filesystem_runtime_locks`)を
     /// 引く。サイドカー側とは**別のマップ**であることが要点
     /// (`filesystem_runtime_locks` のドキュメント参照)。
     fn filesystem_runtime_lock_for(&self, id: &str) -> Arc<Mutex<()>> {
-        Self::lock_for(&self.filesystem_runtime_locks, id)
+        self.filesystem_runtime_locks.lock_for(id)
     }
 
     /// `id` 用のバス実行時ロック(`bus_runtime_locks`)を引く。サイドカー・
     /// ファイルアクセスとは**別のマップ**であることが要点
     /// (`bus_runtime_locks` のドキュメント参照)。
     fn bus_runtime_lock_for(&self, id: &str) -> Arc<Mutex<()>> {
-        Self::lock_for(&self.bus_runtime_locks, id)
-    }
-
-    fn lock_for(map: &Mutex<HashMap<String, Arc<Mutex<()>>>>, id: &str) -> Arc<Mutex<()>> {
-        let mut locks = map.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        locks
-            .entry(id.to_string())
-            .or_insert_with(|| Arc::new(Mutex::new(())))
-            .clone()
+        self.bus_runtime_locks.lock_for(id)
     }
 
     /// `id` のプラグインの capability 要求一覧と現在の承認状態を返す。
@@ -1005,17 +993,13 @@ impl Registry {
         id: &str,
         values: &serde_json::Map<String, serde_json::Value>,
     ) -> Result<serde_json::Map<String, serde_json::Value>, RegistryError> {
-        let (manifest, settings_json) = {
-            let guard = self
-                .entries
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            let entry = guard
-                .iter()
-                .find(|entry| entry.manifest.id == id)
-                .ok_or_else(|| RegistryError::UnknownPlugin(id.to_string()))?;
-            (entry.manifest.clone(), entry.settings_json.clone())
-        };
+        let (manifest, settings_json) = self
+            .entries
+            .find(
+                |entry| entry.manifest.id == id,
+                |entry| (entry.manifest.clone(), entry.settings_json.clone()),
+            )
+            .ok_or_else(|| RegistryError::UnknownPlugin(id.to_string()))?;
 
         let effective = self
             .settings_store
@@ -1082,21 +1066,19 @@ impl Registry {
     /// サイドカーの設定/承認を変更しないので、現在の `sidecars_json` バッファ
     /// をそのまま読み(再計算はしない)、そこから暗黙許可ホストを合流させる。
     pub fn set_capabilities(&self, id: &str, granted: bool) -> Result<GrantState, RegistryError> {
-        let (manifest, capabilities_json, sidecars_json) = {
-            let guard = self
-                .entries
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            let entry = guard
-                .iter()
-                .find(|entry| entry.manifest.id == id)
-                .ok_or_else(|| RegistryError::UnknownPlugin(id.to_string()))?;
-            (
-                entry.manifest.clone(),
-                entry.capabilities_json.clone(),
-                entry.sidecars_json.clone(),
+        let (manifest, capabilities_json, sidecars_json) = self
+            .entries
+            .find(
+                |entry| entry.manifest.id == id,
+                |entry| {
+                    (
+                        entry.manifest.clone(),
+                        entry.capabilities_json.clone(),
+                        entry.sidecars_json.clone(),
+                    )
+                },
             )
-        };
+            .ok_or_else(|| RegistryError::UnknownPlugin(id.to_string()))?;
 
         let _capabilities_guard = self
             .capabilities_lock
@@ -1136,22 +1118,21 @@ impl Registry {
     /// 未登録を別扱いする必要はない)。
     fn is_disabled(&self, id: &str) -> bool {
         self.entries
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .iter()
-            .find(|entry| entry.manifest.id == id)
-            .is_some_and(|entry| matches!(entry.state, PluginState::Disabled { .. }))
+            .find(
+                |entry| entry.manifest.id == id,
+                |entry| matches!(entry.state, PluginState::Disabled { .. }),
+            )
+            .unwrap_or(false)
     }
 
     /// `id` のプラグインの manifest クローンを返す(`entries` ロック保持は
     /// このルックアップの間だけ)。
     fn find_manifest(&self, id: &str) -> Result<Manifest, RegistryError> {
         self.entries
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .iter()
-            .find(|entry| entry.manifest.id == id)
-            .map(|entry| entry.manifest.clone())
+            .find(
+                |entry| entry.manifest.id == id,
+                |entry| entry.manifest.clone(),
+            )
             .ok_or_else(|| RegistryError::UnknownPlugin(id.to_string()))
     }
 
@@ -1159,17 +1140,13 @@ impl Registry {
     /// 実効許可ホストを返す(テスト用アクセサ)。`driver-http.send` が実際に
     /// 参照するのと同じ値。
     pub fn effective_hosts(&self, id: &str) -> Result<Vec<String>, RegistryError> {
-        let capabilities_json = {
-            let guard = self
-                .entries
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            guard
-                .iter()
-                .find(|entry| entry.manifest.id == id)
-                .map(|entry| entry.capabilities_json.clone())
-                .ok_or_else(|| RegistryError::UnknownPlugin(id.to_string()))?
-        };
+        let capabilities_json = self
+            .entries
+            .find(
+                |entry| entry.manifest.id == id,
+                |entry| entry.capabilities_json.clone(),
+            )
+            .ok_or_else(|| RegistryError::UnknownPlugin(id.to_string()))?;
         let raw = capabilities_json
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -1195,17 +1172,13 @@ impl Registry {
     /// 返す(テスト用アクセサ)。`driver-fs.*` が実際に参照するのと同じ
     /// 文字列(`fs_runtime::filesystem_json_string` の出力そのもの)。
     pub fn filesystem_buffer(&self, id: &str) -> Result<String, RegistryError> {
-        let filesystem_json = {
-            let guard = self
-                .entries
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            guard
-                .iter()
-                .find(|entry| entry.manifest.id == id)
-                .map(|entry| entry.filesystem_json.clone())
-                .ok_or_else(|| RegistryError::UnknownPlugin(id.to_string()))?
-        };
+        let filesystem_json = self
+            .entries
+            .find(
+                |entry| entry.manifest.id == id,
+                |entry| entry.filesystem_json.clone(),
+            )
+            .ok_or_else(|| RegistryError::UnknownPlugin(id.to_string()))?;
         let buffer = filesystem_json
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -1218,17 +1191,13 @@ impl Registry {
     /// `runner::spawn_bus_subscriber` が実際に参照するのと同じ文字列
     /// (`bus_runtime::bus_json_string` の出力そのもの)。
     pub fn bus_buffer(&self, id: &str) -> Result<String, RegistryError> {
-        let bus_json = {
-            let guard = self
-                .entries
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            guard
-                .iter()
-                .find(|entry| entry.manifest.id == id)
-                .map(|entry| entry.bus_json.clone())
-                .ok_or_else(|| RegistryError::UnknownPlugin(id.to_string()))?
-        };
+        let bus_json = self
+            .entries
+            .find(
+                |entry| entry.manifest.id == id,
+                |entry| entry.bus_json.clone(),
+            )
+            .ok_or_else(|| RegistryError::UnknownPlugin(id.to_string()))?;
         let buffer = bus_json
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -1260,17 +1229,13 @@ impl Registry {
     /// 承認は `capabilities_json` に影響しない)ため、`set_capabilities`/
     /// `refresh_sidecar_runtime` との間に新たな循環は生じない。
     fn refresh_filesystem_runtime(&self, id: &str) -> Result<Vec<FilesystemInfo>, RegistryError> {
-        let (manifest, filesystem_json) = {
-            let guard = self
-                .entries
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            let entry = guard
-                .iter()
-                .find(|entry| entry.manifest.id == id)
-                .ok_or_else(|| RegistryError::UnknownPlugin(id.to_string()))?;
-            (entry.manifest.clone(), entry.filesystem_json.clone())
-        };
+        let (manifest, filesystem_json) = self
+            .entries
+            .find(
+                |entry| entry.manifest.id == id,
+                |entry| (entry.manifest.clone(), entry.filesystem_json.clone()),
+            )
+            .ok_or_else(|| RegistryError::UnknownPlugin(id.to_string()))?;
 
         let runtime_lock = self.filesystem_runtime_lock_for(id);
         let _runtime_guard = runtime_lock
@@ -1380,17 +1345,13 @@ impl Registry {
     /// ロックは `bus_runtime_lock_for(id)` -- サイドカー・ファイルアクセス
     /// とは別のマップ(`bus_runtime_locks` のドキュメント参照)から引く。
     fn refresh_bus_runtime(&self, id: &str) -> Result<Vec<BusInfo>, RegistryError> {
-        let (manifest, bus_json) = {
-            let guard = self
-                .entries
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            let entry = guard
-                .iter()
-                .find(|entry| entry.manifest.id == id)
-                .ok_or_else(|| RegistryError::UnknownPlugin(id.to_string()))?;
-            (entry.manifest.clone(), entry.bus_json.clone())
-        };
+        let (manifest, bus_json) = self
+            .entries
+            .find(
+                |entry| entry.manifest.id == id,
+                |entry| (entry.manifest.clone(), entry.bus_json.clone()),
+            )
+            .ok_or_else(|| RegistryError::UnknownPlugin(id.to_string()))?;
 
         let runtime_lock = self.bus_runtime_lock_for(id);
         let _runtime_guard = runtime_lock
@@ -1491,21 +1452,19 @@ impl Registry {
         id: &str,
         stop_names: &[String],
     ) -> Result<Vec<SidecarInfo>, RegistryError> {
-        let (manifest, sidecars_json, capabilities_json) = {
-            let guard = self
-                .entries
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            let entry = guard
-                .iter()
-                .find(|entry| entry.manifest.id == id)
-                .ok_or_else(|| RegistryError::UnknownPlugin(id.to_string()))?;
-            (
-                entry.manifest.clone(),
-                entry.sidecars_json.clone(),
-                entry.capabilities_json.clone(),
+        let (manifest, sidecars_json, capabilities_json) = self
+            .entries
+            .find(
+                |entry| entry.manifest.id == id,
+                |entry| {
+                    (
+                        entry.manifest.clone(),
+                        entry.sidecars_json.clone(),
+                        entry.capabilities_json.clone(),
+                    )
+                },
             )
-        };
+            .ok_or_else(|| RegistryError::UnknownPlugin(id.to_string()))?;
 
         let runtime_lock = self.sidecar_runtime_lock_for(id);
         let _runtime_guard = runtime_lock
@@ -1791,12 +1750,10 @@ impl Registry {
 
     /// `id` のプラグインが持つ settings JSON の共有ハンドルを返す。
     pub fn entry_settings(&self, id: &str) -> Option<Arc<Mutex<String>>> {
-        self.entries
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .iter()
-            .find(|entry| entry.manifest.id == id)
-            .map(|entry| entry.settings_json.clone())
+        self.entries.find(
+            |entry| entry.manifest.id == id,
+            |entry| entry.settings_json.clone(),
+        )
     }
 
     /// `id` のプラグインを `Disabled { reason }` にし、そのプラグインが
@@ -1823,24 +1780,18 @@ impl Registry {
     /// を呼ぶ側(このプラグイン自身のスレッド)はここで終了するだけなので、
     /// `PluginInstance::CALL_DEADLINE` の制約は関係ない。
     pub fn set_disabled(&self, id: &str, reason: String) {
-        let sidecar_names: Option<Vec<String>> = {
-            let mut guard = self
-                .entries
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            guard
-                .iter_mut()
-                .find(|entry| entry.manifest.id == id)
-                .map(|entry| {
-                    entry.state = PluginState::Disabled { reason };
-                    entry
-                        .manifest
-                        .sidecars
-                        .iter()
-                        .map(|s| s.name.clone())
-                        .collect()
-                })
-        };
+        let sidecar_names: Option<Vec<String>> = self.entries.find_mut(
+            |entry| entry.manifest.id == id,
+            |entry| {
+                entry.state = PluginState::Disabled { reason };
+                entry
+                    .manifest
+                    .sidecars
+                    .iter()
+                    .map(|s| s.name.clone())
+                    .collect()
+            },
+        );
 
         let Some(names) = sidecar_names else {
             return;
@@ -2362,11 +2313,10 @@ pub(crate) mod tests {
         );
 
         // プラグイン自身は受け取れること -- 渡す相手はこのプラグイン。
-        let guard = registry
+        let settings_json = registry
             .entries
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let buffer = guard[0].settings_json.lock().unwrap().clone();
+            .with_entries(|entries| entries[0].settings_json.clone());
+        let buffer = settings_json.lock().unwrap().clone();
         assert!(
             buffer.contains("sk-live-123"),
             "the guest-facing settings buffer must still carry the secret, got {buffer}"

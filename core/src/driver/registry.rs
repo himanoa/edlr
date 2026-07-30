@@ -9,7 +9,6 @@
 //!   された時点でその値を読み続けさせるのは fail-open になる
 //!   (`edlr_driver_channel::Bus::disable_driver` のドキュメント参照)。
 
-use std::collections::HashMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -30,6 +29,7 @@ use crate::plugin::sidecar::{assign_ports, SidecarConfig, SidecarConfigStore};
 use crate::plugin::sidecar_runtime::{
     implicit_http_hosts, parse_sidecars, sidecars_json_string, SidecarRuntimeEntry,
 };
+use crate::registry::entries::{EntryTable, IdLocks};
 
 /// ドライバ 1 件の現在の駆動状態。`crate::plugin::registry::PluginState` と対称。
 #[derive(Debug, Clone, PartialEq)]
@@ -97,7 +97,7 @@ impl std::error::Error for DriverRegistryError {}
 /// 生かし続けるため)。
 #[derive(Clone)]
 pub struct DriverRegistry {
-    entries: Arc<Mutex<Vec<DriverEntry>>>,
+    entries: EntryTable<DriverEntry>,
     _host: Arc<DriverHost>,
     settings_store: Arc<SettingsStore>,
     grants_store: Arc<GrantsStore>,
@@ -121,13 +121,13 @@ pub struct DriverRegistry {
     /// 同じ形(サイドカー停止が SIGTERM 無視の子で `shutdown_grace` 秒
     /// ブロックしうるので、無関係な別ドライバの操作まで足止めしないよう
     /// ドライバ単位に分けてある)。
-    sidecar_runtime_locks: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
+    sidecar_runtime_locks: IdLocks,
     /// `set_filesystem_config`/`set_filesystem_grant` が呼ぶ
     /// `refresh_filesystem_runtime` の臨界区間をドライバ ID ごとに直列化する
     /// ロックのマップ。`sidecar_runtime_locks` とは別マップにしてある理由も
     /// `crate::plugin::registry::Registry::filesystem_runtime_locks` と同じ
     /// (サイドカー停止待ちでファイルアクセス取消が fail-open にならないため)。
-    filesystem_runtime_locks: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
+    filesystem_runtime_locks: IdLocks,
     drivers_dir: PathBuf,
 }
 
@@ -144,7 +144,7 @@ impl DriverRegistry {
     ) -> Self {
         let process_driver = host.process_driver();
         DriverRegistry {
-            entries: Arc::new(Mutex::new(Vec::new())),
+            entries: EntryTable::new(),
             _host: host,
             settings_store,
             grants_store,
@@ -153,17 +153,14 @@ impl DriverRegistry {
             process_driver,
             bus,
             capabilities_lock: Arc::new(Mutex::new(())),
-            sidecar_runtime_locks: Arc::new(Mutex::new(HashMap::new())),
-            filesystem_runtime_locks: Arc::new(Mutex::new(HashMap::new())),
+            sidecar_runtime_locks: IdLocks::new(),
+            filesystem_runtime_locks: IdLocks::new(),
             drivers_dir,
         }
     }
 
     pub(crate) fn push(&self, entry: DriverEntry) {
-        self.entries
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .push(entry);
+        self.entries.push(entry);
     }
 
     /// ドライバを走査した元ディレクトリ。
@@ -179,13 +176,12 @@ impl DriverRegistry {
     /// 解放してから(ディスクを読む)各ストアを呼ぶ
     /// (`crate::plugin::registry::Registry::list` と同じ流儀)。
     pub fn list(&self) -> Vec<DriverInfo> {
-        let snapshot: Vec<(DriverManifest, DriverState)> = self
-            .entries
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .iter()
-            .map(|entry| (entry.manifest.clone(), entry.state.clone()))
-            .collect();
+        let snapshot: Vec<(DriverManifest, DriverState)> = self.entries.with_entries(|entries| {
+            entries
+                .iter()
+                .map(|entry| (entry.manifest.clone(), entry.state.clone()))
+                .collect()
+        });
 
         snapshot
             .into_iter()
@@ -307,22 +303,19 @@ impl DriverRegistry {
     /// このルックアップの間だけ)。
     fn find_manifest(&self, id: &str) -> Result<DriverManifest, DriverRegistryError> {
         self.entries
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .iter()
-            .find(|entry| entry.manifest.id == id)
-            .map(|entry| entry.manifest.clone())
+            .find(
+                |entry| entry.manifest.id == id,
+                |entry| entry.manifest.clone(),
+            )
             .ok_or_else(|| DriverRegistryError::UnknownDriver(id.to_string()))
     }
 
     /// `id` のドライバの manifest クローンを返す(存在しなければ `None`)。
     pub fn manifest_of(&self, id: &str) -> Option<DriverManifest> {
-        self.entries
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .iter()
-            .find(|entry| entry.manifest.id == id)
-            .map(|entry| entry.manifest.clone())
+        self.entries.find(
+            |entry| entry.manifest.id == id,
+            |entry| entry.manifest.clone(),
+        )
     }
 
     /// `id` のドライバの effective settings(`SettingsStore` 由来)を返す。
@@ -344,17 +337,13 @@ impl DriverRegistry {
         id: &str,
         values: &serde_json::Map<String, serde_json::Value>,
     ) -> Result<serde_json::Map<String, serde_json::Value>, DriverRegistryError> {
-        let (manifest, settings_json) = {
-            let guard = self
-                .entries
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            let entry = guard
-                .iter()
-                .find(|entry| entry.manifest.id == id)
-                .ok_or_else(|| DriverRegistryError::UnknownDriver(id.to_string()))?;
-            (entry.manifest.clone(), entry.settings_json.clone())
-        };
+        let (manifest, settings_json) = self
+            .entries
+            .find(
+                |entry| entry.manifest.id == id,
+                |entry| (entry.manifest.clone(), entry.settings_json.clone()),
+            )
+            .ok_or_else(|| DriverRegistryError::UnknownDriver(id.to_string()))?;
 
         let settings_manifest = manifest.as_settings_manifest();
         let effective = self
@@ -381,21 +370,19 @@ impl DriverRegistry {
         id: &str,
         granted: bool,
     ) -> Result<GrantState, DriverRegistryError> {
-        let (manifest, capabilities_json, sidecars_json) = {
-            let guard = self
-                .entries
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            let entry = guard
-                .iter()
-                .find(|entry| entry.manifest.id == id)
-                .ok_or_else(|| DriverRegistryError::UnknownDriver(id.to_string()))?;
-            (
-                entry.manifest.clone(),
-                entry.capabilities_json.clone(),
-                entry.sidecars_json.clone(),
+        let (manifest, capabilities_json, sidecars_json) = self
+            .entries
+            .find(
+                |entry| entry.manifest.id == id,
+                |entry| {
+                    (
+                        entry.manifest.clone(),
+                        entry.capabilities_json.clone(),
+                        entry.sidecars_json.clone(),
+                    )
+                },
             )
-        };
+            .ok_or_else(|| DriverRegistryError::UnknownDriver(id.to_string()))?;
 
         let _capabilities_guard = self
             .capabilities_lock
@@ -446,11 +433,10 @@ impl DriverRegistry {
     /// ..." の 2 通りの文言に分かれてしまう)。
     fn find_manifest_for_shared(&self, id: &str) -> Result<DriverManifest, RegistryError> {
         self.entries
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .iter()
-            .find(|entry| entry.manifest.id == id)
-            .map(|entry| entry.manifest.clone())
+            .find(
+                |entry| entry.manifest.id == id,
+                |entry| entry.manifest.clone(),
+            )
             .ok_or_else(|| RegistryError::UnknownDriver(id.to_string()))
     }
 
@@ -458,33 +444,25 @@ impl DriverRegistry {
     /// `crate::plugin::registry::Registry::is_disabled` と同じ流儀。
     fn is_disabled(&self, id: &str) -> bool {
         self.entries
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .iter()
-            .find(|entry| entry.manifest.id == id)
-            .is_some_and(|entry| matches!(entry.state, DriverState::Disabled { .. }))
+            .find(
+                |entry| entry.manifest.id == id,
+                |entry| matches!(entry.state, DriverState::Disabled { .. }),
+            )
+            .unwrap_or(false)
     }
 
     /// `id` 用のサイドカー実行時ロック(`sidecar_runtime_locks`)を引く。
     /// 無ければ作る。`crate::plugin::registry::Registry::sidecar_runtime_lock_for`
     /// と同じ流儀。
     fn sidecar_runtime_lock_for(&self, id: &str) -> Arc<Mutex<()>> {
-        Self::lock_for(&self.sidecar_runtime_locks, id)
+        self.sidecar_runtime_locks.lock_for(id)
     }
 
     /// `id` 用のファイルアクセス実行時ロック(`filesystem_runtime_locks`)を
     /// 引く。サイドカー側とは別のマップであることが要点(理由は
     /// `filesystem_runtime_locks` のドキュメント参照)。
     fn filesystem_runtime_lock_for(&self, id: &str) -> Arc<Mutex<()>> {
-        Self::lock_for(&self.filesystem_runtime_locks, id)
-    }
-
-    fn lock_for(map: &Mutex<HashMap<String, Arc<Mutex<()>>>>, id: &str) -> Arc<Mutex<()>> {
-        let mut locks = map.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        locks
-            .entry(id.to_string())
-            .or_insert_with(|| Arc::new(Mutex::new(())))
-            .clone()
+        self.filesystem_runtime_locks.lock_for(id)
     }
 
     /// `id` のドライバの現在のサイドカー状態一覧(manifest の `[[sidecar]]`
@@ -507,17 +485,13 @@ impl DriverRegistry {
     /// 同じ流儀(「止めるべきプロセス」が無いので `filesystem_json` を
     /// 作り直すだけ)。
     fn refresh_filesystem_runtime(&self, id: &str) -> Result<Vec<FilesystemInfo>, RegistryError> {
-        let (manifest, filesystem_json) = {
-            let guard = self
-                .entries
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            let entry = guard
-                .iter()
-                .find(|entry| entry.manifest.id == id)
-                .ok_or_else(|| RegistryError::UnknownDriver(id.to_string()))?;
-            (entry.manifest.clone(), entry.filesystem_json.clone())
-        };
+        let (manifest, filesystem_json) = self
+            .entries
+            .find(
+                |entry| entry.manifest.id == id,
+                |entry| (entry.manifest.clone(), entry.filesystem_json.clone()),
+            )
+            .ok_or_else(|| RegistryError::UnknownDriver(id.to_string()))?;
 
         let runtime_lock = self.filesystem_runtime_lock_for(id);
         let _runtime_guard = runtime_lock
@@ -609,21 +583,19 @@ impl DriverRegistry {
         id: &str,
         stop_names: &[String],
     ) -> Result<Vec<SidecarInfo>, RegistryError> {
-        let (manifest, sidecars_json, capabilities_json) = {
-            let guard = self
-                .entries
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            let entry = guard
-                .iter()
-                .find(|entry| entry.manifest.id == id)
-                .ok_or_else(|| RegistryError::UnknownDriver(id.to_string()))?;
-            (
-                entry.manifest.clone(),
-                entry.sidecars_json.clone(),
-                entry.capabilities_json.clone(),
+        let (manifest, sidecars_json, capabilities_json) = self
+            .entries
+            .find(
+                |entry| entry.manifest.id == id,
+                |entry| {
+                    (
+                        entry.manifest.clone(),
+                        entry.sidecars_json.clone(),
+                        entry.capabilities_json.clone(),
+                    )
+                },
             )
-        };
+            .ok_or_else(|| RegistryError::UnknownDriver(id.to_string()))?;
 
         let runtime_lock = self.sidecar_runtime_lock_for(id);
         let _runtime_guard = runtime_lock
@@ -864,18 +836,12 @@ impl DriverRegistry {
     pub fn set_disabled(&self, manifest: &DriverManifest, reason: String) {
         self.bus.disable_driver(&manifest.id);
 
-        {
-            let mut guard = self
-                .entries
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            if let Some(entry) = guard
-                .iter_mut()
-                .find(|entry| entry.manifest.id == manifest.id)
-            {
+        self.entries.find_mut(
+            |entry| entry.manifest.id == manifest.id,
+            |entry| {
                 entry.state = DriverState::Disabled { reason };
-            }
-        }
+            },
+        );
 
         let runtime_lock = self.sidecar_runtime_lock_for(&manifest.id);
         let _runtime_guard = runtime_lock
@@ -1477,11 +1443,10 @@ pub(crate) mod tests {
 
         let sidecars_json = registry
             .entries
-            .lock()
-            .unwrap()
-            .iter()
-            .find(|entry| entry.manifest.id == "voice")
-            .map(|entry| entry.sidecars_json.clone())
+            .find(
+                |entry| entry.manifest.id == "voice",
+                |entry| entry.sidecars_json.clone(),
+            )
             .expect("voice entry must be present");
         let buffer = sidecars_json.lock().unwrap().clone();
         let parsed = crate::plugin::sidecar_runtime::parse_sidecars(&buffer);
@@ -1577,11 +1542,10 @@ pub(crate) mod tests {
 
         let filesystem_json = registry
             .entries
-            .lock()
-            .unwrap()
-            .iter()
-            .find(|entry| entry.manifest.id == "voice")
-            .map(|entry| entry.filesystem_json.clone())
+            .find(
+                |entry| entry.manifest.id == "voice",
+                |entry| entry.filesystem_json.clone(),
+            )
             .expect("voice entry must be present");
         let buffer = filesystem_json.lock().unwrap().clone();
         let parsed = crate::plugin::fs_runtime::parse_filesystem(&buffer);
