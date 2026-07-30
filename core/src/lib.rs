@@ -8,6 +8,7 @@ pub mod monitor;
 pub mod plugin;
 pub mod registry;
 pub mod router;
+pub mod rpc;
 pub mod server;
 pub mod settings;
 pub mod status;
