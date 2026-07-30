@@ -5,7 +5,7 @@ summary: Phase 1 で grants.rs(std::fs/Mutex 使用)が純粋分類の capabilit
 status: open
 labels: docs, refactor
 created: 2026-07-30T13:08:14Z
-updated: 2026-07-30T13:09:13Z
+updated: 2026-07-30T13:57:13Z
 ---
 
 ## どこで踏んだか
@@ -39,3 +39,10 @@ rules は core を触るエージェント・人間の必読文書なので、�
 - 短期: `module-layout.md` に「capability の grants ディスクストアは公認の例外
   (manifest::load_manifest の "I/O は端に" と同格)」と追記。settings も同様の注記を予約。
 - 長期: Phase 6 の計画に ManifestError の所属整理(Display 文字列凍結のまま)を含める。
+
+## 追記(2026-07-30, Phase 2)
+
+Phase 2 でも同じ公認例外を1件追加: `core/src/rpc/render.rs` が
+`crate::plugin::registry` 配下のデータ型(`BusInfo`/`DashboardInfo`/
+`ScheduleInfo` 等)を import する。rpc/ は純粋モジュールだが、これは
+値型のみの参照で副作用はない。型の所属整理は Phase 4 で行う。
