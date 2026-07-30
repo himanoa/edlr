@@ -118,22 +118,17 @@ use crate::event::Event;
 use crate::plugin::bus_runtime::{bus_json_string, parse_bus, BusRuntimeEntry};
 use crate::plugin::dropped::DropCounters;
 use crate::plugin::filesystem::FilesystemConfigStore;
-use crate::plugin::fs_runtime::{filesystem_json_string, FsRuntimeEntry};
 use crate::plugin::grants::GrantsStore;
-use crate::plugin::host::{
-    capabilities_json_string, HostCtx, PluginCallError, PluginHost, PluginInstance,
-};
+use crate::plugin::host::{HostCtx, PluginCallError, PluginHost, PluginInstance};
 use crate::plugin::manifest::{load_manifest, matches_event};
 use crate::plugin::registry::{PluginEntry, PluginState, Registry};
 use crate::plugin::schedule::{Clock, ScheduleState, ScheduleView};
 use crate::plugin::schedule_store::ScheduleStore;
 use crate::plugin::settings::SettingsStore;
-use crate::plugin::sidecar::{assign_ports, SidecarConfig, SidecarConfigStore};
-use crate::plugin::sidecar_runtime::{
-    implicit_http_hosts, sidecars_json_string, SidecarRuntimeEntry,
-};
+use crate::plugin::sidecar::SidecarConfigStore;
 use crate::plugin::Manifest;
 use crate::router::Router;
+use crate::runner::bootstrap::{build_initial_buffers, InitialBuffers};
 
 /// スケジュールが 1 件も無いプラグイン向けのフォールバックタイムアウト。
 ///
@@ -278,78 +273,24 @@ fn load_and_run_plugin(
     registry: &Registry,
 ) {
     let entry_path = dir.join(&manifest.entry);
-    let effective = settings_store.effective(manifest);
-    let settings_json_string = serde_json::to_string(&serde_json::Value::Object(effective))
-        .unwrap_or_else(|_| "{}".to_string());
-    let settings_json = Arc::new(Mutex::new(settings_json_string));
 
-    let grant_state = grants_store.state(manifest);
-
-    // サイドカー 1 件ずつの設定(`SidecarConfigStore`)・承認
-    // (`GrantsStore::sidecar_state`)を解決して `SidecarRuntimeEntry` に
-    // まとめる。これは `Registry::refresh_sidecar_runtime` が承認・設定変更
-    // のたびに作り直すのと同じ組み立て方(見た目の重複はあるが、あちらは
-    // `Registry` 経由の更新用、こちらは起動直後の初期値用で、依存する
-    // ライフサイクルの起点が異なるため 1 箇所に共通化はしていない)。
-    let sidecar_configs = sidecar_config_store.effective(manifest);
-    let sidecar_entries: Vec<SidecarRuntimeEntry> = manifest
-        .sidecars
-        .iter()
-        .map(|request| {
-            let config = sidecar_configs
-                .get(&request.name)
-                .cloned()
-                .unwrap_or_else(|| SidecarConfig::from_request(request));
-            let granted = grants_store.sidecar_state(manifest, &request.name).granted;
-            SidecarRuntimeEntry {
-                name: request.name.clone(),
-                granted,
-                command: config.command.clone(),
-                args: config.args.clone(),
-                ports: assign_ports(&config),
-            }
-        })
-        .collect();
-    let sidecars_json = Arc::new(Mutex::new(sidecars_json_string(&sidecar_entries)));
-
-    // http capability の承認済み hosts と、承認済みサイドカーの暗黙許可を
-    // 合流させる(`capabilities_json` に載るのは実効的に許可されたホストの
-    // みで、サイドカーの暗黙許可は http capability の承認とは独立に効く)。
-    let mut initial_hosts = if grant_state.granted {
-        manifest.capability_hosts()
-    } else {
-        Vec::new()
-    };
-    initial_hosts.extend(implicit_http_hosts(&sidecar_entries));
-    let initial_capabilities_json = capabilities_json_string(&initial_hosts);
-    let capabilities_json = Arc::new(Mutex::new(initial_capabilities_json));
-
-    // ファイルアクセスのルートごとの設定(`FilesystemConfigStore`)・承認
-    // (`GrantsStore::filesystem_state`)を解決して `FsRuntimeEntry` にまと
-    // める。サイドカーの初期値組み立てと同じ流儀(未承認のルートは
-    // `filesystem_json_string` が `path` を落とす -- `fs_runtime` のドキュ
-    // メント参照)。
-    let filesystem_configs = filesystem_config_store.effective(manifest);
-    let filesystem_entries: Vec<FsRuntimeEntry> = manifest
-        .filesystem
-        .iter()
-        .map(|request| {
-            let path = filesystem_configs
-                .get(&request.name)
-                .map(|config| config.path.clone())
-                .unwrap_or_default();
-            let granted = grants_store
-                .filesystem_state(manifest, &request.name)
-                .granted;
-            FsRuntimeEntry {
-                name: request.name.clone(),
-                granted,
-                mode: request.mode.as_str().to_string(),
-                path,
-            }
-        })
-        .collect();
-    let filesystem_json = Arc::new(Mutex::new(filesystem_json_string(&filesystem_entries)));
+    // settings/sidecars/capabilities/filesystem は plugin/driver 共通の
+    // 組み立て方(`build_initial_buffers` のドキュメント参照)。この見た目の
+    // 重複は `Registry::refresh_sidecar_runtime` 等(承認・設定変更のたびに
+    // 作り直す更新用)とも意図的に共通化していない -- 依存するライフサイクル
+    // の起点が異なるため。
+    let InitialBuffers {
+        settings_json,
+        capabilities_json,
+        sidecars_json,
+        filesystem_json,
+    } = build_initial_buffers(
+        manifest,
+        settings_store,
+        grants_store,
+        sidecar_config_store,
+        filesystem_config_store,
+    );
 
     // バス接続先ごとの承認(`GrantsStore::bus_state`)を解決して
     // `BusRuntimeEntry` にまとめる。サイドカー/ファイルアクセスの初期値組み

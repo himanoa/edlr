@@ -27,14 +27,10 @@ use crate::driver::host::{DriverCtx, DriverHost};
 use crate::driver::manifest::{load_driver_manifest, DriverManifest};
 use crate::driver::registry::{DriverEntry, DriverRegistry, DriverState};
 use crate::plugin::filesystem::FilesystemConfigStore;
-use crate::plugin::fs_runtime::{filesystem_json_string, FsRuntimeEntry};
 use crate::plugin::grants::GrantsStore;
-use crate::plugin::host::capabilities_json_string;
 use crate::plugin::settings::SettingsStore;
-use crate::plugin::sidecar::{assign_ports, SidecarConfig, SidecarConfigStore};
-use crate::plugin::sidecar_runtime::{
-    implicit_http_hosts, sidecars_json_string, SidecarRuntimeEntry,
-};
+use crate::plugin::sidecar::SidecarConfigStore;
+use crate::runner::bootstrap::{build_initial_buffers, InitialBuffers};
 
 /// ドライバ 1 件あたりのメッセージキュー容量。
 ///
@@ -177,71 +173,24 @@ fn load_and_run_driver(
     registry: &DriverRegistry,
 ) {
     let entry_path = dir.join(&manifest.entry);
-    let settings_manifest = manifest.as_settings_manifest();
 
-    let effective = settings_store.effective(&settings_manifest);
-    let settings_json_string = serde_json::to_string(&serde_json::Value::Object(effective))
-        .unwrap_or_else(|_| "{}".to_string());
-    let settings_json = Arc::new(Mutex::new(settings_json_string));
-
-    let grant_state = grants_store.state(&settings_manifest);
-
-    // `crate::plugin::runner::load_and_run_plugin` と同じ組み立て方(見た目の
-    // 重複はあるが、あちらは `Registry` 経由の更新用、こちらは起動直後の
-    // 初期値用で、依存するライフサイクルの起点が異なるため 1 箇所に共通化は
-    // していない)。
-    let sidecar_configs = sidecar_config_store.effective(&settings_manifest);
-    let sidecar_entries: Vec<SidecarRuntimeEntry> = manifest
-        .sidecars
-        .iter()
-        .map(|request| {
-            let config = sidecar_configs
-                .get(&request.name)
-                .cloned()
-                .unwrap_or_else(|| SidecarConfig::from_request(request));
-            let granted = grants_store
-                .sidecar_state(&settings_manifest, &request.name)
-                .granted;
-            SidecarRuntimeEntry {
-                name: request.name.clone(),
-                granted,
-                command: config.command.clone(),
-                args: config.args.clone(),
-                ports: assign_ports(&config),
-            }
-        })
-        .collect();
-    let sidecars_json = Arc::new(Mutex::new(sidecars_json_string(&sidecar_entries)));
-
-    let mut initial_hosts = if grant_state.granted {
-        settings_manifest.capability_hosts()
-    } else {
-        Vec::new()
-    };
-    initial_hosts.extend(implicit_http_hosts(&sidecar_entries));
-    let capabilities_json = Arc::new(Mutex::new(capabilities_json_string(&initial_hosts)));
-
-    let filesystem_configs = filesystem_config_store.effective(&settings_manifest);
-    let filesystem_entries: Vec<FsRuntimeEntry> = manifest
-        .filesystem
-        .iter()
-        .map(|request| {
-            let path = filesystem_configs
-                .get(&request.name)
-                .map(|config| config.path.clone())
-                .unwrap_or_default();
-            let granted = grants_store
-                .filesystem_state(&settings_manifest, &request.name)
-                .granted;
-            FsRuntimeEntry {
-                name: request.name.clone(),
-                granted,
-                mode: request.mode.as_str().to_string(),
-                path,
-            }
-        })
-        .collect();
-    let filesystem_json = Arc::new(Mutex::new(filesystem_json_string(&filesystem_entries)));
+    // settings/sidecars/capabilities/filesystem は plugin/driver 共通の
+    // 組み立て方(`build_initial_buffers` のドキュメント参照)。この見た目の
+    // 重複は `Registry::refresh_sidecar_runtime` 等(承認・設定変更のたびに
+    // 作り直す更新用)とも意図的に共通化していない -- 依存するライフサイクル
+    // の起点が異なるため。
+    let InitialBuffers {
+        settings_json,
+        capabilities_json,
+        sidecars_json,
+        filesystem_json,
+    } = build_initial_buffers(
+        manifest,
+        settings_store,
+        grants_store,
+        sidecar_config_store,
+        filesystem_config_store,
+    );
 
     let (messages_tx, messages_rx) =
         std_mpsc::sync_channel::<Message>(DRIVER_MESSAGE_QUEUE_CAPACITY);
