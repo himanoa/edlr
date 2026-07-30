@@ -36,10 +36,10 @@ use crate::capability::GrantStorage;
 use crate::plugin::grants::GrantState;
 use crate::plugin::host::{capabilities_json_string, parse_capability_hosts};
 use crate::plugin::registry::{DashboardInfo, PluginEntry, PluginState, RegistryError};
-use crate::plugin::sidecar_runtime::{implicit_http_hosts, parse_sidecars, SidecarRuntimeEntry};
+use crate::plugin::sidecar_runtime::{parse_sidecars, SidecarRuntimeEntry};
 use crate::plugin::{CapabilityRequest, Manifest};
 use crate::registry::entries::EntryTable;
-use crate::registry::sidecar::SidecarEntry;
+use crate::registry::sidecar::{merged_effective_hosts, SidecarEntry};
 use crate::registry::subject::RegistrySubject;
 
 /// capability 承認群(`capabilities` / `set_capabilities` / `effective_hosts`)
@@ -166,11 +166,6 @@ impl<G: GrantStorage, E: SidecarEntry> GrantService<G, E> {
             .set(&settings_manifest, granted)
             .map_err(RegistryError::Grants)?;
 
-        let mut effective_hosts = if state.granted {
-            settings_manifest.capability_hosts()
-        } else {
-            Vec::new()
-        };
         let sidecar_entries: Vec<SidecarRuntimeEntry> = parse_sidecars(
             &sidecars_json
                 .lock()
@@ -178,7 +173,11 @@ impl<G: GrantStorage, E: SidecarEntry> GrantService<G, E> {
         )
         .into_values()
         .collect();
-        effective_hosts.extend(implicit_http_hosts(&sidecar_entries));
+        let effective_hosts = merged_effective_hosts(
+            state.granted,
+            settings_manifest.capability_hosts(),
+            &sidecar_entries,
+        );
 
         let capabilities_json_string = capabilities_json_string(&effective_hosts);
         *capabilities_json
@@ -342,5 +341,106 @@ impl<G: GrantStorage> GrantService<G, PluginEntry> {
         let manifest = self.find_manifest(id)?;
         let grant_state = self.grants_store.state(&manifest);
         Ok((manifest.capabilities.clone(), grant_state))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::registry::sidecar::test_support::InMemoryGrantStorage;
+
+    fn manifest_with_http_capability(id: &str, host: &str) -> Manifest {
+        Manifest {
+            id: id.to_string(),
+            name: id.to_string(),
+            version: "0.1.0".into(),
+            description: String::new(),
+            entry: "plugin.wasm".into(),
+            events: vec![],
+            settings: vec![],
+            capabilities: vec![CapabilityRequest::Http {
+                hosts: vec![host.to_string()],
+                reason: "reason".into(),
+            }],
+            sidecars: vec![],
+            filesystem: vec![],
+            bus: vec![],
+            dashboard: vec![],
+            schedules: vec![],
+        }
+    }
+
+    fn plugin_entry(manifest: Manifest) -> PluginEntry {
+        PluginEntry {
+            manifest,
+            state: PluginState::Running,
+            settings_json: Arc::new(Mutex::new(String::new())),
+            capabilities_json: Arc::new(Mutex::new(String::new())),
+            sidecars_json: Arc::new(Mutex::new(String::new())),
+            filesystem_json: Arc::new(Mutex::new(String::new())),
+            bus_json: Arc::new(Mutex::new(String::new())),
+        }
+    }
+
+    fn test_service(
+        entry: PluginEntry,
+    ) -> (
+        GrantService<InMemoryGrantStorage, PluginEntry>,
+        Arc<InMemoryGrantStorage>,
+    ) {
+        let entries = EntryTable::new();
+        entries.push(entry);
+        let grants_store = Arc::new(InMemoryGrantStorage::new());
+        let service = GrantService::new(
+            entries,
+            grants_store.clone(),
+            Arc::new(Mutex::new(())),
+            PathBuf::from("/nonexistent/edlr-task10-test-plugins"),
+        );
+        (service, grants_store)
+    }
+
+    #[test]
+    fn set_capabilities_grants_and_exposes_the_explicit_host() {
+        let manifest = manifest_with_http_capability("p1", "example.com");
+        let (service, _grants_store) = test_service(plugin_entry(manifest));
+
+        let state = service
+            .set_capabilities("p1", true)
+            .expect("granting should succeed");
+
+        assert!(state.granted);
+        assert_eq!(
+            service.effective_hosts("p1").unwrap(),
+            vec!["example.com".to_string()]
+        );
+    }
+
+    #[test]
+    fn set_capabilities_revoke_drops_the_explicit_host() {
+        let manifest = manifest_with_http_capability("p1", "example.com");
+        let (service, _grants_store) = test_service(plugin_entry(manifest));
+        service.set_capabilities("p1", true).unwrap();
+
+        let state = service
+            .set_capabilities("p1", false)
+            .expect("revoking should succeed");
+
+        assert!(!state.granted);
+        assert_eq!(service.effective_hosts("p1").unwrap(), Vec::<String>::new());
+    }
+
+    #[test]
+    fn set_capabilities_for_unknown_id_returns_unknown_plugin_error() {
+        let (service, _grants_store) = test_service(plugin_entry(manifest_with_http_capability(
+            "p1",
+            "example.com",
+        )));
+
+        let err = service
+            .set_capabilities("does-not-exist", true)
+            .expect_err("unknown id should be rejected");
+
+        assert!(matches!(err, RegistryError::UnknownPlugin(id) if id == "does-not-exist"));
     }
 }

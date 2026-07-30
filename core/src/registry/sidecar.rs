@@ -35,7 +35,7 @@ use crate::plugin::sidecar::{assign_ports, SidecarConfig, SidecarConfigStore};
 use crate::plugin::sidecar_runtime::{
     implicit_http_hosts, sidecars_json_string, SidecarRuntimeEntry,
 };
-use crate::plugin::SidecarRequest;
+use crate::plugin::{Manifest, SidecarRequest};
 use crate::registry::entries::{EntryTable, IdLocks};
 use crate::registry::subject::RegistrySubject;
 use crate::registry::ProcessControl;
@@ -44,6 +44,87 @@ use crate::registry::ProcessControl;
 /// `HostCtx::sidecar_key`(`core/src/plugin/host.rs`)と同じ規則。
 pub(crate) fn sidecar_key(id: &str, name: &str) -> String {
     format!("{id}/{name}")
+}
+
+/// `control_sidecar` の `Start`/`Restart` 前提判定(値イン値アウト)。
+/// 呼び出し側はこの結果に応じてエラー文字列を組み立てるだけにする(文字列
+/// 自体は判定結果からは変えず、呼び出し側の `format!` が元の実装と byte
+/// 同一になるようにしている -- `is_disabled` の主語("plugin"/"driver")は
+/// `E::Subject::subject_noun()` に、`name` は呼び出し側の変数にしか無いため)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SidecarStartDecision {
+    /// プラグイン/ドライバ自体が無効化されている。
+    Disabled,
+    /// サイドカーが未承認。
+    NotGranted,
+    /// 実行ファイルが未設定。
+    NoExecutable,
+    /// 起動してよい。
+    Proceed,
+}
+
+pub(crate) fn sidecar_start_decision(
+    disabled: bool,
+    granted: bool,
+    command_configured: bool,
+) -> SidecarStartDecision {
+    if disabled {
+        SidecarStartDecision::Disabled
+    } else if !granted {
+        SidecarStartDecision::NotGranted
+    } else if !command_configured {
+        SidecarStartDecision::NoExecutable
+    } else {
+        SidecarStartDecision::Proceed
+    }
+}
+
+/// `set_sidecar_grant` の承認判定(値イン値アウト)。取消
+/// (`granted == false`)は常に許す。承認(`granted == true`)は実行ファイルが
+/// 設定済みのときだけ許す。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GrantSidecarDecision {
+    NoExecutable,
+    Proceed,
+}
+
+pub(crate) fn grant_sidecar_decision(
+    granted: bool,
+    command_configured: bool,
+) -> GrantSidecarDecision {
+    if granted && !command_configured {
+        GrantSidecarDecision::NoExecutable
+    } else {
+        GrantSidecarDecision::Proceed
+    }
+}
+
+/// `set_sidecar_grant` が `refresh_sidecar_runtime` に渡す停止対象名の決定
+/// (値イン値アウト)。取消(`granted == false`)のときだけ、そのサイドカー
+/// 自身を停止対象にする(実際に止めるのは `refresh_sidecar_runtime` /
+/// `stop_named` の役目で、ここは「何を止めるか」の判断だけを持つ)。
+pub(crate) fn sidecar_grant_stop_names(name: &str, granted: bool) -> Vec<String> {
+    if granted {
+        Vec::new()
+    } else {
+        vec![name.to_string()]
+    }
+}
+
+/// 実効許可ホストのマージ判定(値イン値アウト)。`granted` が偽なら明示許可
+/// ホストは無視し、稼働中サイドカーの暗黙 127.0.0.1 許可だけを残す。
+/// `refresh_sidecar_runtime`(このファイル)と `GrantService::set_capabilities`
+/// (`registry/grants.rs`)の両方が同じ形の判断をしていたため、こちらに
+/// 1本化して `grants.rs` から import する。
+pub(crate) fn merged_effective_hosts(
+    granted: bool,
+    base_hosts: Vec<String>,
+    sidecar_entries: &[SidecarRuntimeEntry],
+) -> Vec<String> {
+    let base = if granted { base_hosts } else { Vec::new() };
+    base.into_iter()
+        .chain(implicit_http_hosts(sidecar_entries))
+        .collect()
 }
 
 /// `EntryTable<E>` の要素 `E` がサイドカー群に対して持つべき最小限の面。
@@ -360,12 +441,11 @@ impl<G: GrantStorage, P: ProcessControl, E: SidecarEntry> SidecarService<G, P, E
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             let http_granted = self.grants_store.state(&settings_manifest).granted;
-            let mut hosts = if http_granted {
-                settings_manifest.capability_hosts()
-            } else {
-                Vec::new()
-            };
-            hosts.extend(implicit_http_hosts(&runtime_entries));
+            let hosts = merged_effective_hosts(
+                http_granted,
+                settings_manifest.capability_hosts(),
+                &runtime_entries,
+            );
             *capabilities_json
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner()) =
@@ -414,28 +494,27 @@ impl<G: GrantStorage, P: ProcessControl, E: SidecarEntry> SidecarService<G, P, E
             return Err(RegistryError::UnknownSidecar(name.to_string()));
         }
 
-        if granted {
-            let configs = self.sidecar_config_store.effective(&settings_manifest);
-            let command_configured = configs
+        // `granted == false` のときは実行ファイル設定を読む必要が無い(取消は
+        // 常に許すため)。元の実装と同じく、その場合はディスクを読まない。
+        let command_configured = granted
+            && self
+                .sidecar_config_store
+                .effective(&settings_manifest)
                 .get(name)
                 .map(|config| !config.command.is_empty())
                 .unwrap_or(false);
-            if !command_configured {
-                return Err(RegistryError::Sidecar(format!(
-                    "sidecar {name} has no executable configured; cannot grant"
-                )));
-            }
+        if grant_sidecar_decision(granted, command_configured) == GrantSidecarDecision::NoExecutable
+        {
+            return Err(RegistryError::Sidecar(format!(
+                "sidecar {name} has no executable configured; cannot grant"
+            )));
         }
 
         self.grants_store
             .set_sidecar(&settings_manifest, name, granted)
             .map_err(RegistryError::Grants)?;
 
-        let stop_names: Vec<String> = if granted {
-            Vec::new()
-        } else {
-            vec![name.to_string()]
-        };
+        let stop_names = sidecar_grant_stop_names(name, granted);
         self.refresh_sidecar_runtime(id, &stop_names)
     }
 
@@ -482,59 +561,77 @@ impl<G: GrantStorage, P: ProcessControl, E: SidecarEntry> SidecarService<G, P, E
                 self.process_driver.stop(&key);
             }
             SidecarAction::Start | SidecarAction::Restart => {
-                let runtime_lock = self.sidecar_runtime_lock_for(id);
-                let _runtime_guard = runtime_lock
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner());
-
-                // ロック保持中に読む: 無効化処理も同じ id 別ロックを取って
-                // からサイドカーを止めるので、ここで見る状態は「無効化処理
-                // が確定済みならその後の値」であることが保証される。
-                if self.is_disabled(id) {
-                    return Err(RegistryError::Sidecar(format!(
-                        "{} {id} is disabled",
-                        E::Subject::subject_noun()
-                    )));
-                }
-
-                if action == SidecarAction::Restart {
-                    self.process_driver.stop(&key);
-                }
-
-                // ロック保持中に読み直す: `refresh_sidecar_runtime` は同じ
-                // ロックを取ってから承認取消/設定変更を確定するので、ここで
-                // 読む値は「取消/変更が確定済みならその後の値」であることが
-                // 保証される。
-                let grant = self.grants_store.sidecar_state(&settings_manifest, name);
-                if !grant.granted {
-                    return Err(RegistryError::Sidecar(format!(
-                        "sidecar {name} is not granted"
-                    )));
-                }
-
-                let configs = self.sidecar_config_store.effective(&settings_manifest);
-                let config = configs
-                    .get(name)
-                    .cloned()
-                    .unwrap_or_else(|| SidecarConfig::from_request(request));
-                if config.command.is_empty() {
-                    return Err(RegistryError::Sidecar(format!(
-                        "sidecar {name} has no executable configured"
-                    )));
-                }
-
-                let spec = ProcessSpec {
-                    command: PathBuf::from(&config.command),
-                    args: config.args.clone(),
-                    ports: assign_ports(&config),
-                };
-                self.process_driver
-                    .ensure_started(&key, &spec)
-                    .map_err(|e| RegistryError::Sidecar(e.to_string()))?;
+                self.start_or_restart_sidecar(id, name, &key, action, &settings_manifest, request)?;
             }
         }
 
         self.sidecars(id)
+    }
+
+    /// `control_sidecar` の `Start`/`Restart` 実行部(判断は
+    /// `sidecar_start_decision` に委ね、ここは手順の羅列だけを持つ)。
+    fn start_or_restart_sidecar(
+        &self,
+        id: &str,
+        name: &str,
+        key: &str,
+        action: SidecarAction,
+        settings_manifest: &Manifest,
+        request: &SidecarRequest,
+    ) -> Result<(), RegistryError> {
+        let runtime_lock = self.sidecar_runtime_lock_for(id);
+        let _runtime_guard = runtime_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        // ロック保持中に読む: 無効化処理も同じ id 別ロックを取ってから
+        // サイドカーを止めるので、ここで見る状態は「無効化処理が確定済み
+        // ならその後の値」であることが保証される。
+        let disabled = self.is_disabled(id);
+
+        if action == SidecarAction::Restart && !disabled {
+            self.process_driver.stop(key);
+        }
+
+        // ロック保持中に読み直す: `refresh_sidecar_runtime` は同じロックを
+        // 取ってから承認取消/設定変更を確定するので、ここで読む値は
+        // 「取消/変更が確定済みならその後の値」であることが保証される。
+        let grant = self.grants_store.sidecar_state(settings_manifest, name);
+        let configs = self.sidecar_config_store.effective(settings_manifest);
+        let config = configs
+            .get(name)
+            .cloned()
+            .unwrap_or_else(|| SidecarConfig::from_request(request));
+
+        match sidecar_start_decision(disabled, grant.granted, !config.command.is_empty()) {
+            SidecarStartDecision::Disabled => {
+                return Err(RegistryError::Sidecar(format!(
+                    "{} {id} is disabled",
+                    E::Subject::subject_noun()
+                )));
+            }
+            SidecarStartDecision::NotGranted => {
+                return Err(RegistryError::Sidecar(format!(
+                    "sidecar {name} is not granted"
+                )));
+            }
+            SidecarStartDecision::NoExecutable => {
+                return Err(RegistryError::Sidecar(format!(
+                    "sidecar {name} has no executable configured"
+                )));
+            }
+            SidecarStartDecision::Proceed => {}
+        }
+
+        let spec = ProcessSpec {
+            command: PathBuf::from(&config.command),
+            args: config.args.clone(),
+            ports: assign_ports(&config),
+        };
+        self.process_driver
+            .ensure_started(key, &spec)
+            .map_err(|e| RegistryError::Sidecar(e.to_string()))?;
+        Ok(())
     }
 
     /// 全プラグイン/ドライバの全サイドカーインスタンスを停止する(デーモン
@@ -561,5 +658,486 @@ impl<G: GrantStorage, P: ProcessControl, E: SidecarEntry> SidecarService<G, P, E
             let key = sidecar_key(id, name);
             self.process_driver.stop(&key);
         }
+    }
+}
+
+/// `capability::GrantStorage` / `registry::ProcessControl` の手書きモック。
+/// `testing.md` の方針どおり mockall 等は使わず、ここに手書きする
+/// (`InMemoryGrantStorage` は `registry::grants` のテストからも再利用する)。
+#[cfg(test)]
+pub(crate) mod test_support {
+    use super::*;
+    use crate::plugin::grants::GrantsError;
+    use edlr_driver_process::{InstanceStatus, ProcessError};
+    use std::collections::HashMap;
+    use std::sync::Mutex as StdMutex;
+
+    /// `GrantStorage` のインメモリ実装。キーは
+    /// `"<kind>:<manifest-id>[:<sub>]"` の合成文字列。未設定のキーは
+    /// `GrantsStore` がファイル無しのときと同じ既定値
+    /// (`granted: false, stale: false`)を返す。
+    #[derive(Default)]
+    pub(crate) struct InMemoryGrantStorage {
+        states: StdMutex<HashMap<String, GrantState>>,
+    }
+
+    impl InMemoryGrantStorage {
+        pub(crate) fn new() -> Self {
+            Self::default()
+        }
+
+        /// テストのセットアップ用: `set_sidecar` を経由せず、`manifest_id` の
+        /// サイドカー `name` の承認状態を直接仕込む。
+        pub(crate) fn seed_sidecar(&self, manifest_id: &str, name: &str, state: GrantState) {
+            self.states
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .insert(Self::sidecar_key(manifest_id, name), state);
+        }
+
+        fn base_key(manifest_id: &str) -> String {
+            format!("base:{manifest_id}")
+        }
+
+        fn sidecar_key(manifest_id: &str, name: &str) -> String {
+            format!("sidecar:{manifest_id}:{name}")
+        }
+
+        fn get_or_default(&self, key: &str) -> GrantState {
+            self.states
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .get(key)
+                .cloned()
+                .unwrap_or(GrantState {
+                    granted: false,
+                    stale: false,
+                })
+        }
+
+        fn set_key(&self, key: String, granted: bool) -> Result<GrantState, GrantsError> {
+            let state = GrantState {
+                granted,
+                stale: false,
+            };
+            self.states
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .insert(key, state.clone());
+            Ok(state)
+        }
+    }
+
+    impl GrantStorage for InMemoryGrantStorage {
+        fn state(&self, manifest: &Manifest) -> GrantState {
+            self.get_or_default(&Self::base_key(&manifest.id))
+        }
+        fn set(&self, manifest: &Manifest, granted: bool) -> Result<GrantState, GrantsError> {
+            self.set_key(Self::base_key(&manifest.id), granted)
+        }
+        fn sidecar_state(&self, manifest: &Manifest, name: &str) -> GrantState {
+            self.get_or_default(&Self::sidecar_key(&manifest.id, name))
+        }
+        fn set_sidecar(
+            &self,
+            manifest: &Manifest,
+            name: &str,
+            granted: bool,
+        ) -> Result<GrantState, GrantsError> {
+            self.set_key(Self::sidecar_key(&manifest.id, name), granted)
+        }
+        fn filesystem_state(&self, manifest: &Manifest, name: &str) -> GrantState {
+            self.get_or_default(&format!("filesystem:{}:{name}", manifest.id))
+        }
+        fn set_filesystem(
+            &self,
+            manifest: &Manifest,
+            name: &str,
+            granted: bool,
+        ) -> Result<GrantState, GrantsError> {
+            self.set_key(format!("filesystem:{}:{name}", manifest.id), granted)
+        }
+        fn bus_state(&self, manifest: &Manifest, driver: &str) -> GrantState {
+            self.get_or_default(&format!("bus:{}:{driver}", manifest.id))
+        }
+        fn set_bus(
+            &self,
+            manifest: &Manifest,
+            driver: &str,
+            granted: bool,
+        ) -> Result<GrantState, GrantsError> {
+            self.set_key(format!("bus:{}:{driver}", manifest.id), granted)
+        }
+        fn dashboard_state(&self, manifest: &Manifest, widget: &str) -> GrantState {
+            self.get_or_default(&format!("dashboard:{}:{widget}", manifest.id))
+        }
+        fn set_dashboard(
+            &self,
+            manifest: &Manifest,
+            widget: &str,
+            granted: bool,
+        ) -> Result<GrantState, GrantsError> {
+            self.set_key(format!("dashboard:{}:{widget}", manifest.id), granted)
+        }
+    }
+
+    /// `ProcessControl` の手書きモック: 呼び出し記録(`key` の列)+
+    /// `key` ごとに設定した固定応答(`InstanceStatus` 一覧)を返す。
+    #[derive(Default)]
+    pub(crate) struct FakeProcessControl {
+        responses: StdMutex<HashMap<String, Vec<InstanceStatus>>>,
+        pub(crate) ensure_started_calls: StdMutex<Vec<String>>,
+        pub(crate) status_calls: StdMutex<Vec<String>>,
+        pub(crate) stop_calls: StdMutex<Vec<String>>,
+    }
+
+    impl FakeProcessControl {
+        pub(crate) fn new() -> Self {
+            Self::default()
+        }
+
+        /// `key` に対する `status`/`ensure_started` の固定応答を設定する。
+        pub(crate) fn set_response(&self, key: &str, instances: Vec<InstanceStatus>) {
+            self.responses
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .insert(key.to_string(), instances);
+        }
+    }
+
+    impl ProcessControl for FakeProcessControl {
+        fn ensure_started(
+            &self,
+            key: &str,
+            _spec: &ProcessSpec,
+        ) -> Result<Vec<InstanceStatus>, ProcessError> {
+            self.ensure_started_calls
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .push(key.to_string());
+            Ok(self
+                .responses
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .get(key)
+                .cloned()
+                .unwrap_or_default())
+        }
+        fn status(&self, key: &str, _spec: &ProcessSpec) -> Vec<InstanceStatus> {
+            self.status_calls
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .push(key.to_string());
+            self.responses
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .get(key)
+                .cloned()
+                .unwrap_or_default()
+        }
+        fn stop(&self, key: &str) {
+            self.stop_calls
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .push(key.to_string());
+        }
+        fn stop_all(&self) {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::test_support::{FakeProcessControl, InMemoryGrantStorage};
+    use super::*;
+    use crate::plugin::manifest::SidecarRequest as ManifestSidecarRequest;
+    use crate::registry::plugin::{PluginEntry, PluginState};
+    use edlr_driver_process::InstanceStatus;
+    use std::sync::{Arc, Mutex};
+
+    // --- 純関数の値イン値アウトテスト ---
+
+    #[test]
+    fn sidecar_start_decision_disabled_wins_over_other_checks() {
+        // disabled が true なら granted/command_configured の値によらず
+        // Disabled が最優先される。
+        assert_eq!(
+            sidecar_start_decision(true, true, true),
+            SidecarStartDecision::Disabled
+        );
+        assert_eq!(
+            sidecar_start_decision(true, false, false),
+            SidecarStartDecision::Disabled
+        );
+    }
+
+    #[test]
+    fn sidecar_start_decision_not_granted_when_enabled() {
+        assert_eq!(
+            sidecar_start_decision(false, false, true),
+            SidecarStartDecision::NotGranted
+        );
+    }
+
+    #[test]
+    fn sidecar_start_decision_no_executable_when_granted_but_unconfigured() {
+        assert_eq!(
+            sidecar_start_decision(false, true, false),
+            SidecarStartDecision::NoExecutable
+        );
+    }
+
+    #[test]
+    fn sidecar_start_decision_proceeds_when_all_clear() {
+        assert_eq!(
+            sidecar_start_decision(false, true, true),
+            SidecarStartDecision::Proceed
+        );
+    }
+
+    #[test]
+    fn grant_sidecar_decision_rejects_grant_without_executable() {
+        assert_eq!(
+            grant_sidecar_decision(true, false),
+            GrantSidecarDecision::NoExecutable
+        );
+    }
+
+    #[test]
+    fn grant_sidecar_decision_allows_revoke_without_executable() {
+        // 取消(granted=false)は実行ファイル未設定でも常に許す。
+        assert_eq!(
+            grant_sidecar_decision(false, false),
+            GrantSidecarDecision::Proceed
+        );
+    }
+
+    #[test]
+    fn grant_sidecar_decision_allows_grant_with_executable() {
+        assert_eq!(
+            grant_sidecar_decision(true, true),
+            GrantSidecarDecision::Proceed
+        );
+    }
+
+    #[test]
+    fn sidecar_grant_stop_names_is_empty_when_granting() {
+        assert_eq!(sidecar_grant_stop_names("s1", true), Vec::<String>::new());
+    }
+
+    #[test]
+    fn sidecar_grant_stop_names_contains_name_when_revoking() {
+        assert_eq!(
+            sidecar_grant_stop_names("s1", false),
+            vec!["s1".to_string()]
+        );
+    }
+
+    #[test]
+    fn merged_effective_hosts_keeps_explicit_and_implicit_when_granted() {
+        let sidecars = vec![SidecarRuntimeEntry {
+            name: "s1".into(),
+            granted: true,
+            command: "/bin/s1".into(),
+            args: vec![],
+            ports: vec![9000],
+        }];
+        let hosts = merged_effective_hosts(true, vec!["example.com".into()], &sidecars);
+        assert_eq!(
+            hosts,
+            vec![
+                "example.com".to_string(),
+                "http://127.0.0.1:9000".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn merged_effective_hosts_drops_explicit_but_keeps_implicit_when_not_granted() {
+        let sidecars = vec![SidecarRuntimeEntry {
+            name: "s1".into(),
+            granted: true,
+            command: "/bin/s1".into(),
+            args: vec![],
+            ports: vec![9000],
+        }];
+        let hosts = merged_effective_hosts(false, vec!["example.com".into()], &sidecars);
+        assert_eq!(hosts, vec!["http://127.0.0.1:9000".to_string()]);
+    }
+
+    // --- モック越しの service フローテスト ---
+
+    fn manifest_with_sidecar(id: &str, sidecar_name: &str, port: u16) -> Manifest {
+        Manifest {
+            id: id.to_string(),
+            name: id.to_string(),
+            version: "0.1.0".into(),
+            description: String::new(),
+            entry: "plugin.wasm".into(),
+            events: vec![],
+            settings: vec![],
+            capabilities: vec![],
+            sidecars: vec![ManifestSidecarRequest {
+                name: sidecar_name.to_string(),
+                reason: "reason".into(),
+                port,
+                args: vec![],
+                scalable: false,
+            }],
+            filesystem: vec![],
+            bus: vec![],
+            dashboard: vec![],
+            schedules: vec![],
+        }
+    }
+
+    fn plugin_entry(manifest: Manifest, state: PluginState) -> PluginEntry {
+        PluginEntry {
+            manifest,
+            state,
+            settings_json: Arc::new(Mutex::new(String::new())),
+            capabilities_json: Arc::new(Mutex::new(String::new())),
+            sidecars_json: Arc::new(Mutex::new(String::new())),
+            filesystem_json: Arc::new(Mutex::new(String::new())),
+            bus_json: Arc::new(Mutex::new(String::new())),
+        }
+    }
+
+    /// テスト用サービス組み立て: 実ディスク(`SidecarConfigStore`)は空の
+    /// ディレクトリを指すだけ(`effective` はファイルが無ければ既定値のみを
+    /// 返すので、これ自体はディスク I/O を伴わない -- `tempdir` は使わない)。
+    fn test_service(
+        entry: PluginEntry,
+    ) -> (
+        SidecarService<InMemoryGrantStorage, FakeProcessControl, PluginEntry>,
+        Arc<InMemoryGrantStorage>,
+        Arc<FakeProcessControl>,
+    ) {
+        let entries = EntryTable::new();
+        entries.push(entry);
+        let grants_store = Arc::new(InMemoryGrantStorage::new());
+        let process_driver = Arc::new(FakeProcessControl::new());
+        let sidecar_config_store = Arc::new(SidecarConfigStore::new(PathBuf::from(
+            "/nonexistent/edlr-task10-test-sidecar-config",
+        )));
+        let service = SidecarService::new(
+            entries,
+            grants_store.clone(),
+            sidecar_config_store,
+            process_driver.clone(),
+            Arc::new(Mutex::new(())),
+            IdLocks::new(),
+        );
+        (service, grants_store, process_driver)
+    }
+
+    #[test]
+    fn set_sidecar_grant_revokes_and_stops_the_running_instance() {
+        let manifest = manifest_with_sidecar("p1", "s1", 9100);
+        let (service, grants_store, process_driver) =
+            test_service(plugin_entry(manifest, PluginState::Running));
+        grants_store.seed_sidecar(
+            "p1",
+            "s1",
+            GrantState {
+                granted: true,
+                stale: false,
+            },
+        );
+        // 停止後もプロセスは(即座には exit しない)固定応答として観測できる:
+        // `refresh_sidecar_runtime` が `process_driver.status` を呼んで
+        // `SidecarInfo::instances` に反映することを検証する。
+        process_driver.set_response(
+            "p1/s1",
+            vec![InstanceStatus {
+                index: 0,
+                port: 9100,
+                running: false,
+                exit_code: Some(0),
+            }],
+        );
+
+        let infos = service
+            .set_sidecar_grant("p1", "s1", false)
+            .expect("revoke should succeed");
+
+        assert!(!infos[0].grant.granted);
+        assert_eq!(infos[0].instances[0].exit_code, Some(0));
+        assert_eq!(
+            process_driver.stop_calls.lock().unwrap().as_slice(),
+            ["p1/s1"]
+        );
+    }
+
+    #[test]
+    fn set_sidecar_grant_rejects_granting_without_executable_configured() {
+        let manifest = manifest_with_sidecar("p1", "s1", 9100);
+        let (service, _grants_store, _process_driver) =
+            test_service(plugin_entry(manifest, PluginState::Running));
+
+        let Err(err) = service.set_sidecar_grant("p1", "s1", true) else {
+            panic!("granting without a configured executable must be rejected");
+        };
+
+        assert!(matches!(
+            err,
+            RegistryError::Sidecar(msg) if msg == "sidecar s1 has no executable configured; cannot grant"
+        ));
+    }
+
+    #[test]
+    fn control_sidecar_start_rejects_disabled_plugin() {
+        let manifest = manifest_with_sidecar("p1", "s1", 9100);
+        let (service, _grants_store, _process_driver) = test_service(plugin_entry(
+            manifest,
+            PluginState::Disabled {
+                reason: "trapped".into(),
+            },
+        ));
+
+        let Err(err) = service.control_sidecar("p1", "s1", SidecarAction::Start) else {
+            panic!("disabled plugin must reject Start");
+        };
+
+        assert!(matches!(
+            err,
+            RegistryError::Sidecar(msg) if msg == "plugin p1 is disabled"
+        ));
+    }
+
+    #[test]
+    fn control_sidecar_start_rejects_when_not_granted() {
+        let manifest = manifest_with_sidecar("p1", "s1", 9100);
+        let (service, _grants_store, _process_driver) =
+            test_service(plugin_entry(manifest, PluginState::Running));
+
+        let Err(err) = service.control_sidecar("p1", "s1", SidecarAction::Start) else {
+            panic!("ungranted sidecar must reject Start");
+        };
+
+        assert!(matches!(
+            err,
+            RegistryError::Sidecar(msg) if msg == "sidecar s1 is not granted"
+        ));
+    }
+
+    #[test]
+    fn control_sidecar_stop_is_allowed_even_when_disabled() {
+        let manifest = manifest_with_sidecar("p1", "s1", 9100);
+        let (service, _grants_store, process_driver) = test_service(plugin_entry(
+            manifest,
+            PluginState::Disabled {
+                reason: "trapped".into(),
+            },
+        ));
+
+        let infos = service
+            .control_sidecar("p1", "s1", SidecarAction::Stop)
+            .expect("Stop is always allowed regardless of disabled state");
+
+        assert_eq!(infos.len(), 1);
+        assert_eq!(
+            process_driver.stop_calls.lock().unwrap().as_slice(),
+            ["p1/s1"]
+        );
     }
 }
