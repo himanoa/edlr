@@ -12,14 +12,12 @@
 //! それ以外のロジックは完全に同一(`docs/superpowers/specs/2026-07-31-phase4-registry-analysis.md`
 //! §3 の同型コード対応表を参照)。
 //!
-//! `subject_noun` は現時点ではどのサービスからも呼ばれていない
-//! (`control_sidecar` の "plugin {id} is disabled" / "driver {id} is
-//! disabled" 分岐で使う想定 -- Phase 4 タスク6 `SidecarService` の consumer)。
-//! trait の形を今のうちに揃えておくことで、以降のタスクが同じパターン
-//! (subject trait + generic service)をそのまま踏襲できる。
+//! `subject_noun` は `registry::sidecar::SidecarService::control_sidecar` の
+//! "plugin {id} is disabled" / "driver {id} is disabled" 分岐で使う
+//! (Phase 4 タスク6)。
 
 use crate::plugin::registry::RegistryError;
-use crate::plugin::{FilesystemRequest, Manifest};
+use crate::plugin::{FilesystemRequest, Manifest, SidecarRequest};
 
 /// ジェネリックな `registry` 系サービスが manifest 型に要求する最小限の面。
 pub(crate) trait RegistrySubject: Clone {
@@ -28,6 +26,9 @@ pub(crate) trait RegistrySubject: Clone {
 
     /// `[[filesystem]]` 宣言(宣言順)。
     fn filesystem(&self) -> &[FilesystemRequest];
+
+    /// `[[sidecar]]` 宣言(宣言順)。
+    fn sidecars(&self) -> &[SidecarRequest];
 
     /// `SettingsStore`/`GrantsStore`/`FilesystemConfigStore` など、既存の
     /// ストア類が引数に取る `crate::plugin::Manifest` への射影。plugin は
@@ -40,8 +41,7 @@ pub(crate) trait RegistrySubject: Clone {
     fn unknown_error(id: &str) -> RegistryError;
 
     /// エラーメッセージの主語("plugin"/"driver")。`control_sidecar` の
-    /// disabled メッセージ用(Phase 4 タスク6で使用開始)。
-    #[allow(dead_code)]
+    /// disabled メッセージ用。
     fn subject_noun() -> &'static str;
 }
 
@@ -52,6 +52,10 @@ impl RegistrySubject for Manifest {
 
     fn filesystem(&self) -> &[FilesystemRequest] {
         &self.filesystem
+    }
+
+    fn sidecars(&self) -> &[SidecarRequest] {
+        &self.sidecars
     }
 
     fn as_settings_manifest(&self) -> Manifest {
@@ -74,6 +78,10 @@ impl RegistrySubject for crate::driver::manifest::DriverManifest {
 
     fn filesystem(&self) -> &[FilesystemRequest] {
         &self.filesystem
+    }
+
+    fn sidecars(&self) -> &[SidecarRequest] {
+        &self.sidecars
     }
 
     fn as_settings_manifest(&self) -> Manifest {

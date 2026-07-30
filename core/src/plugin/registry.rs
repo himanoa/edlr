@@ -28,7 +28,7 @@ use crate::plugin::{
 use crate::registry::bus::DiskBusService;
 use crate::registry::entries::{EntryTable, IdLocks};
 use crate::registry::filesystem::DiskFilesystemService;
-use crate::registry::sidecar::SidecarService;
+use crate::registry::sidecar::DiskSidecarService;
 use crate::registry::supervisor::ThreadSupervisor;
 
 /// プラグイン 1 件の現在の駆動状態。
@@ -247,7 +247,7 @@ pub struct Registry {
     /// `Registry` 自身にも残す(`set_capabilities` が使うのと**同一の**
     /// `Arc` をこのサービスにも注入している -- `SidecarService` のドキュメント
     /// コメント参照)。
-    sidecar_service: SidecarService,
+    sidecar_service: DiskSidecarService<PluginEntry>,
     /// Serializes the whole "persist to `GrantsStore` + overwrite the shared
     /// `capabilities_json` buffer" sequence in `set_capabilities`, so the two
     /// writes for a given call always land together and in order relative to
@@ -308,7 +308,7 @@ impl Registry {
             IdLocks::new(),
         );
         let capabilities_lock = Arc::new(Mutex::new(()));
-        let sidecar_service = SidecarService::new(
+        let sidecar_service = DiskSidecarService::new(
             entries.clone(),
             grants_store.clone(),
             sidecar_config_store,

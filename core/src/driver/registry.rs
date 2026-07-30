@@ -14,22 +14,19 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use edlr_driver_channel::Bus;
-use edlr_driver_process::{ProcessDriver, ProcessSpec};
 
 use crate::driver::host::DriverHost;
 use crate::driver::manifest::DriverManifest;
 use crate::plugin::filesystem::{FilesystemConfig, FilesystemConfigStore};
 use crate::plugin::grants::{GrantState, GrantsError, GrantsStore};
 use crate::plugin::host::capabilities_json_string;
-use crate::plugin::manifest::SidecarRequest;
 use crate::plugin::registry::{FilesystemInfo, RegistryError, SidecarAction, SidecarInfo};
 use crate::plugin::settings::{SettingsError, SettingsStore};
-use crate::plugin::sidecar::{assign_ports, SidecarConfig, SidecarConfigStore};
-use crate::plugin::sidecar_runtime::{
-    implicit_http_hosts, parse_sidecars, sidecars_json_string, SidecarRuntimeEntry,
-};
+use crate::plugin::sidecar::{SidecarConfig, SidecarConfigStore};
+use crate::plugin::sidecar_runtime::{implicit_http_hosts, parse_sidecars, SidecarRuntimeEntry};
 use crate::registry::entries::{EntryTable, IdLocks};
 use crate::registry::filesystem::DiskFilesystemService;
+use crate::registry::sidecar::DiskSidecarService;
 
 /// ドライバ 1 件の現在の駆動状態。`crate::plugin::registry::PluginState` と対称。
 #[derive(Debug, Clone, PartialEq)]
@@ -101,31 +98,30 @@ pub struct DriverRegistry {
     _host: Arc<DriverHost>,
     settings_store: Arc<SettingsStore>,
     grants_store: Arc<GrantsStore>,
-    sidecar_config_store: Arc<SidecarConfigStore>,
     /// fs 群(`filesystem` / `set_filesystem_config` / `set_filesystem_grant`
     /// とその内部ヘルパー)の実体。`crate::plugin::registry::Registry` と
     /// 同じ `registry::filesystem::FilesystemService` を `RegistrySubject`
     /// (`DriverManifest`)越しに共有する(Phase 4 タスク4で統合)。
     filesystem_service: DiskFilesystemService<DriverEntry>,
-    /// サイドカープロセスを実際に所有するドライバ。`DriverHost` が全ドライバ
-    /// インスタンスで共有している 1 インスタンスをそのまま指す
-    /// (`crate::plugin::registry::Registry::process_driver` と同じ役回り)。
-    process_driver: Arc<ProcessDriver>,
+    /// サイドカー群(`sidecars` / `set_sidecar_config` / `set_sidecar_grant` /
+    /// `control_sidecar` / `stop_all_sidecars` とその内部ヘルパー)の実体。
+    /// `crate::plugin::registry::Registry` と同じ
+    /// `registry::sidecar::SidecarService` を `RegistrySubject`
+    /// (`DriverManifest`)越しに共有する(Phase 4 タスク6で統合)。
+    /// `capabilities_lock` のみ、下のフィールドとして `DriverRegistry` 自身
+    /// にも残す(`set_capabilities` が使うのと**同一の** `Arc` をこの
+    /// サービスにも注入している)。
+    sidecar_service: DiskSidecarService<DriverEntry>,
     /// プラグイン間バスの実体。`set_disabled` が `disable_driver` を呼ぶために
     /// 保持する。
     bus: Bus,
     /// `set_capabilities` の「`GrantsStore::set` への永続化」と「共有
     /// `capabilities_json` バッファへの上書き」を 1 つの臨界区間として直列化
     /// するロック。理由は `crate::plugin::registry::Registry::capabilities_lock`
-    /// のドキュメントコメントと同じ。
+    /// のドキュメントコメントと同じ。`sidecar_service` にも同一の `Arc` を
+    /// 注入している(`registry::sidecar::SidecarService` のドキュメント
+    /// コメント参照)。
     capabilities_lock: Arc<Mutex<()>>,
-    /// `set_sidecar_config`/`set_sidecar_grant` が呼ぶ `refresh_sidecar_runtime`
-    /// の臨界区間をドライバ ID ごとに直列化するロックのマップ。
-    /// `crate::plugin::registry::Registry::sidecar_runtime_locks` と同じ理由・
-    /// 同じ形(サイドカー停止が SIGTERM 無視の子で `shutdown_grace` 秒
-    /// ブロックしうるので、無関係な別ドライバの操作まで足止めしないよう
-    /// ドライバ単位に分けてある)。
-    sidecar_runtime_locks: IdLocks,
     drivers_dir: PathBuf,
 }
 
@@ -148,17 +144,24 @@ impl DriverRegistry {
             filesystem_config_store,
             IdLocks::new(),
         );
+        let capabilities_lock = Arc::new(Mutex::new(()));
+        let sidecar_service = DiskSidecarService::new(
+            entries.clone(),
+            grants_store.clone(),
+            sidecar_config_store,
+            process_driver,
+            capabilities_lock.clone(),
+            IdLocks::new(),
+        );
         DriverRegistry {
             entries,
             _host: host,
             settings_store,
             grants_store,
-            sidecar_config_store,
             filesystem_service,
-            process_driver,
+            sidecar_service,
             bus,
-            capabilities_lock: Arc::new(Mutex::new(())),
-            sidecar_runtime_locks: IdLocks::new(),
+            capabilities_lock,
             drivers_dir,
         }
     }
@@ -199,7 +202,7 @@ impl DriverRegistry {
                 let settings_manifest = manifest.as_settings_manifest();
                 let values = self.settings_store.effective(&settings_manifest);
                 let grant_state = self.grants_store.state(&settings_manifest);
-                let sidecars = self.build_sidecar_infos(&manifest);
+                let sidecars = self.sidecar_service.build_sidecar_infos(&manifest);
                 let filesystem = self.filesystem_service.build_filesystem_infos(&manifest);
                 DriverInfo {
                     manifest,
@@ -211,70 +214,6 @@ impl DriverRegistry {
                 }
             })
             .collect()
-    }
-
-    /// `<driver-id>/<sidecar-name>` の形で `ProcessDriver` のキーを組み立てる。
-    /// `DriverCtx::sidecar_key` と同じ規則。
-    fn sidecar_key(driver_id: &str, name: &str) -> String {
-        format!("{driver_id}/{name}")
-    }
-
-    /// `manifest.sidecars` の宣言順に `SidecarInfo` を組み立てる。
-    /// `crate::plugin::registry::Registry::build_sidecar_infos` と同じ流儀。
-    fn build_sidecar_infos(&self, manifest: &DriverManifest) -> Vec<SidecarInfo> {
-        let settings_manifest = manifest.as_settings_manifest();
-        let configs = self.sidecar_config_store.effective(&settings_manifest);
-        manifest
-            .sidecars
-            .iter()
-            .map(|request| {
-                let config = configs
-                    .get(&request.name)
-                    .cloned()
-                    .unwrap_or_else(|| SidecarConfig::from_request(request));
-                let grant = self
-                    .grants_store
-                    .sidecar_state(&settings_manifest, &request.name);
-                self.sidecar_info_and_entry(manifest, request, config, grant)
-                    .0
-            })
-            .collect()
-    }
-
-    /// `request` 1 件分の(既に取得済みの)設定・承認状態から `SidecarInfo` と
-    /// (`sidecars_json` バッファ用の)`SidecarRuntimeEntry` を両方組み立てる。
-    /// `crate::plugin::registry::Registry::sidecar_info_and_entry` と同じ流儀
-    /// (`ProcessDriver::status` の呼び出しを両者で 1 回だけ共有する)。
-    fn sidecar_info_and_entry(
-        &self,
-        manifest: &DriverManifest,
-        request: &SidecarRequest,
-        config: SidecarConfig,
-        grant: GrantState,
-    ) -> (SidecarInfo, SidecarRuntimeEntry) {
-        let ports = assign_ports(&config);
-        let spec = ProcessSpec {
-            command: PathBuf::from(&config.command),
-            args: config.args.clone(),
-            ports: ports.clone(),
-        };
-        let key = Self::sidecar_key(&manifest.id, &request.name);
-        let instances = self.process_driver.status(&key, &spec);
-
-        let runtime_entry = SidecarRuntimeEntry {
-            name: request.name.clone(),
-            granted: grant.granted,
-            command: config.command.clone(),
-            args: config.args.clone(),
-            ports,
-        };
-        let info = SidecarInfo {
-            request: request.clone(),
-            config,
-            grant,
-            instances,
-        };
-        (info, runtime_entry)
     }
 
     /// `id` のドライバの manifest クローンを返す(`entries` ロック保持は
@@ -409,38 +348,12 @@ impl DriverRegistry {
     /// `UnknownPlugin` を使い回すと、同じ「未登録のドライバ」失敗が
     /// `drivers/*` アームによって "unknown plugin: ..." と "unknown driver:
     /// ..." の 2 通りの文言に分かれてしまう)。
-    fn find_manifest_for_shared(&self, id: &str) -> Result<DriverManifest, RegistryError> {
-        self.entries
-            .find(
-                |entry| entry.manifest.id == id,
-                |entry| entry.manifest.clone(),
-            )
-            .ok_or_else(|| RegistryError::UnknownDriver(id.to_string()))
-    }
-
-    /// `id` のドライバが現在 `Disabled` かどうか。
-    /// `crate::plugin::registry::Registry::is_disabled` と同じ流儀。
-    fn is_disabled(&self, id: &str) -> bool {
-        self.entries
-            .find(
-                |entry| entry.manifest.id == id,
-                |entry| matches!(entry.state, DriverState::Disabled { .. }),
-            )
-            .unwrap_or(false)
-    }
-
-    /// `id` 用のサイドカー実行時ロック(`sidecar_runtime_locks`)を引く。
-    /// 無ければ作る。`crate::plugin::registry::Registry::sidecar_runtime_lock_for`
-    /// と同じ流儀。
-    fn sidecar_runtime_lock_for(&self, id: &str) -> Arc<Mutex<()>> {
-        self.sidecar_runtime_locks.lock_for(id)
-    }
-
     /// `id` のドライバの現在のサイドカー状態一覧(manifest の `[[sidecar]]`
-    /// 宣言順)を返す。`crate::plugin::registry::Registry::sidecars` と同じ。
+    /// 宣言順)を返す。実体は `registry::sidecar::SidecarService::sidecars`
+    /// (Phase 4 タスク6で統合。`crate::plugin::registry::Registry::sidecars`
+    /// と同じサービスを `RegistrySubject` 越しに共有する)。
     pub fn sidecars(&self, id: &str) -> Result<Vec<SidecarInfo>, RegistryError> {
-        let manifest = self.find_manifest_for_shared(id)?;
-        Ok(self.build_sidecar_infos(&manifest))
+        self.sidecar_service.sidecars(id)
     }
 
     /// `id` のドライバの現在のファイルアクセス状態一覧(manifest の
@@ -479,213 +392,45 @@ impl DriverRegistry {
             .set_filesystem_grant(id, name, granted)
     }
 
-    /// サイドカーの設定変更・承認変更のあとに必ず呼ぶ内部ヘルパー。
-    /// `crate::plugin::registry::Registry::refresh_sidecar_runtime` と同じ
-    /// 3 手順(停止 → `sidecars_json` の作り直し → `capabilities_json` の
-    /// 作り直し)を、ドライバ専用の `sidecar_runtime_lock_for(id)` の下で
-    /// 行う。
-    fn refresh_sidecar_runtime(
-        &self,
-        id: &str,
-        stop_names: &[String],
-    ) -> Result<Vec<SidecarInfo>, RegistryError> {
-        let (manifest, sidecars_json, capabilities_json) = self
-            .entries
-            .find(
-                |entry| entry.manifest.id == id,
-                |entry| {
-                    (
-                        entry.manifest.clone(),
-                        entry.sidecars_json.clone(),
-                        entry.capabilities_json.clone(),
-                    )
-                },
-            )
-            .ok_or_else(|| RegistryError::UnknownDriver(id.to_string()))?;
-
-        let runtime_lock = self.sidecar_runtime_lock_for(id);
-        let _runtime_guard = runtime_lock
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-
-        for name in stop_names {
-            let key = Self::sidecar_key(&manifest.id, name);
-            self.process_driver.stop(&key);
-        }
-
-        let settings_manifest = manifest.as_settings_manifest();
-        let sidecar_configs = self.sidecar_config_store.effective(&settings_manifest);
-        let mut infos = Vec::with_capacity(manifest.sidecars.len());
-        let mut runtime_entries = Vec::with_capacity(manifest.sidecars.len());
-        for request in &manifest.sidecars {
-            let config = sidecar_configs
-                .get(&request.name)
-                .cloned()
-                .unwrap_or_else(|| SidecarConfig::from_request(request));
-            let grant = self
-                .grants_store
-                .sidecar_state(&settings_manifest, &request.name);
-            let (info, runtime_entry) =
-                self.sidecar_info_and_entry(&manifest, request, config, grant);
-            infos.push(info);
-            runtime_entries.push(runtime_entry);
-        }
-        *sidecars_json
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) =
-            sidecars_json_string(&runtime_entries);
-
-        {
-            let _capabilities_guard = self
-                .capabilities_lock
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            let http_granted = self.grants_store.state(&settings_manifest).granted;
-            let mut hosts = if http_granted {
-                settings_manifest.capability_hosts()
-            } else {
-                Vec::new()
-            };
-            hosts.extend(implicit_http_hosts(&runtime_entries));
-            *capabilities_json
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner()) =
-                capabilities_json_string(&hosts);
-        }
-
-        Ok(infos)
-    }
-
     /// `id` のドライバの `name` サイドカーの設定を検証・永続化し、稼働中の
-    /// 実行を止めてから(`refresh_sidecar_runtime`)、最新の `SidecarInfo`
-    /// 一覧を返す。検証に失敗した場合は何も変更されない。
-    /// `crate::plugin::registry::Registry::set_sidecar_config` と同じ。
+    /// 実行を止めてから最新の `SidecarInfo` 一覧を返す。検証に失敗した場合は
+    /// 何も変更されない。実体は
+    /// `registry::sidecar::SidecarService::set_sidecar_config`(Phase 4
+    /// タスク6で統合)。
     pub fn set_sidecar_config(
         &self,
         id: &str,
         name: &str,
         config: &SidecarConfig,
     ) -> Result<Vec<SidecarInfo>, RegistryError> {
-        let manifest = self.find_manifest_for_shared(id)?;
-        let settings_manifest = manifest.as_settings_manifest();
-        self.sidecar_config_store
-            .update_and_effective(&settings_manifest, name, config)
-            .map_err(RegistryError::SidecarConfig)?;
-        let stop_names = vec![name.to_string()];
-        self.refresh_sidecar_runtime(id, &stop_names)
+        self.sidecar_service.set_sidecar_config(id, name, config)
     }
 
     /// `id` のドライバの `name` サイドカーの承認/取消を `GrantsStore` に
-    /// 永続化する。取消のときは稼働中の実行を止める。`granted == true` の
-    /// とき、`command` が未設定(空文字)のサイドカーは拒否する
-    /// (`RegistryError::Sidecar`)。
-    /// `crate::plugin::registry::Registry::set_sidecar_grant` と同じ検証
-    /// (「`command` 未設定では承認できない」を UI・RPC 層ではなくここで
-    /// 強制する)。
+    /// 永続化する。実体は
+    /// `registry::sidecar::SidecarService::set_sidecar_grant`(Phase 4
+    /// タスク6で統合)。
     pub fn set_sidecar_grant(
         &self,
         id: &str,
         name: &str,
         granted: bool,
     ) -> Result<Vec<SidecarInfo>, RegistryError> {
-        let manifest = self.find_manifest_for_shared(id)?;
-        let settings_manifest = manifest.as_settings_manifest();
-        if settings_manifest.sidecar(name).is_none() {
-            return Err(RegistryError::UnknownSidecar(name.to_string()));
-        }
-
-        if granted {
-            let configs = self.sidecar_config_store.effective(&settings_manifest);
-            let command_configured = configs
-                .get(name)
-                .map(|config| !config.command.is_empty())
-                .unwrap_or(false);
-            if !command_configured {
-                return Err(RegistryError::Sidecar(format!(
-                    "sidecar {name} has no executable configured; cannot grant"
-                )));
-            }
-        }
-
-        self.grants_store
-            .set_sidecar(&settings_manifest, name, granted)
-            .map_err(RegistryError::Grants)?;
-
-        let stop_names: Vec<String> = if granted {
-            Vec::new()
-        } else {
-            vec![name.to_string()]
-        };
-        self.refresh_sidecar_runtime(id, &stop_names)
+        self.sidecar_service.set_sidecar_grant(id, name, granted)
     }
 
     /// `id` のドライバの `name` サイドカーを直接操作する(ユーザー操作起点)。
-    /// `crate::plugin::registry::Registry::control_sidecar` と同じ(`Stop` は
-    /// 常に許す、`Start`/`Restart` は未承認・`command` 未設定・ドライバが
-    /// `Disabled` を `RegistryError::Sidecar` として拒否し、`sidecar_runtime_lock_for(id)`
-    /// を「承認を読む」から `ensure_started` を呼び終えるまで保持して
-    /// TOCTOU を防ぐ)。
+    /// TOCTOU 対策・無効化されたドライバへの拒否("driver {id} is
+    /// disabled" -- `RegistrySubject::subject_noun` で分岐)を含め、実体は
+    /// `registry::sidecar::SidecarService::control_sidecar`(Phase 4
+    /// タスク6で統合。ロック規律・挙動は一切変えていない)。
     pub fn control_sidecar(
         &self,
         id: &str,
         name: &str,
         action: SidecarAction,
     ) -> Result<Vec<SidecarInfo>, RegistryError> {
-        let manifest = self.find_manifest_for_shared(id)?;
-        let settings_manifest = manifest.as_settings_manifest();
-        let request = settings_manifest
-            .sidecar(name)
-            .ok_or_else(|| RegistryError::UnknownSidecar(name.to_string()))?;
-        let key = Self::sidecar_key(&manifest.id, name);
-
-        match action {
-            SidecarAction::Stop => {
-                self.process_driver.stop(&key);
-            }
-            SidecarAction::Start | SidecarAction::Restart => {
-                let runtime_lock = self.sidecar_runtime_lock_for(id);
-                let _runtime_guard = runtime_lock
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner());
-
-                if self.is_disabled(id) {
-                    return Err(RegistryError::Sidecar(format!("driver {id} is disabled")));
-                }
-
-                if action == SidecarAction::Restart {
-                    self.process_driver.stop(&key);
-                }
-
-                let grant = self.grants_store.sidecar_state(&settings_manifest, name);
-                if !grant.granted {
-                    return Err(RegistryError::Sidecar(format!(
-                        "sidecar {name} is not granted"
-                    )));
-                }
-
-                let configs = self.sidecar_config_store.effective(&settings_manifest);
-                let config = configs
-                    .get(name)
-                    .cloned()
-                    .unwrap_or_else(|| SidecarConfig::from_request(request));
-                if config.command.is_empty() {
-                    return Err(RegistryError::Sidecar(format!(
-                        "sidecar {name} has no executable configured"
-                    )));
-                }
-
-                let spec = ProcessSpec {
-                    command: PathBuf::from(&config.command),
-                    args: config.args.clone(),
-                    ports: assign_ports(&config),
-                };
-                self.process_driver
-                    .ensure_started(&key, &spec)
-                    .map_err(|e| RegistryError::Sidecar(e.to_string()))?;
-            }
-        }
-
-        self.sidecars(id)
+        self.sidecar_service.control_sidecar(id, name, action)
     }
 
     /// `manifest` が指すドライバを `Disabled { reason }` にし、そのドライバ
@@ -749,14 +494,9 @@ impl DriverRegistry {
             },
         );
 
-        let runtime_lock = self.sidecar_runtime_lock_for(&manifest.id);
-        let _runtime_guard = runtime_lock
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        for sidecar in &manifest.sidecars {
-            let key = Self::sidecar_key(&manifest.id, &sidecar.name);
-            self.process_driver.stop(&key);
-        }
+        let sidecar_names: Vec<String> = manifest.sidecars.iter().map(|s| s.name.clone()).collect();
+        self.sidecar_service
+            .stop_named(&manifest.id, &sidecar_names);
     }
 
     /// 全ドライバの全サイドカーインスタンスを停止する(デーモン shutdown 用)。
@@ -776,7 +516,7 @@ impl DriverRegistry {
     /// 決して drop されないので、その `Drop` は実質発火しない。だからこそ
     /// ここで明示的に呼ぶ必要がある。
     pub fn stop_all_sidecars(&self) {
-        self.process_driver.stop_all();
+        self.sidecar_service.stop_all();
     }
 }
 
@@ -784,6 +524,8 @@ impl DriverRegistry {
 pub(crate) mod tests {
     use super::*;
     use crate::driver::host::DriverHost;
+    use crate::plugin::SidecarRequest;
+    use edlr_driver_process::ProcessSpec;
     use std::thread;
     use std::time::Duration;
 
@@ -964,25 +706,34 @@ pub(crate) mod tests {
             filesystem_json: Arc::new(Mutex::new("[]".to_string())),
         });
 
-        let key = DriverRegistry::sidecar_key("sc-driver", "tts");
+        let key = crate::registry::sidecar::sidecar_key("sc-driver", "tts");
         let spec = ProcessSpec {
             command: PathBuf::from("/bin/sh"),
             args: vec!["-c".into(), "sleep 30".into()],
             ports: vec![50940],
         };
         registry
-            .process_driver
+            .sidecar_service
+            .process_driver()
             .ensure_started(&key, &spec)
             .expect("start sidecar directly via the driver, bypassing wasm entirely");
         assert!(
-            registry.process_driver.status(&key, &spec)[0].running,
+            registry
+                .sidecar_service
+                .process_driver()
+                .status(&key, &spec)[0]
+                .running,
             "sidecar should be running before disabling the driver"
         );
 
         registry.set_disabled(&manifest, "on-message call failed".to_string());
 
         assert!(
-            !registry.process_driver.status(&key, &spec)[0].running,
+            !registry
+                .sidecar_service
+                .process_driver()
+                .status(&key, &spec)[0]
+                .running,
             "set_disabled must stop the disabled driver's sidecars"
         );
         assert!(matches!(
@@ -1019,25 +770,34 @@ pub(crate) mod tests {
         // Deliberately no `registry.push(..)`: as in `run_driver_thread`,
         // `call_init` traps before the entry ever lands in the registry.
 
-        let key = DriverRegistry::sidecar_key("init-trap-driver", "tts");
+        let key = crate::registry::sidecar::sidecar_key("init-trap-driver", "tts");
         let spec = ProcessSpec {
             command: PathBuf::from("/bin/sh"),
             args: vec!["-c".into(), "sleep 30".into()],
             ports: vec![50943],
         };
         registry
-            .process_driver
+            .sidecar_service
+            .process_driver()
             .ensure_started(&key, &spec)
             .expect("simulate init() starting a sidecar directly via the driver, bypassing wasm");
         assert!(
-            registry.process_driver.status(&key, &spec)[0].running,
+            registry
+                .sidecar_service
+                .process_driver()
+                .status(&key, &spec)[0]
+                .running,
             "sidecar should be running before the simulated init() failure"
         );
 
         registry.set_disabled(&manifest, "init() failed: boom".to_string());
 
         assert!(
-            !registry.process_driver.status(&key, &spec)[0].running,
+            !registry
+                .sidecar_service
+                .process_driver()
+                .status(&key, &spec)[0]
+                .running,
             "set_disabled must stop a sidecar started during init(), even though the \
              DriverEntry was never pushed (the trap-before-push race)"
         );
@@ -1071,7 +831,8 @@ pub(crate) mod tests {
             .set_sidecar(&settings_manifest, "tts", true)
             .expect("grant should persist");
         registry
-            .sidecar_config_store
+            .sidecar_service
+            .sidecar_config_store()
             .update_and_effective(
                 &settings_manifest,
                 "tts",
@@ -1105,14 +866,18 @@ pub(crate) mod tests {
             ),
         }
 
-        let key = DriverRegistry::sidecar_key("sc-driver2", "tts");
+        let key = crate::registry::sidecar::sidecar_key("sc-driver2", "tts");
         let spec = ProcessSpec {
             command: PathBuf::from("/bin/sh"),
             args: vec!["-c".to_string(), "sleep 30".to_string()],
             ports: vec![50941],
         };
         assert!(
-            !registry.process_driver.status(&key, &spec)[0].running,
+            !registry
+                .sidecar_service
+                .process_driver()
+                .status(&key, &spec)[0]
+                .running,
             "rejected Start/Restart must not have spawned anything"
         );
 
@@ -1163,7 +928,8 @@ pub(crate) mod tests {
             .set_sidecar(&settings_manifest, "tts", true)
             .expect("grant should persist");
         registry
-            .sidecar_config_store
+            .sidecar_service
+            .sidecar_config_store()
             .update_and_effective(
                 &settings_manifest,
                 "tts",
@@ -1213,14 +979,15 @@ pub(crate) mod tests {
         }
         disabler.join().expect("disabler thread should not panic");
 
-        let key = DriverRegistry::sidecar_key("race-driver", "tts");
+        let key = crate::registry::sidecar::sidecar_key("race-driver", "tts");
         let spec = ProcessSpec {
             command: PathBuf::from("/bin/sh"),
             args: vec!["-c".to_string(), "sleep 30".to_string()],
             ports: vec![50942],
         };
         let running = registry
-            .process_driver
+            .sidecar_service
+            .process_driver()
             .status(&key, &spec)
             .iter()
             .any(|i| i.running);
@@ -1236,7 +1003,7 @@ pub(crate) mod tests {
              a concurrent Start read a not-yet-disabled state and spawned it back"
         );
 
-        registry.process_driver.stop(&key);
+        registry.sidecar_service.process_driver().stop(&key);
     }
 
     /// Builds an empty `DriverRegistry` (no `DriverEntry` pushed) wired to
@@ -1411,14 +1178,18 @@ pub(crate) mod tests {
             Ok(_) => panic!("starting an ungranted sidecar must be rejected"),
         }
 
-        let key = DriverRegistry::sidecar_key("voice", "engine");
+        let key = crate::registry::sidecar::sidecar_key("voice", "engine");
         let spec = ProcessSpec {
             command: PathBuf::from("/bin/sh"),
             args: vec!["-c".to_string(), "sleep 30".to_string()],
             ports: vec![51500],
         };
         assert!(
-            !registry.process_driver.status(&key, &spec)[0].running,
+            !registry
+                .sidecar_service
+                .process_driver()
+                .status(&key, &spec)[0]
+                .running,
             "a rejected Start must not have spawned anything"
         );
     }
@@ -1567,9 +1338,10 @@ pub(crate) mod tests {
             .grants_store
             .sidecar_state(&settings_manifest, "engine")
             .granted;
-        let key = DriverRegistry::sidecar_key("voice", "engine");
+        let key = crate::registry::sidecar::sidecar_key("voice", "engine");
         let running = registry
-            .process_driver
+            .sidecar_service
+            .process_driver()
             .status(
                 &key,
                 &ProcessSpec {
@@ -1588,6 +1360,6 @@ pub(crate) mod tests {
              value read before the concurrent revoke took effect"
         );
 
-        registry.process_driver.stop(&key);
+        registry.sidecar_service.process_driver().stop(&key);
     }
 }
