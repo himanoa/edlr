@@ -116,31 +116,14 @@ impl GrantsStore {
     /// `state()` の本体。呼び出し元が既に `self.lock` を保持していることを
     /// 前提とする(二重ロックしない内部ヘルパー)。
     fn state_locked(&self, manifest: &Manifest) -> GrantState {
-        let Some(current_fingerprint) = manifest.capabilities_fingerprint() else {
-            return GrantState {
-                granted: false,
-                stale: false,
-            };
-        };
-
-        let Some(saved) = self.read_saved(manifest) else {
-            return GrantState {
-                granted: false,
-                stale: false,
-            };
-        };
-
-        if saved.fingerprint != current_fingerprint {
-            return GrantState {
-                granted: false,
-                stale: true,
-            };
-        }
-
-        GrantState {
-            granted: saved.granted,
-            stale: false,
-        }
+        let current = manifest.capabilities_fingerprint();
+        let saved = self.read_saved(manifest);
+        resolve_grant(
+            current.as_deref(),
+            saved
+                .as_ref()
+                .map(|s| (s.fingerprint.as_str(), s.granted)),
+        )
     }
 
     /// 承認/取消を保存する。`granted=true` のとき現在の fingerprint を一緒に
@@ -184,34 +167,13 @@ impl GrantsStore {
     }
 
     fn sidecar_state_locked(&self, manifest: &Manifest, name: &str) -> GrantState {
-        let Some(current) = manifest.sidecar_fingerprint(name) else {
-            return GrantState {
-                granted: false,
-                stale: false,
-            };
-        };
-        let Some(saved) = self.read_saved(manifest) else {
-            return GrantState {
-                granted: false,
-                stale: false,
-            };
-        };
-        let Some(entry) = saved.sidecars.get(name) else {
-            return GrantState {
-                granted: false,
-                stale: false,
-            };
-        };
-        if entry.fingerprint != current {
-            return GrantState {
-                granted: false,
-                stale: true,
-            };
-        }
-        GrantState {
-            granted: entry.granted,
-            stale: false,
-        }
+        let current = manifest.sidecar_fingerprint(name);
+        let saved = self.read_saved(manifest);
+        let entry = saved.as_ref().and_then(|s| s.sidecars.get(name));
+        resolve_grant(
+            current.as_deref(),
+            entry.map(|e| (e.fingerprint.as_str(), e.granted)),
+        )
     }
 
     /// サイドカー 1 件の承認/取消を保存する。manifest にない `name` は no-op。
@@ -251,34 +213,13 @@ impl GrantsStore {
     }
 
     fn filesystem_state_locked(&self, manifest: &Manifest, name: &str) -> GrantState {
-        let Some(current) = manifest.filesystem_fingerprint(name) else {
-            return GrantState {
-                granted: false,
-                stale: false,
-            };
-        };
-        let Some(saved) = self.read_saved(manifest) else {
-            return GrantState {
-                granted: false,
-                stale: false,
-            };
-        };
-        let Some(entry) = saved.filesystem.get(name) else {
-            return GrantState {
-                granted: false,
-                stale: false,
-            };
-        };
-        if entry.fingerprint != current {
-            return GrantState {
-                granted: false,
-                stale: true,
-            };
-        }
-        GrantState {
-            granted: entry.granted,
-            stale: false,
-        }
+        let current = manifest.filesystem_fingerprint(name);
+        let saved = self.read_saved(manifest);
+        let entry = saved.as_ref().and_then(|s| s.filesystem.get(name));
+        resolve_grant(
+            current.as_deref(),
+            entry.map(|e| (e.fingerprint.as_str(), e.granted)),
+        )
     }
 
     /// ファイルアクセスのルート 1 件の承認/取消を保存する。manifest にない
@@ -319,34 +260,13 @@ impl GrantsStore {
     }
 
     fn bus_state_locked(&self, manifest: &Manifest, driver: &str) -> GrantState {
-        let Some(current) = manifest.bus_fingerprint(driver) else {
-            return GrantState {
-                granted: false,
-                stale: false,
-            };
-        };
-        let Some(saved) = self.read_saved(manifest) else {
-            return GrantState {
-                granted: false,
-                stale: false,
-            };
-        };
-        let Some(entry) = saved.bus.get(driver) else {
-            return GrantState {
-                granted: false,
-                stale: false,
-            };
-        };
-        if entry.fingerprint != current {
-            return GrantState {
-                granted: false,
-                stale: true,
-            };
-        }
-        GrantState {
-            granted: entry.granted,
-            stale: false,
-        }
+        let current = manifest.bus_fingerprint(driver);
+        let saved = self.read_saved(manifest);
+        let entry = saved.as_ref().and_then(|s| s.bus.get(driver));
+        resolve_grant(
+            current.as_deref(),
+            entry.map(|e| (e.fingerprint.as_str(), e.granted)),
+        )
     }
 
     /// バス接続先のドライバ 1 件の承認/取消を保存する。manifest にない
@@ -387,34 +307,13 @@ impl GrantsStore {
     }
 
     fn dashboard_state_locked(&self, manifest: &Manifest, widget: &str) -> GrantState {
-        let Some(current) = manifest.dashboard_fingerprint(widget) else {
-            return GrantState {
-                granted: false,
-                stale: false,
-            };
-        };
-        let Some(saved) = self.read_saved(manifest) else {
-            return GrantState {
-                granted: false,
-                stale: false,
-            };
-        };
-        let Some(entry) = saved.dashboard.get(widget) else {
-            return GrantState {
-                granted: false,
-                stale: false,
-            };
-        };
-        if entry.fingerprint != current {
-            return GrantState {
-                granted: false,
-                stale: true,
-            };
-        }
-        GrantState {
-            granted: entry.granted,
-            stale: false,
-        }
+        let current = manifest.dashboard_fingerprint(widget);
+        let saved = self.read_saved(manifest);
+        let entry = saved.as_ref().and_then(|s| s.dashboard.get(widget));
+        resolve_grant(
+            current.as_deref(),
+            entry.map(|e| (e.fingerprint.as_str(), e.granted)),
+        )
     }
 
     /// ダッシュボードウィジェット 1 件の承認/取消を保存する。manifest に
@@ -451,6 +350,111 @@ impl GrantsStore {
     /// 保存先も `<grants-dir>/drivers/` に分ける。
     pub fn new_for_drivers(dir: PathBuf) -> GrantsStore {
         GrantsStore::new(dir.join("drivers"))
+    }
+}
+
+/// 保存済み grant と現在の fingerprint から承認状態を判定する(純関数)。
+///
+/// - 要求がない(`current` が `None`)→ `{ granted: false, stale: false }`
+/// - 未保存(`saved` が `None`)→ `{ granted: false, stale: false }`
+/// - fingerprint 不一致 → `{ granted: false, stale: true }`
+/// - 一致 → 保存された `granted` をそのまま(取消保存は `{ false, false }`)
+fn resolve_grant(current: Option<&str>, saved: Option<(&str, bool)>) -> GrantState {
+    let Some(current) = current else {
+        return GrantState {
+            granted: false,
+            stale: false,
+        };
+    };
+
+    let Some((fingerprint, granted)) = saved else {
+        return GrantState {
+            granted: false,
+            stale: false,
+        };
+    };
+
+    if fingerprint != current {
+        return GrantState {
+            granted: false,
+            stale: true,
+        };
+    }
+
+    GrantState {
+        granted,
+        stale: false,
+    }
+}
+
+#[cfg(test)]
+mod resolve_tests {
+    use super::*;
+
+    #[test]
+    fn no_current_fingerprint_is_not_granted_and_not_stale() {
+        assert_eq!(
+            resolve_grant(None, Some(("fp", true))),
+            GrantState {
+                granted: false,
+                stale: false
+            }
+        );
+    }
+
+    #[test]
+    fn no_saved_grant_is_not_granted_and_not_stale() {
+        assert_eq!(
+            resolve_grant(Some("fp"), None),
+            GrantState {
+                granted: false,
+                stale: false
+            }
+        );
+    }
+
+    #[test]
+    fn mismatched_fingerprint_is_stale() {
+        assert_eq!(
+            resolve_grant(Some("fp-new"), Some(("fp-old", true))),
+            GrantState {
+                granted: false,
+                stale: true
+            }
+        );
+    }
+
+    #[test]
+    fn matching_fingerprint_returns_saved_granted() {
+        assert_eq!(
+            resolve_grant(Some("fp"), Some(("fp", true))),
+            GrantState {
+                granted: true,
+                stale: false
+            }
+        );
+    }
+
+    #[test]
+    fn empty_string_saved_fingerprint_mismatches_any_current_fingerprint() {
+        assert_eq!(
+            resolve_grant(Some("fp"), Some(("", true))),
+            GrantState {
+                granted: false,
+                stale: true
+            }
+        );
+    }
+
+    #[test]
+    fn matching_fingerprint_with_revoked_saved_grant_is_not_granted_and_not_stale() {
+        assert_eq!(
+            resolve_grant(Some("fp"), Some(("fp", false))),
+            GrantState {
+                granted: false,
+                stale: false
+            }
+        );
     }
 }
 
