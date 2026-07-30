@@ -355,37 +355,7 @@ impl Manifest {
     /// 衝突のいずれも計算量的に不可能なので、`canonical` が異なれば
     /// フィンガープリントも(実務上)必ず異なる。
     pub fn capabilities_fingerprint(&self) -> Option<String> {
-        if self.capabilities.is_empty() {
-            return None;
-        }
-
-        let mut canonical_requests: Vec<String> = self
-            .capabilities
-            .iter()
-            .map(|req| match req {
-                CapabilityRequest::Http { hosts, reason } => {
-                    let mut normalized_hosts: Vec<String> =
-                        hosts.iter().map(|h| h.to_lowercase()).collect();
-                    normalized_hosts.sort();
-
-                    let mut encoded = encode_field("http");
-                    encoded.push_str(&encode_field(&normalized_hosts.len().to_string()));
-                    for host in &normalized_hosts {
-                        encoded.push_str(&encode_field(host));
-                    }
-                    encoded.push_str(&encode_field(reason));
-                    encoded
-                }
-            })
-            .collect();
-        canonical_requests.sort();
-
-        let mut canonical = encode_field(&canonical_requests.len().to_string());
-        for request in &canonical_requests {
-            canonical.push_str(&encode_field(request));
-        }
-
-        Some(sha256_hex(&canonical))
+        crate::capability::fingerprint::capabilities(&self.capabilities)
     }
 
     /// `Http` capability 要求の host 一覧を平坦化して返す(重複を含みうる)。
@@ -420,19 +390,8 @@ impl Manifest {
     /// 「設定変更 → 停止 → 次の ensure-started で新パスを起動」として扱うため
     /// (設計書「付与(grants)」の節を参照)。
     pub fn sidecar_fingerprint(&self, name: &str) -> Option<String> {
-        let sidecar = self.sidecar(name)?;
-
-        let mut canonical = encode_field("sidecar");
-        canonical.push_str(&encode_field(&sidecar.name));
-        canonical.push_str(&encode_field(&sidecar.reason));
-        canonical.push_str(&encode_field(&sidecar.args.len().to_string()));
-        for arg in &sidecar.args {
-            canonical.push_str(&encode_field(arg));
-        }
-        canonical.push_str(&encode_field(&sidecar.port.to_string()));
-        canonical.push_str(&encode_field(if sidecar.scalable { "1" } else { "0" }));
-
-        Some(sha256_hex(&canonical))
+        self.sidecar(name)
+            .map(crate::capability::fingerprint::sidecar)
     }
 
     pub fn filesystem_root(&self, name: &str) -> Option<&FilesystemRequest> {
@@ -443,12 +402,8 @@ impl Manifest {
     /// `capabilities_fingerprint` と同じ長さ接頭辞エンコード + SHA-256。
     /// **ユーザーが選ぶ path は含めない**(パス変更は再承認を要さない)。
     pub fn filesystem_fingerprint(&self, name: &str) -> Option<String> {
-        let request = self.filesystem_root(name)?;
-        let mut canonical = encode_field("filesystem");
-        canonical.push_str(&encode_field(&request.name));
-        canonical.push_str(&encode_field(&request.reason));
-        canonical.push_str(&encode_field(request.mode.as_str()));
-        Some(sha256_hex(&canonical))
+        self.filesystem_root(name)
+            .map(crate::capability::fingerprint::filesystem)
     }
 
     pub fn bus_request(&self, driver: &str) -> Option<&BusRequest> {
@@ -459,24 +414,8 @@ impl Manifest {
     /// `capabilities_fingerprint` と同じ長さ接頭辞エンコード + SHA-256。
     /// トピック順の違いは無視する(ソートしてから畳み込む)。
     pub fn bus_fingerprint(&self, driver: &str) -> Option<String> {
-        let request = self.bus_request(driver)?;
-        let mut publish = request.publish.clone();
-        publish.sort();
-        let mut subscribe = request.subscribe.clone();
-        subscribe.sort();
-
-        let mut canonical = encode_field("bus");
-        canonical.push_str(&encode_field(&request.driver));
-        canonical.push_str(&encode_field(&publish.len().to_string()));
-        for topic in &publish {
-            canonical.push_str(&encode_field(topic));
-        }
-        canonical.push_str(&encode_field(&subscribe.len().to_string()));
-        for topic in &subscribe {
-            canonical.push_str(&encode_field(topic));
-        }
-        canonical.push_str(&encode_field(&request.reason));
-        Some(sha256_hex(&canonical))
+        self.bus_request(driver)
+            .map(crate::capability::fingerprint::bus)
     }
 
     pub fn dashboard_widget(&self, id: &str) -> Option<&DashboardWidget> {
@@ -487,41 +426,9 @@ impl Manifest {
     /// (grants の失効判定に使う)。宣言のどのフィールドが変わっても値が
     /// 変わる(`bus_fingerprint` と同じ流儀)。
     pub fn dashboard_fingerprint(&self, id: &str) -> Option<String> {
-        let widget = self.dashboard_widget(id)?;
-        let mut canonical = encode_field("dashboard");
-        canonical.push_str(&encode_field(&widget.id));
-        canonical.push_str(&encode_field(&widget.title));
-        canonical.push_str(&encode_field(&widget.entry));
-        canonical.push_str(&encode_field(widget.size.as_str()));
-        Some(sha256_hex(&canonical))
+        self.dashboard_widget(id)
+            .map(crate::capability::fingerprint::dashboard)
     }
-}
-
-/// 可変長文字列フィールドを長さ接頭辞方式でエンコードする: `"{byte_len}:{content}"`。
-///
-/// 複数の可変長フィールドを区切り文字(`;` や `|` など)で単純結合すると、
-/// フィールドの中身に区切り文字そのものが含まれる場合(例えば `reason` は
-/// 検証されない自由記述フィールド)に異なる入力が同じ結合結果を生みうる
-/// (例: `"a;b"` と `"a" + ";" + "b"` の衝突)。長さを前置しておけば、
-/// `encode_field(f1) + encode_field(f2) + ... + encode_field(fn)` は
-/// `(f1, f2, ..., fn)` に対して単射になる — 先頭から「長さを読む→その
-/// バイト数だけ読む」を繰り返せば一意に読み戻せるため、内容にどんな文字列が
-/// 含まれていても後続フィールドとの衝突が起こらない。
-fn encode_field(s: &str) -> String {
-    format!("{}:{}", s.len(), s)
-}
-
-/// SHA-256 の16進表現。`capabilities_fingerprint` はプラグイン作者自身が
-/// 完全に制御できる入力を衝突困難性つきで比較する必要があるため、暗号学的
-/// ハッシュ関数が必須(非暗号学的ハッシュだと誕生日衝突が現実的な計算量で
-/// 作れてしまう)。
-fn sha256_hex(input: &str) -> String {
-    use sha2::{Digest, Sha256};
-
-    let mut hasher = Sha256::new();
-    hasher.update(input.as_bytes());
-    let digest = hasher.finalize();
-    digest.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// `load_manifest` が返しうるエラー。
