@@ -288,7 +288,7 @@ pub(super) fn get_sidecars(
 }
 ```
 
-対象14本: `list`(plugins/list。現在 ~45 行あるので、1要素分の JSON 組み立てを `fn plugin_entry_json(registry: &Registry, info: ...) -> serde_json::Value` に分けて 40 行制限を守る)/ `set_bus_grant` / `set_dashboard_grant` / `dashboard_list` / `get_settings` / `set_settings` / `get_capabilities` / `set_capabilities` / `get_sidecars` / `set_sidecar_config` / `set_sidecar_grant` / `sidecar_control` / `get_filesystem` / `set_filesystem_config` / `set_filesystem_grant`。
+対象15本: `list`(plugins/list。現在 ~45 行あるので、1要素分の JSON 組み立てを `fn plugin_entry_json(registry: &Registry, info: ...) -> serde_json::Value` に分けて 40 行制限を守る)/ `set_bus_grant` / `set_dashboard_grant` / `dashboard_list` / `get_settings` / `set_settings` / `get_capabilities` / `set_capabilities` / `get_sidecars` / `set_sidecar_config` / `set_sidecar_grant` / `sidecar_control` / `get_filesystem` / `set_filesystem_config` / `set_filesystem_grant`。
 
 arm 側は全て1行になる:
 
