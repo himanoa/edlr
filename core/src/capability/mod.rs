@@ -6,6 +6,7 @@
 
 pub mod fingerprint;
 pub mod request;
+pub mod validate;
 
 use crate::plugin::grants::{GrantState, GrantsError, GrantsStore};
 use crate::plugin::Manifest;
