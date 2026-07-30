@@ -5,7 +5,7 @@ summary: Phase 1 で grants.rs(std::fs/Mutex 使用)が純粋分類の capabilit
 status: open
 labels: docs, refactor
 created: 2026-07-30T13:08:14Z
-updated: 2026-07-30T13:57:13Z
+updated: 2026-07-30T15:10:34Z
 ---
 
 ## どこで踏んだか
@@ -46,3 +46,9 @@ Phase 2 でも同じ公認例外を1件追加: `core/src/rpc/render.rs` が
 `crate::plugin::registry` 配下のデータ型(`BusInfo`/`DashboardInfo`/
 `ScheduleInfo` 等)を import する。rpc/ は純粋モジュールだが、これは
 値型のみの参照で副作用はない。型の所属整理は Phase 4 で行う。
+
+## 追記(2026-07-31, Phase 3)
+
+Phase 3 で `core/src/settings/store.rs`(SettingsStore、std::fs + Mutex)も
+純粋分類の settings/ 配下へ移動した。grants.rs と同じ公認例外
+(spec が「Storage trait + ディスク実装」を同モジュールに置く構成を明示)。
