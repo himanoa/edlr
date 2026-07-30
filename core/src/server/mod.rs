@@ -152,240 +152,21 @@ pub fn handle_rpc_with_drivers(
 
     let registry = registry.ok_or_else(|| "plugins unavailable".to_string())?;
     match method {
-        "plugins/list" => {
-            let plugins: Vec<serde_json::Value> = registry
-                .list()
-                .into_iter()
-                .map(|info| {
-                    let mut value = serde_json::json!({
-                        "id": info.manifest.id,
-                        "name": info.manifest.name,
-                        "version": info.manifest.version,
-                        "description": info.manifest.description,
-                        "settings": info.manifest.settings,
-                        "values": info.values,
-                        "capabilities": capabilities_result_json(
-                            &info.capability_requests,
-                            &info.grant_state,
-                        ),
-                    });
-                    value["sidecars"] = sidecars_result_json(&info.sidecars)["sidecars"].clone();
-                    value["filesystem"] = filesystem_result_json(&info.filesystem)["roots"].clone();
-                    let bus = registry.bus(&info.manifest.id).unwrap_or_default();
-                    value["bus"] = bus_result_json(&bus)["bus"].clone();
-                    value["dashboard"] =
-                        dashboard_result_json(&info.dashboard)["dashboard"].clone();
-                    value["schedules"] =
-                        schedules_result_json(&info.schedules)["schedules"].clone();
-                    value["dropped"] = dropped_result_json(&info.dropped);
-                    // `secret` 型設定の値は `values` に含まれない(write-only)。
-                    // 「設定済みかどうか」だけを UI に伝える。
-                    value["secretsSet"] = serde_json::json!(info.secrets_set);
-                    match info.state {
-                        crate::plugin::PluginState::Running => {
-                            value["state"] = serde_json::json!("running");
-                        }
-                        crate::plugin::PluginState::Disabled { reason } => {
-                            value["state"] = serde_json::json!("disabled");
-                            value["reason"] = serde_json::json!(reason);
-                        }
-                    }
-                    value
-                })
-                .collect();
-            Ok(serde_json::json!({
-                "pluginsDir": registry.plugins_dir().to_string_lossy(),
-                "plugins": plugins,
-            }))
-        }
-        "plugins/set-bus-grant" => {
-            let plugin = param_str(params, "plugin")?;
-            let driver = param_str(params, "driver")?;
-            let granted = params
-                .get("granted")
-                .and_then(|v| v.as_bool())
-                .ok_or_else(|| "params.granted must be a bool".to_string())?;
-            registry
-                .set_bus_grant(plugin, driver, granted)
-                .map_err(|e| e.to_string())?;
-            // `set_sidecar_grant`/`set_filesystem_grant` と同じ流儀: 1 件だけ
-            // の grant state を返すのではなく、その plugin の bus 一覧全体を
-            // 返す(UI が 1 往復でリスト全体を更新できるように)。
-            let bus = registry.bus(plugin).map_err(|e| e.to_string())?;
-            Ok(bus_result_json(&bus))
-        }
-        "plugins/set-dashboard-grant" => {
-            let plugin = param_str(params, "plugin")?;
-            let widget = param_str(params, "widget")?;
-            let granted = params
-                .get("granted")
-                .and_then(|v| v.as_bool())
-                .ok_or_else(|| "params.granted must be a bool".to_string())?;
-            // `set_bus_grant` と同じ流儀: その plugin のウィジェット一覧全体を
-            // 返す(UI が 1 往復でリスト全体を更新できるように)。
-            let dashboard = registry
-                .set_dashboard_grant(plugin, widget, granted)
-                .map_err(|e| e.to_string())?;
-            Ok(dashboard_result_json(&dashboard))
-        }
-        "dashboard/list" => {
-            // Dashboard 画面用: grant 済みウィジェットだけを、iframe が
-            // そのまま使える URL 付きで返す。未 grant を混ぜないのは、
-            // アセット配信側も未 grant を 404 にする(見えないものは
-            // 取得もできない)のと対になる。
-            let widgets: Vec<serde_json::Value> = registry
-                .dashboard_widgets_for_ui()
-                .into_iter()
-                .filter(|(_, _, _, info)| info.grant.granted)
-                .map(|(plugin_id, plugin_name, state, info)| {
-                    let entry_file = std::path::Path::new(&info.request.entry)
-                        .file_name()
-                        .and_then(|s| s.to_str())
-                        .unwrap_or("index.html");
-                    let events = registry.events_of(&plugin_id).unwrap_or_default();
-                    let state_str = match state {
-                        crate::plugin::PluginState::Running => "running",
-                        crate::plugin::PluginState::Disabled { .. } => "disabled",
-                    };
-                    serde_json::json!({
-                        "plugin": plugin_id,
-                        "pluginName": plugin_name,
-                        "widget": info.request.id,
-                        "title": info.request.title,
-                        "url": format!("/plugin-ui/{plugin_id}/{}/{entry_file}", info.request.id),
-                        "size": info.request.size.as_str(),
-                        "events": events,
-                        "resolved": info.resolved,
-                        "state": state_str,
-                    })
-                })
-                .collect();
-            Ok(serde_json::json!({ "widgets": widgets }))
-        }
-        "plugins/get-settings" => {
-            let plugin = params
-                .get("plugin")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| "params.plugin must be a string".to_string())?;
-            let values = registry.values(plugin).map_err(|e| e.to_string())?;
-            Ok(serde_json::Value::Object(values))
-        }
-        "plugins/set-settings" => {
-            let plugin = params
-                .get("plugin")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| "params.plugin must be a string".to_string())?;
-            let values = params
-                .get("values")
-                .and_then(|v| v.as_object())
-                .ok_or_else(|| "params.values must be an object".to_string())?;
-            let updated = registry
-                .set_values(plugin, values)
-                .map_err(|e| e.to_string())?;
-            Ok(serde_json::Value::Object(updated))
-        }
-        "plugins/get-capabilities" => {
-            let plugin = params
-                .get("plugin")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| "params.plugin must be a string".to_string())?;
-            let (requests, grant_state) =
-                registry.capabilities(plugin).map_err(|e| e.to_string())?;
-            Ok(capabilities_result_json(&requests, &grant_state))
-        }
-        "plugins/set-capabilities" => {
-            let plugin = params
-                .get("plugin")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| "params.plugin must be a string".to_string())?;
-            let granted = params
-                .get("granted")
-                .and_then(|v| v.as_bool())
-                .ok_or_else(|| "params.granted must be a bool".to_string())?;
-            let grant_state = registry
-                .set_capabilities(plugin, granted)
-                .map_err(|e| e.to_string())?;
-            let (requests, _) = registry.capabilities(plugin).map_err(|e| e.to_string())?;
-            Ok(capabilities_result_json(&requests, &grant_state))
-        }
-        "plugins/get-sidecars" => {
-            let plugin = param_str(params, "plugin")?;
-            let sidecars = registry.sidecars(plugin).map_err(|e| e.to_string())?;
-            Ok(sidecars_result_json(&sidecars))
-        }
-        "plugins/set-sidecar-config" => {
-            let plugin = param_str(params, "plugin")?;
-            let name = param_str(params, "name")?;
-            let config: crate::plugin::SidecarConfig = serde_json::from_value(
-                params
-                    .get("config")
-                    .cloned()
-                    .ok_or_else(|| "params.config must be an object".to_string())?,
-            )
-            .map_err(|e| format!("params.config is invalid: {e}"))?;
-            let sidecars = registry
-                .set_sidecar_config(plugin, name, &config)
-                .map_err(|e| e.to_string())?;
-            Ok(sidecars_result_json(&sidecars))
-        }
-        "plugins/set-sidecar-grant" => {
-            let plugin = param_str(params, "plugin")?;
-            let name = param_str(params, "name")?;
-            let granted = params
-                .get("granted")
-                .and_then(|v| v.as_bool())
-                .ok_or_else(|| "params.granted must be a bool".to_string())?;
-            let sidecars = registry
-                .set_sidecar_grant(plugin, name, granted)
-                .map_err(|e| e.to_string())?;
-            Ok(sidecars_result_json(&sidecars))
-        }
-        "plugins/sidecar-control" => {
-            let plugin = param_str(params, "plugin")?;
-            let name = param_str(params, "name")?;
-            let action = match param_str(params, "action")? {
-                "start" => crate::plugin::SidecarAction::Start,
-                "stop" => crate::plugin::SidecarAction::Stop,
-                "restart" => crate::plugin::SidecarAction::Restart,
-                other => return Err(format!("unknown action: {other}")),
-            };
-            let sidecars = registry
-                .control_sidecar(plugin, name, action)
-                .map_err(|e| e.to_string())?;
-            Ok(sidecars_result_json(&sidecars))
-        }
-        "plugins/get-filesystem" => {
-            let plugin = param_str(params, "plugin")?;
-            let roots = registry.filesystem(plugin).map_err(|e| e.to_string())?;
-            Ok(filesystem_result_json(&roots))
-        }
-        "plugins/set-filesystem-config" => {
-            let plugin = param_str(params, "plugin")?;
-            let name = param_str(params, "name")?;
-            let config: crate::plugin::FilesystemConfig = serde_json::from_value(
-                params
-                    .get("config")
-                    .cloned()
-                    .ok_or_else(|| "params.config must be an object".to_string())?,
-            )
-            .map_err(|e| format!("params.config is invalid: {e}"))?;
-            let roots = registry
-                .set_filesystem_config(plugin, name, &config)
-                .map_err(|e| e.to_string())?;
-            Ok(filesystem_result_json(&roots))
-        }
-        "plugins/set-filesystem-grant" => {
-            let plugin = param_str(params, "plugin")?;
-            let name = param_str(params, "name")?;
-            let granted = params
-                .get("granted")
-                .and_then(|v| v.as_bool())
-                .ok_or_else(|| "params.granted must be a bool".to_string())?;
-            let roots = registry
-                .set_filesystem_grant(plugin, name, granted)
-                .map_err(|e| e.to_string())?;
-            Ok(filesystem_result_json(&roots))
-        }
+        "plugins/list" => rpc_plugins::list(registry, params),
+        "plugins/set-bus-grant" => rpc_plugins::set_bus_grant(registry, params),
+        "plugins/set-dashboard-grant" => rpc_plugins::set_dashboard_grant(registry, params),
+        "dashboard/list" => rpc_plugins::dashboard_list(registry, params),
+        "plugins/get-settings" => rpc_plugins::get_settings(registry, params),
+        "plugins/set-settings" => rpc_plugins::set_settings(registry, params),
+        "plugins/get-capabilities" => rpc_plugins::get_capabilities(registry, params),
+        "plugins/set-capabilities" => rpc_plugins::set_capabilities(registry, params),
+        "plugins/get-sidecars" => rpc_plugins::get_sidecars(registry, params),
+        "plugins/set-sidecar-config" => rpc_plugins::set_sidecar_config(registry, params),
+        "plugins/set-sidecar-grant" => rpc_plugins::set_sidecar_grant(registry, params),
+        "plugins/sidecar-control" => rpc_plugins::sidecar_control(registry, params),
+        "plugins/get-filesystem" => rpc_plugins::get_filesystem(registry, params),
+        "plugins/set-filesystem-config" => rpc_plugins::set_filesystem_config(registry, params),
+        "plugins/set-filesystem-grant" => rpc_plugins::set_filesystem_grant(registry, params),
         other => Err(format!("unknown method: {other}")),
     }
 }
@@ -541,13 +322,12 @@ fn handle_drivers_rpc(
     }
 }
 
-// Phase 2 で rpc/ へ移動(server 内の呼び出しと tests の `use super::*`
-// がそのまま解決するよう、この use を温存する)。
+// `handle_drivers_rpc` が使う分だけ残す(`plugins/*` 側は rpc_plugins.rs に
+// 移った)。
 use crate::rpc::params::param_str;
-use crate::rpc::render::{
-    bus_result_json, capabilities_result_json, dashboard_result_json, dropped_result_json,
-    filesystem_result_json, schedules_result_json, sidecars_result_json,
-};
+use crate::rpc::render::{capabilities_result_json, filesystem_result_json, sidecars_result_json};
+
+mod rpc_plugins;
 
 /// ダッシュボードウィジェット向け SDK。`include_str!` でバイナリに埋め込み、
 /// デーモン単体で(プラグイン側に SDK を同梱させずに)配信する。
