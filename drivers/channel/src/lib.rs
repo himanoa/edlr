@@ -12,6 +12,11 @@ pub use topic::TopicSpec;
 /// あり、大きなデータの受け渡しは `driver-fs` の担当という切り分け。
 pub const BUS_MAX_PAYLOAD: usize = 256 * 1024;
 
+/// ホストが合成するメッセージの予約送信元 id。`sidecar-ready` などの
+/// ホスト発通知はこの `from` で届く。なりすましを塞ぐため、core の
+/// manifest 検証はこの id を持つプラグイン/ドライバを拒否する。
+pub const HOST_SENDER: &str = "host";
+
 use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::mpsc::{SyncSender, TrySendError};
@@ -180,6 +185,40 @@ impl Bus {
                 Err(BusError::DriverUnavailable(driver_id.to_string()))
             }
         }
+    }
+
+    /// ホスト発の合成メッセージ(`from = HOST_SENDER`)をドライバの
+    /// キューへ届ける。監視スレッドなどホスト内部の専用スレッドから
+    /// 呼ばれる前提で、`publish` と違い**ブロッキング送信**する
+    /// (ready 通知は取りこぼすと空白期間が再発するため、キューが
+    /// 満杯ならドライバが捌くまで待つ)。ホスト予約経路なので
+    /// トピック宣言のチェックは行わない(`sidecar-ready` は manifest に
+    /// 宣言されない)。送信そのものはバスのロックを手放してから行う。
+    pub fn notify_from_host(
+        &self,
+        driver_id: &str,
+        topic: &str,
+        payload: Vec<u8>,
+    ) -> Result<(), BusError> {
+        let sender = {
+            let state = self.lock_state();
+            let slot = state
+                .drivers
+                .get(driver_id)
+                .ok_or_else(|| BusError::UnknownDriver(driver_id.to_string()))?;
+            if !slot.available {
+                return Err(BusError::DriverUnavailable(driver_id.to_string()));
+            }
+            slot.sender.clone()
+        };
+        let message = Message {
+            from: HOST_SENDER.to_string(),
+            topic: topic.to_string(),
+            payload,
+        };
+        sender
+            .send(message)
+            .map_err(|_| BusError::DriverUnavailable(driver_id.to_string()))
     }
 
     pub fn get(&self, driver_id: &str, topic: &str) -> Result<Option<Vec<u8>>, BusError> {
@@ -382,6 +421,37 @@ mod tests {
         assert_eq!(msg.from, "translator");
         assert_eq!(msg.topic, "ship-status");
         assert_eq!(msg.payload, b"hi".to_vec());
+    }
+
+    #[test]
+    fn notify_from_host_delivers_with_from_host_and_without_a_declared_topic() {
+        let (bus, rx) = bus_with_driver(4);
+        // "sidecar-ready" は topics() に宣言されていないが、ホスト予約経路は通る。
+        bus.notify_from_host("ed-state", "sidecar-ready", b"{}".to_vec())
+            .unwrap();
+        let msg = rx.try_recv().expect("message queued");
+        assert_eq!(msg.from, HOST_SENDER);
+        assert_eq!(msg.topic, "sidecar-ready");
+        assert_eq!(msg.payload, b"{}".to_vec());
+    }
+
+    #[test]
+    fn notify_from_host_to_an_unknown_driver_is_rejected() {
+        let bus = Bus::new();
+        assert!(matches!(
+            bus.notify_from_host("nope", "sidecar-ready", vec![]),
+            Err(BusError::UnknownDriver(_))
+        ));
+    }
+
+    #[test]
+    fn notify_from_host_to_a_disabled_driver_is_rejected() {
+        let (bus, _rx) = bus_with_driver(4);
+        bus.disable_driver("ed-state");
+        assert!(matches!(
+            bus.notify_from_host("ed-state", "sidecar-ready", vec![]),
+            Err(BusError::DriverUnavailable(_))
+        ));
     }
 
     #[test]
