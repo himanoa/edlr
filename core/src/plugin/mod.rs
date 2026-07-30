@@ -12,7 +12,8 @@ pub mod runner;
 pub(crate) mod schedule;
 pub mod schedule_store;
 pub(crate) mod select_options;
-pub mod settings;
+// Phase 3 で settings/store.rs へ移動(旧パス互換。削除は Phase 6)。
+pub use crate::settings::store as settings;
 pub mod sidecar;
 pub mod sidecar_runtime;
 

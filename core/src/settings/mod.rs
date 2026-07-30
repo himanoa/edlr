@@ -1,10 +1,12 @@
 //! プラグイン設定の検証・マージと永続化の口。
 //!
-//! 現状は trait 定義のみ(Phase 0)。Phase 3 で検証・マージの純粋ロジックが
-//! `plugin/settings.rs` からここへ移ってくる。
+//! 検証・マージの純粋ロジックは [`store`] にある(Phase 3 で
+//! `plugin/settings.rs` から移動)。
 
-use crate::plugin::settings::{SettingsError, SettingsStore};
+pub mod store;
+
 use crate::plugin::Manifest;
+use store::{SettingsError, SettingsStore};
 
 /// 設定永続化の口。ディスク実装は [`SettingsStore`]。
 pub trait Storage {
