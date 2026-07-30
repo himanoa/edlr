@@ -5,10 +5,11 @@
 //! `docs/superpowers/specs/2026-07-30-core-refactoring-design.md` を参照。
 
 pub mod fingerprint;
+pub mod grants;
 pub mod request;
 pub mod validate;
 
-use crate::plugin::grants::{GrantState, GrantsError, GrantsStore};
+use grants::{GrantState, GrantsError, GrantsStore};
 use crate::plugin::Manifest;
 
 /// capability 承認の永続化の口。ディスク実装は [`GrantsStore`]。

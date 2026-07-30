@@ -3,7 +3,8 @@ pub mod bus_runtime;
 pub mod dropped;
 pub mod filesystem;
 pub mod fs_runtime;
-pub mod grants;
+// Phase 1 で capability/grants.rs へ移動(旧パス互換。削除は Phase 6)。
+pub use crate::capability::grants;
 pub mod host;
 pub mod manifest;
 pub mod registry;
