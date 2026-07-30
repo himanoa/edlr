@@ -6,7 +6,8 @@ pub mod host;
 pub mod manifest;
 // Phase 4 タスク9で registry/driver.rs へ移動(旧パス互換。削除は Phase 6)。
 pub use crate::registry::driver as registry;
-pub mod runner;
+// Phase 5 タスク2で runner/driver.rs へ移動(旧パス互換。削除は Phase 6)。
+pub use crate::runner::driver as runner;
 
 pub use manifest::{load_driver_manifest, DriverManifest};
 pub use registry::{DriverEntry, DriverInfo, DriverRegistry, DriverRegistryError, DriverState};
