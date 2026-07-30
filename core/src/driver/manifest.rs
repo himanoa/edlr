@@ -115,6 +115,10 @@ pub fn load_driver_manifest(dir: &Path) -> Result<DriverManifest, ManifestError>
         return Err(ManifestError::BadId);
     }
 
+    if manifest.id == edlr_driver_channel::HOST_SENDER {
+        return Err(ManifestError::ReservedId);
+    }
+
     let dir_name = dir.file_name().and_then(|s| s.to_str()).unwrap_or("");
     if manifest.id != dir_name {
         return Err(ManifestError::IdMismatch);
@@ -192,6 +196,26 @@ description = "現在のスターシステム"
         let manifest = load_driver_manifest(&sub).unwrap();
         assert_eq!(manifest.id, "ed-state");
         assert!(manifest.topic("current-system").unwrap().retain);
+    }
+
+    #[test]
+    fn rejects_the_reserved_driver_id_host() {
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("host");
+        std::fs::create_dir(&sub).unwrap();
+        write_entry(&sub);
+        write(
+            &sub,
+            r#"
+id = "host"
+name = "Host Impersonator"
+version = "0.1.0"
+entry = "driver.wasm"
+"#,
+        );
+        let err = load_driver_manifest(&sub)
+            .expect_err("the id \"host\" is reserved for host-synthesized messages");
+        assert!(matches!(err, ManifestError::ReservedId));
     }
 
     #[test]

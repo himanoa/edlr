@@ -636,6 +636,11 @@ pub enum ManifestError {
     IdMismatch,
     /// `id` が `[a-z0-9-]+` にマッチしない。
     BadId,
+    /// `id` がホスト予約語(`edlr_driver_channel::HOST_SENDER` = "host")。
+    /// `host` は字種 `[a-z0-9-]+` として合法だが、ホストが合成する
+    /// `sidecar-ready` メッセージの `from` に使うため、なりすまし余地を
+    /// 塞ぐ目的で予約する(設計書 sidecar-ready 参照)。
+    ReservedId,
     /// `entry` が指すファイルが存在しない。
     MissingEntry,
     /// `settings` 内で `key` が重複している。
@@ -671,6 +676,11 @@ impl fmt::Display for ManifestError {
                 write!(f, "manifest id does not match plugin directory name")
             }
             ManifestError::BadId => write!(f, "manifest id must match [a-z0-9-]+"),
+            ManifestError::ReservedId => write!(
+                f,
+                "manifest id \"{}\" is reserved for host-synthesized messages",
+                edlr_driver_channel::HOST_SENDER
+            ),
             ManifestError::MissingEntry => write!(f, "entry file does not exist"),
             ManifestError::DuplicateKey => write!(f, "duplicate settings key"),
             ManifestError::BadSetting(msg) => write!(f, "invalid setting: {msg}"),
@@ -1126,6 +1136,10 @@ pub fn load_manifest(dir: &Path) -> Result<Manifest, ManifestError> {
         return Err(ManifestError::BadId);
     }
 
+    if manifest.id == edlr_driver_channel::HOST_SENDER {
+        return Err(ManifestError::ReservedId);
+    }
+
     let dir_name = dir.file_name().and_then(|s| s.to_str()).unwrap_or("");
     if manifest.id != dir_name {
         return Err(ManifestError::IdMismatch);
@@ -1197,6 +1211,26 @@ mod tests {
 
     fn write_entry(dir: &Path, name: &str) {
         fs::write(dir.join(name), b"\0asm").unwrap();
+    }
+
+    #[test]
+    fn rejects_the_reserved_plugin_id_host() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin_dir = tmp.path().join("host");
+        fs::create_dir_all(&plugin_dir).unwrap();
+        write_entry(&plugin_dir, "plugin.wasm");
+        write_manifest(
+            &plugin_dir,
+            r#"
+id = "host"
+name = "Host Impersonator"
+version = "0.1.0"
+entry = "plugin.wasm"
+"#,
+        );
+        let err = load_manifest(&plugin_dir)
+            .expect_err("the id \"host\" is reserved for host-synthesized messages");
+        assert!(matches!(err, ManifestError::ReservedId));
     }
 
     #[test]
