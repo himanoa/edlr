@@ -5,7 +5,7 @@ summary: Phase 1 で grants.rs(std::fs/Mutex 使用)が純粋分類の capabilit
 status: open
 labels: docs, refactor
 created: 2026-07-30T13:08:14Z
-updated: 2026-07-30T15:10:34Z
+updated: 2026-07-30T15:36:29Z
 ---
 
 ## どこで踏んだか
@@ -52,3 +52,13 @@ Phase 2 でも同じ公認例外を1件追加: `core/src/rpc/render.rs` が
 Phase 3 で `core/src/settings/store.rs`(SettingsStore、std::fs + Mutex)も
 純粋分類の settings/ 配下へ移動した。grants.rs と同じ公認例外
 (spec が「Storage trait + ディスク実装」を同モジュールに置く構成を明示)。
+
+## 追記(2026-07-31, Phase 3 最終レビュー)
+
+逆辺をもう1本記録: `settings/validate.rs`(純)が
+`settings/store.rs`(I/O 側)から `SettingsError` を import している
+(plan が指示した形)。Phase 6 で `SettingsError` を settings/mod.rs 側へ
+移す(または検証系 variant と `Io` を分離する)ことを検討。`Display`
+文字列は凍結のまま。あわせて新規テストが旧互換パス
+(`crate::plugin::grants::GrantState` 等)を参照している箇所も Phase 6 の
+旧パス削除時に正規パスへ置換する。
