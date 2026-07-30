@@ -6,9 +6,11 @@
 use edlr_driver_process::{InstanceStatus, ProcessError, ProcessSpec};
 
 pub(crate) mod bus;
+pub mod driver;
 pub(crate) mod entries;
 pub(crate) mod filesystem;
 pub(crate) mod grants;
+pub mod plugin;
 pub(crate) mod settings;
 pub(crate) mod sidecar;
 pub(crate) mod subject;

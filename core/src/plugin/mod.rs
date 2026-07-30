@@ -7,7 +7,8 @@ pub mod fs_runtime;
 pub use crate::capability::grants;
 pub mod host;
 pub mod manifest;
-pub mod registry;
+// Phase 4 タスク9で registry/plugin.rs へ移動(旧パス互換。削除は Phase 6)。
+pub use crate::registry::plugin as registry;
 pub mod runner;
 // Phase 3 で schedule/ へ移動(旧パス互換。削除は Phase 6)。
 pub(crate) use crate::schedule;
