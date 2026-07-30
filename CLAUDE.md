@@ -1,5 +1,20 @@
 # edlr 開発メモ
 
+## リポジトリ構成とコーディング規約
+
+- `core/` — デーモン本体。機能名モジュール構成:
+  純粋(`manifest` `capability` `settings` `schedule` `rpc` `journal`)+
+  命令的(`registry` `runner` `host` `server`)
+- `drivers/` — ドライバ群 / `ui/` — Tauri GUI / `config/` — 設定
+
+**core を触るときは `.claude/rules/` を必読**(モジュール構成・純粋/命令的境界・
+trait DI・手続きの作法・テスト戦略)。core 外の新規コードにも同じ作法を推奨。
+実装は `.claude/agents/` の pure-module-developer / imperative-module-developer に
+任せられる。
+
+レビューで繰り返し指摘された内容は、その場限りにせず `.claude/rules/` に
+ファイルを足して永続化すること。
+
 ## 並列ビルドのロック競合を避ける
 
 サブエージェントを並列に走らせて cargo を同時実行すると、2種類のファイルロックで
