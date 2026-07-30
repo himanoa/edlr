@@ -21,6 +21,8 @@
 //! `plugins/list` に載せる `next`(ISO8601 の壁時計時刻)は、`Clock` を
 //! 基準に単調時刻を壁時計へ変換して組み立てる。
 
+pub mod store;
+
 use std::collections::BTreeMap;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
@@ -28,7 +30,7 @@ use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Local};
 
-use super::manifest::{normalize_cron, ScheduleRequest, ScheduleSpec};
+use crate::plugin::manifest::{normalize_cron, ScheduleRequest, ScheduleSpec};
 
 /// 「いまが何時か」を壁時計と単調時計の両方で表したもの。
 ///

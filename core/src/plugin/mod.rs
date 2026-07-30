@@ -9,8 +9,9 @@ pub mod host;
 pub mod manifest;
 pub mod registry;
 pub mod runner;
-pub(crate) mod schedule;
-pub mod schedule_store;
+// Phase 3 で schedule/ へ移動(旧パス互換。削除は Phase 6)。
+pub(crate) use crate::schedule;
+pub use crate::schedule::store as schedule_store;
 pub(crate) mod select_options;
 // Phase 3 で settings/store.rs へ移動(旧パス互換。削除は Phase 6)。
 pub use crate::settings::store as settings;
