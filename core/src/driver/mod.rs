@@ -2,7 +2,8 @@
 //! `crate::plugin` と対称の構造だが、別レイヤーなので無理に共通化しない
 //! (共有するのは grants / settings の下位ユーティリティ程度)。
 
-pub mod host;
+// Phase 5 タスク3で host/driver.rs へ移動(旧パス互換。削除は Phase 6)。
+pub use crate::host::driver as host;
 pub mod manifest;
 // Phase 4 タスク9で registry/driver.rs へ移動(旧パス互換。削除は Phase 6)。
 pub use crate::registry::driver as registry;

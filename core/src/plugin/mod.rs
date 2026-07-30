@@ -5,7 +5,8 @@ pub mod filesystem;
 pub mod fs_runtime;
 // Phase 1 で capability/grants.rs へ移動(旧パス互換。削除は Phase 6)。
 pub use crate::capability::grants;
-pub mod host;
+// Phase 5 タスク3で host/plugin.rs へ移動(旧パス互換。削除は Phase 6)。
+pub use crate::host::plugin as host;
 pub mod manifest;
 // Phase 4 タスク9で registry/plugin.rs へ移動(旧パス互換。削除は Phase 6)。
 pub use crate::registry::plugin as registry;
