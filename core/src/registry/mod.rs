@@ -6,6 +6,7 @@
 use edlr_driver_process::{InstanceStatus, ProcessError, ProcessSpec};
 
 pub(crate) mod entries;
+pub(crate) mod filesystem;
 pub(crate) mod supervisor;
 
 /// サイドカープロセス制御の口。実運用の実装は
