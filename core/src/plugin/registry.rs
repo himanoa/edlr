@@ -1,14 +1,12 @@
 //! 実行中プラグインの状態を保持する共有ビュー。`start_plugins` が構築し、以後は
 //! カーネル内の複数箇所(将来の RPC を含む)から `Clone` して読める。
 
-use std::collections::HashMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 use std::sync::mpsc as std_mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::{Duration, Instant};
 
 use edlr_driver_channel::Bus;
 use edlr_driver_process::{InstanceStatus, ProcessDriver, ProcessSpec};
@@ -32,18 +30,7 @@ use crate::plugin::{
     SettingsError, SidecarRequest,
 };
 use crate::registry::entries::{EntryTable, IdLocks};
-
-/// `Registry::shutdown_plugins` が 1 プラグインの `JoinHandle` を待つ上限。
-/// `edlr_config::PLUGIN_ON_STOP_GRACE_SECS` のドキュメントコメント参照
-/// (= `PluginInstance::CALL_DEADLINE` + 余裕)。
-const PLUGIN_STOP_JOIN_TIMEOUT: Duration =
-    Duration::from_secs(edlr_config::PLUGIN_ON_STOP_GRACE_SECS);
-
-/// `shutdown_plugins` が `JoinHandle::is_finished()` をポーリングする間隔。
-/// std に `join_timeout` が無いための代替手段(タスクブリーフ参照)。値自体に
-/// 強い意味は無く、`PLUGIN_STOP_JOIN_TIMEOUT` に対して十分細かく、かつ
-/// 無駄なビジーポーリングにならない程度、という程度の選択。
-const PLUGIN_STOP_JOIN_POLL_INTERVAL: Duration = Duration::from_millis(20);
+use crate::registry::supervisor::ThreadSupervisor;
 
 /// プラグイン 1 件の現在の駆動状態。
 #[derive(Debug, Clone, PartialEq)]
@@ -343,48 +330,11 @@ pub struct Registry {
     /// 共有するので、ドライバ側に配線したのと同じ実体を指す。
     bus: Bus,
     plugins_dir: PathBuf,
-    /// `crate::plugin::runner::spawn_bus_subscriber` の各インスタンスが共有
-    /// する shutdown フラグ。`shutdown_bus_subscribers` が立て、各購読タスクは
-    /// `BUS_SUBSCRIBER_SHUTDOWN_POLL_INTERVAL` ごとにこれを見に行く。詳しい
-    /// 経緯は `shutdown_bus_subscribers` のドキュメントコメント参照。
-    bus_subscriber_shutdown: Arc<AtomicBool>,
-    /// Running として起動した各プラグインの `work_tx`(の複製)と専用
-    /// スレッドの `JoinHandle` を id で引けるようにしたマップ
-    /// (`shutdown_plugins` 用)。`register_plugin_thread` が
-    /// `runner::start_plugins` から呼ばれて登録する。Disabled で終わった
-    /// プラグイン(init 失敗など)は登録しない -- そのスレッドは既に
-    /// return 済みで `work_rx` を読んでいないため、`Stop` を送っても意味が
-    /// 無い(`register_plugin_thread` のドキュメント参照)。
-    plugin_threads: Arc<Mutex<HashMap<String, PluginThreadHandle>>>,
-    /// 各プラグインのランナーループが公開する「実際の次回発火時刻」を id で
-    /// 引けるようにしたマップ(`plugins/list` 用)。`register_schedule_view` が
-    /// プラグイン専用スレッド自身から呼ばれて登録する。
-    ///
-    /// これが無かった頃、`build_schedule_infos` は RPC のたびに
-    /// `ScheduleState` を作り直していたため、interval の `next` は常に
-    /// 「now + interval」になり、スレッドの実際の発火時点と無関係だった
-    /// (UI のカウントダウンが意味を持たなかった)。
-    schedule_views: Arc<Mutex<HashMap<String, ScheduleView>>>,
-    /// 各プラグインの「作業キュー満杯で捨てた件数」を id で引けるようにした
-    /// マップ(`plugins/list` 用)。`register_drop_counters` が
-    /// `runner::start_plugins` から呼ばれて登録する。
-    ///
-    /// 取りこぼしを黙って捨てるのは設計判断(遅いだけのプラグインを殺さない)
-    /// だが、何がどれだけ失われているか分からないままではキュー容量の
-    /// チューニングが当て推量になる。`plugin::dropped` のモジュールドキュメント
-    /// を参照。
-    drop_counters: Arc<Mutex<HashMap<String, Arc<DropCounters>>>>,
-}
-
-/// `Registry::plugin_threads` の 1 エントリ。`shutdown_plugins` 専用。
-struct PluginThreadHandle {
-    work_tx: std_mpsc::SyncSender<PluginWork>,
-    handle: thread::JoinHandle<()>,
-    /// `Stop` のアウトオブバンド経路。ランナーループが毎周期(ワークキューを
-    /// 読む前に)確認するので、有界キューに積まれた先行ワークを追い越せる。
-    /// `work_tx` への `PluginWork::Stop` 送信は、待ちに入っているスレッドを
-    /// 起こすためのもの(`shutdown_plugins` 参照)。
-    stop_flag: Arc<AtomicBool>,
+    /// プラグイン専用スレッドの登録・監督(停止・schedule view・drop counter
+    /// の公開)。`registry::supervisor::ThreadSupervisor` のドキュメントコメント
+    /// 参照(Phase 4 タスク3で `plugin_threads` / `bus_subscriber_shutdown` /
+    /// `schedule_views` / `drop_counters` と対応メソッド本体をそちらへ移動)。
+    supervisor: ThreadSupervisor,
 }
 
 impl Registry {
@@ -415,10 +365,7 @@ impl Registry {
             driver_registry,
             bus,
             plugins_dir,
-            bus_subscriber_shutdown: Arc::new(AtomicBool::new(false)),
-            plugin_threads: Arc::new(Mutex::new(HashMap::new())),
-            schedule_views: Arc::new(Mutex::new(HashMap::new())),
-            drop_counters: Arc::new(Mutex::new(HashMap::new())),
+            supervisor: ThreadSupervisor::new(),
         }
     }
 
@@ -434,6 +381,9 @@ impl Registry {
     /// (スレッド自体は既に終了しているので `is_finished()` は直ちに `true`
     /// になり実害は無いが、そもそも意味のある登録ではないため呼び出し元
     /// [`runner::load_and_run_plugin`] は Running のときだけ呼ぶ)。
+    ///
+    /// 実体は `registry::supervisor::ThreadSupervisor::register_thread`
+    /// (Phase 4 タスク3で移動)。
     pub(crate) fn register_plugin_thread(
         &self,
         id: &str,
@@ -441,17 +391,7 @@ impl Registry {
         handle: thread::JoinHandle<()>,
         stop_flag: Arc<AtomicBool>,
     ) {
-        self.plugin_threads
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .insert(
-                id.to_string(),
-                PluginThreadHandle {
-                    work_tx,
-                    handle,
-                    stop_flag,
-                },
-            );
+        self.supervisor.register_thread(id, work_tx, handle, stop_flag);
     }
 
     /// プラグイン専用スレッドが、自分のスケジュール状態を公開する窓口を
@@ -460,128 +400,37 @@ impl Registry {
     ///
     /// スケジュールを 1 件も宣言していないプラグインは呼ばない。
     pub(crate) fn register_schedule_view(&self, id: &str, view: ScheduleView) {
-        self.schedule_views
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .insert(id.to_string(), view);
+        self.supervisor.register_schedule_view(id, view);
     }
 
     /// プラグインの取りこぼしカウンタを登録する(`plugins/list` から読まれる)。
     /// 購読タスクを起動する `runner::start_plugins` が呼ぶ。
     pub(crate) fn register_drop_counters(&self, id: &str, counters: Arc<DropCounters>) {
-        self.drop_counters
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .insert(id.to_string(), counters);
+        self.supervisor.register_drop_counters(id, counters);
     }
 
     /// `id` のプラグインの取りこぼし件数。カウンタが未登録(Disabled で
     /// 購読タスクが起動していない)なら 0 件。
     fn dropped_counts(&self, id: &str) -> DroppedCounts {
-        self.drop_counters
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .get(id)
-            .map(|counters| counters.snapshot())
-            .unwrap_or_default()
+        self.supervisor.dropped_counts(id)
     }
 
     /// Running な全プラグインへ `PluginWork::Stop` を送り、それぞれの専用
-    /// スレッドの終了を(1 件あたり `PLUGIN_STOP_JOIN_TIMEOUT` を上限に)
-    /// 待つ。デーモンの正常終了シーケンス専用(`core/src/bin/edlr.rs` を
-    /// 参照)。
-    ///
-    /// **`shutdown_bus_subscribers` より前に呼ぶこと**: on-stop の中で
-    /// プラグインがまだバス経由の publish を行いたいかもしれない
-    /// (`HostCtx::check_bus` はこの時点でまだ `shutdown_bus_subscribers` が
-    /// 立てるフラグを見ないので、bus 自体はまだ生きている)。先に
-    /// バス購読側を止めてしまう理由が無い以上、後始末の順序として自然な方
-    /// (プラグインに最後の一仕事をさせてから、購読タスクを畳む)にしてある。
-    ///
-    /// **`Stop` はワークキューを追い越す**: 停止の合図は 2 経路ある。
-    ///
-    /// 1. `PluginThreadHandle::stop_flag`(主経路)-- ランナーループが毎周期、
-    ///    ワークキューを読む**前**に確認する。これにより、有界 64 スロットの
-    ///    キューに積まれた先行ワークを `Stop` が追い越せる
-    /// 2. `work_tx` への `PluginWork::Stop`(補助)-- キューが空で
-    ///    `recv_timeout` に入っているスレッドを直ちに起こすためだけのもの。
-    ///    満杯なら `try_send` は失敗するが、その場合スレッドは待ちに入って
-    ///    おらず、次の周回でフラグを見るので問題ない
-    ///
-    /// かつては 2 の経路しか無かったため、プラグインスレッドは先行する全ワーク
-    /// を消化するまで `call_on_stop` へ到達できず(最悪 63 件 x
-    /// `CALL_DEADLINE` 2 秒 ≒ 126 秒)、`PLUGIN_STOP_JOIN_TIMEOUT` しか待たない
-    /// この関数から見ると on-stop の flush は事実上スキップされていた。
-    ///
-    /// 送信側が既に切断されている(スレッドが trap などで既に終了済み)場合も
-    /// 何もしない -- いずれの場合も後続の join は行う(トラップ済みなら即座に
-    /// `is_finished()` が `true` になるだけ)。
-    ///
-    /// **停止要求は全件へ先に送り、join は 1 つの共有デッドラインで待つ**:
-    /// プラグインの on-stop は互いに独立なので、直列に待つ理由が無い。まず
-    /// 全プラグインへ停止を伝えてから、全スレッドの `is_finished()` を
-    /// `PLUGIN_STOP_JOIN_POLL_INTERVAL` 間隔でまとめてポーリングする。
-    /// これにより最悪ケースが `N × PLUGIN_STOP_JOIN_TIMEOUT` から
-    /// `1 × PLUGIN_STOP_JOIN_TIMEOUT` に縮む(Tauri 側の
-    /// `daemon::STOP_GRACE` はこの最悪ケースを見積もって決まっているので、
-    /// あちらの定数も一桁下げられる)。
-    ///
-    /// 標準ライブラリの `JoinHandle` には `join_timeout` が無いためポーリング
-    /// で代替している。デッドラインを過ぎても終わっていないスレッドは諦める
-    /// (warn ログを出して join しない -- プロセス自体はこの直後に終了するので
-    /// 待ちきれなかったスレッドはプロセス終了と共に消える。ハングしたプラグイン
-    /// のために shutdown シーケンス全体を止めるべきではない)。
+    /// スレッドの終了を待つ。デーモンの正常終了シーケンス専用
+    /// (`core/src/bin/edlr.rs` を参照)。停止要求は全件へ先に送り、join は
+    /// 1 つの共有デッドラインで待つ 2 段構造の詳細は
+    /// `registry::supervisor::ThreadSupervisor::shutdown_all` のドキュメント
+    /// コメント参照(Phase 4 タスク3で移動。2 段構造そのものは 1 行も変えて
+    /// いない)。
     pub fn shutdown_plugins(&self) {
-        let handles: Vec<(String, PluginThreadHandle)> = self
-            .plugin_threads
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .drain()
-            .collect();
-
-        // 第 1 段: 全プラグインへ停止を伝える。ここでは一切待たない。
-        for (_, thread_handle) in &handles {
-            // 主経路: フラグを先に立てる。ランナーループは次の周回で、
-            // キューを読む前にこれを見て on-stop へ進む。
-            thread_handle.stop_flag.store(true, Ordering::SeqCst);
-
-            // 補助経路: `recv_timeout` で待ちに入っているスレッドを起こす。
-            match thread_handle.work_tx.try_send(PluginWork::Stop) {
-                Ok(()) => {}
-                Err(std_mpsc::TrySendError::Full(_)) => {
-                    // キューが満杯 = スレッドは待ちに入っていないので、
-                    // 起こす必要が無い。次の周回でフラグを見る。
-                }
-                Err(std_mpsc::TrySendError::Disconnected(_)) => {
-                    // プラグインスレッドは既に(trap などで)終了済み。
-                }
-            }
-        }
-
-        // 第 2 段: 1 つの共有デッドラインで、全スレッドの終了を並行に待つ。
-        let deadline = Instant::now() + PLUGIN_STOP_JOIN_TIMEOUT;
-        while handles.iter().any(|(_, h)| !h.handle.is_finished()) && Instant::now() < deadline {
-            thread::sleep(PLUGIN_STOP_JOIN_POLL_INTERVAL);
-        }
-
-        for (id, thread_handle) in handles {
-            if thread_handle.handle.is_finished() {
-                let _ = thread_handle.handle.join();
-            } else {
-                tracing::warn!(
-                    plugin_id = %id,
-                    "plugin thread did not exit within {PLUGIN_STOP_JOIN_TIMEOUT:?} of the \
-                     stop signal; abandoning join (the process is exiting regardless)"
-                );
-            }
-        }
+        self.supervisor.shutdown_all();
     }
 
     /// `crate::plugin::runner::spawn_bus_subscriber` が共有する shutdown
     /// フラグの `Arc` を返す。`runner.rs` がプラグインごとの購読タスクを
     /// 起動する際にこれを渡す(crate 内部専用: `pub(crate)`)。
     pub(crate) fn bus_subscriber_shutdown_flag(&self) -> Arc<AtomicBool> {
-        self.bus_subscriber_shutdown.clone()
+        self.supervisor.shutdown_flag()
     }
 
     pub(crate) fn push(&self, entry: PluginEntry) {
@@ -800,13 +649,7 @@ impl Registry {
     /// `ScheduleState` をこの場で作り直した推定値へフォールバックする
     /// (`ScheduleInfo` のドキュメントコメント参照)。
     fn build_schedule_infos(&self, manifest: &Manifest) -> Vec<ScheduleInfo> {
-        let published: HashMap<String, chrono::DateTime<chrono::Local>> = self
-            .schedule_views
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .get(&manifest.id)
-            .map(|view| view.snapshot().into_iter().collect())
-            .unwrap_or_default();
+        let published = self.supervisor.published_schedule(&manifest.id);
 
         let clock = Clock::now();
         let state = ScheduleState::new(&manifest.schedules, clock);
@@ -1744,8 +1587,7 @@ impl Registry {
     /// だけの軽い呼び出しなので、`stop_all_sidecars` のように `spawn_blocking`
     /// へ逃がす必要はない。
     pub fn shutdown_bus_subscribers(&self) {
-        self.bus_subscriber_shutdown
-            .store(true, std::sync::atomic::Ordering::Release);
+        self.supervisor.shutdown_bus_subscribers();
     }
 
     /// `id` のプラグインが持つ settings JSON の共有ハンドルを返す。
