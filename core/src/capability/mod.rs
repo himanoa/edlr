@@ -4,6 +4,8 @@
 //! 両方をこのモジュール配下で扱う。詳細は
 //! `docs/superpowers/specs/2026-07-30-core-refactoring-design.md` を参照。
 
+pub mod request;
+
 use crate::plugin::grants::{GrantState, GrantsError, GrantsStore};
 use crate::plugin::Manifest;
 
