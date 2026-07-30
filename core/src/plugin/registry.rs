@@ -29,7 +29,7 @@ use crate::plugin::{
     SettingsError, SidecarRequest,
 };
 use crate::registry::entries::{EntryTable, IdLocks};
-use crate::registry::filesystem::FilesystemService;
+use crate::registry::filesystem::DiskFilesystemService;
 use crate::registry::supervisor::ThreadSupervisor;
 
 /// プラグイン 1 件の現在の駆動状態。
@@ -241,7 +241,7 @@ pub struct Registry {
     /// fs 群(`filesystem` / `set_filesystem_config` / `set_filesystem_grant`
     /// とその内部ヘルパー)の実体。`registry::filesystem::FilesystemService`
     /// のドキュメント参照(Phase 4 タスク4で移動)。
-    filesystem_service: FilesystemService,
+    filesystem_service: DiskFilesystemService<PluginEntry>,
     /// サイドカープロセスを実際に所有するドライバ。`PluginHost` が全プラグ
     /// インで共有している 1 インスタンスをそのまま指す(`HostCtx` に配線
     /// されているものと同じ `Arc`)。`Registry` はここに直接
@@ -335,7 +335,7 @@ impl Registry {
         plugins_dir: PathBuf,
     ) -> Self {
         let entries = EntryTable::new();
-        let filesystem_service = FilesystemService::new(
+        let filesystem_service = DiskFilesystemService::new(
             entries.clone(),
             grants_store.clone(),
             filesystem_config_store,

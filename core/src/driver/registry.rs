@@ -19,7 +19,6 @@ use edlr_driver_process::{ProcessDriver, ProcessSpec};
 use crate::driver::host::DriverHost;
 use crate::driver::manifest::DriverManifest;
 use crate::plugin::filesystem::{FilesystemConfig, FilesystemConfigStore};
-use crate::plugin::fs_runtime::{filesystem_json_string, FsRuntimeEntry};
 use crate::plugin::grants::{GrantState, GrantsError, GrantsStore};
 use crate::plugin::host::capabilities_json_string;
 use crate::plugin::manifest::SidecarRequest;
@@ -30,6 +29,7 @@ use crate::plugin::sidecar_runtime::{
     implicit_http_hosts, parse_sidecars, sidecars_json_string, SidecarRuntimeEntry,
 };
 use crate::registry::entries::{EntryTable, IdLocks};
+use crate::registry::filesystem::DiskFilesystemService;
 
 /// ドライバ 1 件の現在の駆動状態。`crate::plugin::registry::PluginState` と対称。
 #[derive(Debug, Clone, PartialEq)]
@@ -102,7 +102,11 @@ pub struct DriverRegistry {
     settings_store: Arc<SettingsStore>,
     grants_store: Arc<GrantsStore>,
     sidecar_config_store: Arc<SidecarConfigStore>,
-    filesystem_config_store: Arc<FilesystemConfigStore>,
+    /// fs 群(`filesystem` / `set_filesystem_config` / `set_filesystem_grant`
+    /// とその内部ヘルパー)の実体。`crate::plugin::registry::Registry` と
+    /// 同じ `registry::filesystem::FilesystemService` を `RegistrySubject`
+    /// (`DriverManifest`)越しに共有する(Phase 4 タスク4で統合)。
+    filesystem_service: DiskFilesystemService<DriverEntry>,
     /// サイドカープロセスを実際に所有するドライバ。`DriverHost` が全ドライバ
     /// インスタンスで共有している 1 インスタンスをそのまま指す
     /// (`crate::plugin::registry::Registry::process_driver` と同じ役回り)。
@@ -122,12 +126,6 @@ pub struct DriverRegistry {
     /// ブロックしうるので、無関係な別ドライバの操作まで足止めしないよう
     /// ドライバ単位に分けてある)。
     sidecar_runtime_locks: IdLocks,
-    /// `set_filesystem_config`/`set_filesystem_grant` が呼ぶ
-    /// `refresh_filesystem_runtime` の臨界区間をドライバ ID ごとに直列化する
-    /// ロックのマップ。`sidecar_runtime_locks` とは別マップにしてある理由も
-    /// `crate::plugin::registry::Registry::filesystem_runtime_locks` と同じ
-    /// (サイドカー停止待ちでファイルアクセス取消が fail-open にならないため)。
-    filesystem_runtime_locks: IdLocks,
     drivers_dir: PathBuf,
 }
 
@@ -143,18 +141,24 @@ impl DriverRegistry {
         drivers_dir: PathBuf,
     ) -> Self {
         let process_driver = host.process_driver();
+        let entries = EntryTable::new();
+        let filesystem_service = DiskFilesystemService::new(
+            entries.clone(),
+            grants_store.clone(),
+            filesystem_config_store,
+            IdLocks::new(),
+        );
         DriverRegistry {
-            entries: EntryTable::new(),
+            entries,
             _host: host,
             settings_store,
             grants_store,
             sidecar_config_store,
-            filesystem_config_store,
+            filesystem_service,
             process_driver,
             bus,
             capabilities_lock: Arc::new(Mutex::new(())),
             sidecar_runtime_locks: IdLocks::new(),
-            filesystem_runtime_locks: IdLocks::new(),
             drivers_dir,
         }
     }
@@ -196,7 +200,7 @@ impl DriverRegistry {
                 let values = self.settings_store.effective(&settings_manifest);
                 let grant_state = self.grants_store.state(&settings_manifest);
                 let sidecars = self.build_sidecar_infos(&manifest);
-                let filesystem = self.build_filesystem_infos(&manifest);
+                let filesystem = self.filesystem_service.build_filesystem_infos(&manifest);
                 DriverInfo {
                     manifest,
                     state,
@@ -271,32 +275,6 @@ impl DriverRegistry {
             instances,
         };
         (info, runtime_entry)
-    }
-
-    /// `manifest.filesystem` の宣言順に `FilesystemInfo` を組み立てる。
-    /// `crate::plugin::registry::Registry::build_filesystem_infos` と同じ流儀。
-    fn build_filesystem_infos(&self, manifest: &DriverManifest) -> Vec<FilesystemInfo> {
-        let settings_manifest = manifest.as_settings_manifest();
-        let configs = self.filesystem_config_store.effective(&settings_manifest);
-        manifest
-            .filesystem
-            .iter()
-            .map(|request| {
-                let config = configs.get(&request.name).cloned().unwrap_or_else(|| {
-                    crate::plugin::filesystem::FilesystemConfig {
-                        path: String::new(),
-                    }
-                });
-                let grant = self
-                    .grants_store
-                    .filesystem_state(&settings_manifest, &request.name);
-                FilesystemInfo {
-                    request: request.clone(),
-                    config,
-                    grant,
-                }
-            })
-            .collect()
     }
 
     /// `id` のドライバの manifest クローンを返す(`entries` ロック保持は
@@ -458,13 +436,6 @@ impl DriverRegistry {
         self.sidecar_runtime_locks.lock_for(id)
     }
 
-    /// `id` 用のファイルアクセス実行時ロック(`filesystem_runtime_locks`)を
-    /// 引く。サイドカー側とは別のマップであることが要点(理由は
-    /// `filesystem_runtime_locks` のドキュメント参照)。
-    fn filesystem_runtime_lock_for(&self, id: &str) -> Arc<Mutex<()>> {
-        self.filesystem_runtime_locks.lock_for(id)
-    }
-
     /// `id` のドライバの現在のサイドカー状態一覧(manifest の `[[sidecar]]`
     /// 宣言順)を返す。`crate::plugin::registry::Registry::sidecars` と同じ。
     pub fn sidecars(&self, id: &str) -> Result<Vec<SidecarInfo>, RegistryError> {
@@ -473,104 +444,39 @@ impl DriverRegistry {
     }
 
     /// `id` のドライバの現在のファイルアクセス状態一覧(manifest の
-    /// `[[filesystem]]` 宣言順)を返す。
-    /// `crate::plugin::registry::Registry::filesystem` と同じ。
+    /// `[[filesystem]]` 宣言順)を返す。実体は
+    /// `registry::filesystem::FilesystemService::filesystem`(Phase 4
+    /// タスク4で統合。`crate::plugin::registry::Registry::filesystem` と
+    /// 同じサービスを `RegistrySubject` 越しに共有する)。
     pub fn filesystem(&self, id: &str) -> Result<Vec<FilesystemInfo>, RegistryError> {
-        let manifest = self.find_manifest_for_shared(id)?;
-        Ok(self.build_filesystem_infos(&manifest))
+        self.filesystem_service.filesystem(id)
     }
 
-    /// ファイルアクセスの設定変更・承認変更のあとに必ず呼ぶ内部ヘルパー。
-    /// `crate::plugin::registry::Registry::refresh_filesystem_runtime` と
-    /// 同じ流儀(「止めるべきプロセス」が無いので `filesystem_json` を
-    /// 作り直すだけ)。
-    fn refresh_filesystem_runtime(&self, id: &str) -> Result<Vec<FilesystemInfo>, RegistryError> {
-        let (manifest, filesystem_json) = self
-            .entries
-            .find(
-                |entry| entry.manifest.id == id,
-                |entry| (entry.manifest.clone(), entry.filesystem_json.clone()),
-            )
-            .ok_or_else(|| RegistryError::UnknownDriver(id.to_string()))?;
-
-        let runtime_lock = self.filesystem_runtime_lock_for(id);
-        let _runtime_guard = runtime_lock
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-
-        let infos = self.build_filesystem_infos(&manifest);
-        let runtime_entries: Vec<FsRuntimeEntry> = infos
-            .iter()
-            .map(|info| FsRuntimeEntry {
-                name: info.request.name.clone(),
-                granted: info.grant.granted,
-                mode: info.request.mode.as_str().to_string(),
-                path: info.config.path.clone(),
-            })
-            .collect();
-        *filesystem_json
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) =
-            filesystem_json_string(&runtime_entries);
-
-        Ok(infos)
-    }
-
-    /// `id` のドライバの `name` ファイルアクセスルートの設定を検証・永続化し
-    /// (`FilesystemConfigStore::update_and_effective`)、稼働中ドライバが
-    /// 参照する `filesystem_json` を作り直してから最新の `FilesystemInfo`
-    /// 一覧を返す。検証に失敗した場合は何も変更されない。
-    /// `crate::plugin::registry::Registry::set_filesystem_config` と同じ。
+    /// `id` のドライバの `name` ファイルアクセスルートの設定を検証・永続化し、
+    /// 稼働中ドライバが参照する `filesystem_json` を作り直してから最新の
+    /// `FilesystemInfo` 一覧を返す。実体は
+    /// `registry::filesystem::FilesystemService::set_filesystem_config`。
     pub fn set_filesystem_config(
         &self,
         id: &str,
         name: &str,
         config: &FilesystemConfig,
     ) -> Result<Vec<FilesystemInfo>, RegistryError> {
-        let manifest = self.find_manifest_for_shared(id)?;
-        let settings_manifest = manifest.as_settings_manifest();
-        self.filesystem_config_store
-            .update_and_effective(&settings_manifest, name, config)
-            .map_err(RegistryError::FilesystemConfig)?;
-        self.refresh_filesystem_runtime(id)
+        self.filesystem_service
+            .set_filesystem_config(id, name, config)
     }
 
     /// `id` のドライバの `name` ファイルアクセスルートの承認/取消を
-    /// `GrantsStore` に永続化する。`granted == true` のとき、ディレクトリが
-    /// 未設定(空文字)のルートは拒否する(`RegistryError::Filesystem`)。
-    /// `crate::plugin::registry::Registry::set_filesystem_grant` と同じ検証
-    /// (UI 側の防御に加えてここでも強制する -- タスクブリーフが挙げる
-    /// 「path 未設定では承認できない」の実体)。
+    /// `GrantsStore` に永続化する。実体は
+    /// `registry::filesystem::FilesystemService::set_filesystem_grant`。
     pub fn set_filesystem_grant(
         &self,
         id: &str,
         name: &str,
         granted: bool,
     ) -> Result<Vec<FilesystemInfo>, RegistryError> {
-        let manifest = self.find_manifest_for_shared(id)?;
-        let settings_manifest = manifest.as_settings_manifest();
-        if settings_manifest.filesystem_root(name).is_none() {
-            return Err(RegistryError::UnknownFilesystem(name.to_string()));
-        }
-
-        if granted {
-            let configs = self.filesystem_config_store.effective(&settings_manifest);
-            let path_configured = configs
-                .get(name)
-                .map(|config| !config.path.is_empty())
-                .unwrap_or(false);
-            if !path_configured {
-                return Err(RegistryError::Filesystem(format!(
-                    "filesystem root {name} has no directory configured; cannot grant"
-                )));
-            }
-        }
-
-        self.grants_store
-            .set_filesystem(&settings_manifest, name, granted)
-            .map_err(RegistryError::Grants)?;
-
-        self.refresh_filesystem_runtime(id)
+        self.filesystem_service
+            .set_filesystem_grant(id, name, granted)
     }
 
     /// サイドカーの設定変更・承認変更のあとに必ず呼ぶ内部ヘルパー。
