@@ -46,6 +46,19 @@ impl std::fmt::Display for ProcessError {
 
 impl std::error::Error for ProcessError {}
 
+/// サイドカーの 1 インスタンスが「初めて TCP 接続できるようになった」ことを
+/// 表すイベント。`key` は `ensure_started` に渡されたキー
+/// (core 側では `<driver-id>/<sidecar-name>`)。
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReadyEvent {
+    pub key: String,
+    pub index: u32,
+    pub port: u16,
+}
+
+/// ready 通知の届け先。`set_ready_callback` で設定する。
+pub type ReadyCallback = Arc<dyn Fn(ReadyEvent) + Send + Sync>;
+
 /// 起動済みインスタンス 1 件。`child` が `None` なら終了済み。
 ///
 /// `terminating` は「`stop`/`stop_all` が子プロセスを取り出してロック外で
@@ -58,6 +71,11 @@ struct Instance {
     child: Option<Child>,
     exit_code: Option<i32>,
     terminating: bool,
+    /// 何度目の spawn かを表す単調増加の識別子(0 = 一度も spawn していない)。
+    /// 監視スレッド(`watch_ready`)は自分の世代と一致するインスタンスだけを
+    /// 「生きている」とみなす。respawn で世代が進めば、古い監視スレッドは
+    /// 静かに終了する。
+    generation: u64,
 }
 
 /// 1 サイドカー(= 1 key)分のインスタンス群と、直近の spawn 試行時刻。
@@ -67,7 +85,14 @@ struct Group {
 }
 
 pub struct ProcessDriver {
-    groups: Mutex<HashMap<String, Group>>,
+    /// `Arc` なのは監視スレッド(`watch_ready`)が `ProcessDriver` 本体より
+    /// 長生きしても安全に状態を確認できるようにするため。
+    groups: Arc<Mutex<HashMap<String, Group>>>,
+    /// spawn 世代の採番。`Instance::generation` を参照。
+    next_generation: std::sync::atomic::AtomicU64,
+    /// ready 監視の通知先。`None` の間は監視スレッドを一切立てない
+    /// (プラグイン側の `ProcessDriver` は設定しないので従来どおり)。
+    ready_callback: Mutex<Option<ReadyCallback>>,
     shutdown_grace: Duration,
     spawn_min_interval: Duration,
     /// `stop_detached` がバックグラウンドスレッドへ逃がした kill/wait 待ちの
@@ -87,11 +112,23 @@ pub struct ProcessDriver {
 impl ProcessDriver {
     pub fn new(shutdown_grace: Duration, spawn_min_interval: Duration) -> ProcessDriver {
         ProcessDriver {
-            groups: Mutex::new(HashMap::new()),
+            groups: Arc::new(Mutex::new(HashMap::new())),
+            next_generation: std::sync::atomic::AtomicU64::new(1),
+            ready_callback: Mutex::new(None),
             shutdown_grace,
             spawn_min_interval,
             pending_detached: Mutex::new(Vec::new()),
         }
+    }
+
+    /// ready 監視の通知先を設定する。以後の `ensure_started` が spawn した
+    /// インスタンスごとに監視スレッドが立つ。デーモン起動時に一度だけ
+    /// 呼ばれる想定(core の `start_drivers`)。
+    pub fn set_ready_callback(&self, callback: ReadyCallback) {
+        *self
+            .ready_callback
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(callback);
     }
 
     fn lock(&self) -> MutexGuard<'_, HashMap<String, Group>> {
@@ -145,6 +182,7 @@ impl ProcessDriver {
         group.last_spawn_attempt = Some(Instant::now());
 
         let mut first_error: Option<String> = None;
+        let mut spawned: Vec<(u32, u16, u64)> = Vec::new();
         for instance in group.instances.iter_mut() {
             if instance.child.is_some() || instance.terminating {
                 continue;
@@ -153,9 +191,35 @@ impl ProcessDriver {
                 Ok(child) => {
                     instance.child = Some(child);
                     instance.exit_code = None;
+                    instance.generation = self
+                        .next_generation
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    spawned.push((instance.index, instance.port, instance.generation));
                 }
                 Err(e) if first_error.is_none() => first_error = Some(e),
                 Err(_) => {}
+            }
+        }
+
+        // 一部の spawn が失敗して Err を返す場合でも、成功したインスタンスは
+        // 生きて動き続けるので、それらの監視は立てる(エラー判定より先)。
+        if !spawned.is_empty() {
+            let callback = self
+                .ready_callback
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone();
+            if let Some(callback) = callback {
+                for (index, port, generation) in spawned {
+                    watch_ready(
+                        Arc::clone(&self.groups),
+                        key.to_string(),
+                        index,
+                        port,
+                        generation,
+                        Arc::clone(&callback),
+                    );
+                }
             }
         }
 
@@ -437,8 +501,57 @@ fn new_instances(spec: &ProcessSpec) -> Vec<Instance> {
             child: None,
             exit_code: None,
             terminating: false,
+            generation: 0,
         })
         .collect()
+}
+
+/// spawn 直後のインスタンス 1 件の port を監視し、初めて TCP 接続できた
+/// 時点で `callback` を 1 回呼んで終了する(設計書 sidecar-ready 参照)。
+///
+/// - 約 200ms 間隔のポーリング。タイムアウトは設けない(COEIROINK エンジン
+///   のロードは分単位になりうる)。実質の打ち切り条件はプロセス死亡。
+/// - 「死んだ」の判定は世代一致 + `child.is_some()`。`stop`/`stop_all` が
+///   子を切り離した場合(`terminating`)も `child` が `None` になるので、
+///   停止中のインスタンスに ready を報告することはない。
+/// - `groups` を `Arc` で受けるので、`ProcessDriver` 本体が drop された後も
+///   このスレッドは安全に状態を確認できる(次の確認で「いない」を見て終わる)。
+fn watch_ready(
+    groups: Arc<Mutex<HashMap<String, Group>>>,
+    key: String,
+    index: u32,
+    port: u16,
+    generation: u64,
+    callback: ReadyCallback,
+) {
+    std::thread::spawn(move || loop {
+        {
+            let mut groups = groups.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            let alive = groups
+                .get_mut(&key)
+                .map(|group| {
+                    // 終了済みの子をここでも回収する。ensure_started/status が
+                    // 呼ばれない限り reap されず、死んだ子が `child: Some` の
+                    // まま残って監視が止まらないため。
+                    reap(group);
+                    group.instances.iter().any(|instance| {
+                        instance.index == index
+                            && instance.generation == generation
+                            && instance.child.is_some()
+                    })
+                })
+                .unwrap_or(false);
+            if !alive {
+                return;
+            }
+        }
+        let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+        if std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(100)).is_ok() {
+            callback(ReadyEvent { key, index, port });
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    });
 }
 
 /// `stop`/`stop_all` 用に、まだ停止処理を始めていない生存インスタンスの
@@ -649,6 +762,107 @@ mod tests {
             args: vec!["-c".to_string(), "echo port={port}; sleep 30".to_string()],
             ports,
         }
+    }
+
+    fn free_port() -> u16 {
+        std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port()
+    }
+
+    fn ready_channel(driver: &ProcessDriver) -> std::sync::mpsc::Receiver<ReadyEvent> {
+        let (tx, rx) = std::sync::mpsc::sync_channel::<ReadyEvent>(8);
+        driver.set_ready_callback(Arc::new(move |event| {
+            let _ = tx.send(event);
+        }));
+        rx
+    }
+
+    /// 「遅れて listen する」状況の再現: 子プロセス自体は sleep していて
+    /// ポートを開かない。テスト側が後からそのポートで listen を開始する
+    /// ことで、「起動直後は繋がらず、あとから繋がるようになる」を作る
+    /// (監視は接続可能性しか見ないので、誰がポートを開いたかは問わない)。
+    #[test]
+    fn ready_is_notified_once_the_port_becomes_connectable() {
+        let driver = driver();
+        let port = free_port();
+        let rx = ready_channel(&driver);
+
+        driver
+            .ensure_started("d/worker", &sleep_spec(vec![port]))
+            .expect("start");
+
+        // まだ誰も listen していないので通知は来ない。
+        assert!(
+            rx.recv_timeout(Duration::from_millis(600)).is_err(),
+            "must not notify ready before the port accepts connections"
+        );
+
+        let _listener = std::net::TcpListener::bind(("127.0.0.1", port)).unwrap();
+        let event = rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("ready must be notified once the port opens");
+        assert_eq!(event.key, "d/worker");
+        assert_eq!(event.index, 0);
+        assert_eq!(event.port, port);
+
+        // 通知は 1 回だけ。
+        assert!(
+            rx.recv_timeout(Duration::from_millis(500)).is_err(),
+            "ready must be notified exactly once per spawn"
+        );
+
+        driver.stop("d/worker");
+    }
+
+    #[test]
+    fn ready_is_not_notified_if_the_process_dies_before_the_port_opens() {
+        let driver = driver();
+        let port = free_port();
+        let rx = ready_channel(&driver);
+        let spec = ProcessSpec {
+            command: PathBuf::from("/bin/sh"),
+            args: vec!["-c".to_string(), "exit 0".to_string()],
+            ports: vec![port],
+        };
+
+        driver.ensure_started("d/dead", &spec).expect("start");
+
+        // 監視がプロセス死亡を観測するまで待ってから、あえてポートを開く。
+        // 死亡後にポートが繋がるようになっても通知してはいけない。
+        std::thread::sleep(Duration::from_millis(500));
+        let _listener = std::net::TcpListener::bind(("127.0.0.1", port)).unwrap();
+        assert!(
+            rx.recv_timeout(Duration::from_secs(1)).is_err(),
+            "a process that died before its port opened must not be reported ready"
+        );
+    }
+
+    #[test]
+    fn respawn_notifies_ready_again() {
+        // spawn_min_interval = 0 の driver() を使う(即 respawn できる)。
+        let driver = driver();
+        let port = free_port();
+        let rx = ready_channel(&driver);
+        // 最初からポートが開いている状態にしておけば、spawn → 通知が
+        // それぞれ即座に来る。
+        let _listener = std::net::TcpListener::bind(("127.0.0.1", port)).unwrap();
+
+        driver
+            .ensure_started("d/re", &sleep_spec(vec![port]))
+            .expect("first start");
+        rx.recv_timeout(Duration::from_secs(2)).expect("first ready");
+
+        driver.stop("d/re");
+        driver
+            .ensure_started("d/re", &sleep_spec(vec![port]))
+            .expect("respawn");
+        rx.recv_timeout(Duration::from_secs(2))
+            .expect("respawn must be watched anew and notified again");
+
+        driver.stop("d/re");
     }
 
     #[test]
