@@ -731,4 +731,157 @@ mod tests {
             Arc::new(edlr_driver_fs::FsDriver::new(FS_READ_LIMIT, FS_LIST_LIMIT)),
         )
     }
+
+    /// `test_driver_ctx` に `sidecars_json`/`filesystem_json` を差し込めるようにした
+    /// 別ヘルパー。既存の `test_driver_ctx` は emit 系テストの流儀を壊さないよう
+    /// そのまま残し、resolve 系の錨テストはこちらを使う。
+    fn test_driver_ctx_with(sidecars_json: &str, filesystem_json: &str) -> DriverCtx {
+        DriverCtx::new(
+            "ed-state".to_string(),
+            Arc::new(Mutex::new("{}".to_string())),
+            Arc::new(Mutex::new(r#"{"hosts":[]}"#.to_string())),
+            Arc::new(Mutex::new(sidecars_json.to_string())),
+            Arc::new(Mutex::new(filesystem_json.to_string())),
+            edlr_driver_channel::Bus::new(),
+            Arc::new(
+                edlr_driver_http::HttpDriver::new(DRIVER_HTTP_TIMEOUT, HTTP_MAX_BODY)
+                    .expect("http driver builds"),
+            ),
+            Arc::new(edlr_driver_process::ProcessDriver::new(
+                SIDECAR_SHUTDOWN_GRACE,
+                SIDECAR_SPAWN_MIN_INTERVAL,
+            )),
+            Arc::new(edlr_driver_fs::FsDriver::new(FS_READ_LIMIT, FS_LIST_LIMIT)),
+        )
+    }
+
+    fn sidecar_entry(
+        granted: bool,
+        command: &str,
+    ) -> crate::plugin::sidecar_runtime::SidecarRuntimeEntry {
+        crate::plugin::sidecar_runtime::SidecarRuntimeEntry {
+            name: "tts".to_string(),
+            granted,
+            command: command.to_string(),
+            args: vec![],
+            ports: vec![],
+        }
+    }
+
+    fn fs_entry(
+        granted: bool,
+        mode: &str,
+        path: &str,
+    ) -> crate::plugin::fs_runtime::FsRuntimeEntry {
+        crate::plugin::fs_runtime::FsRuntimeEntry {
+            name: "exports".to_string(),
+            granted,
+            mode: mode.to_string(),
+            path: path.to_string(),
+        }
+    }
+
+    #[test]
+    fn ensure_started_without_grant_is_permission_denied() {
+        use crate::plugin::sidecar_runtime::sidecars_json_string;
+        let mut ctx = test_driver_ctx_with(
+            &sidecars_json_string(&[sidecar_entry(false, "/bin/sh")]),
+            "[]",
+        );
+
+        let err = ctx
+            .ensure_started("tts".to_string())
+            .expect_err("ungranted sidecar must not start");
+        let WitProcessError::PermissionDenied(msg) = err else {
+            panic!("expected PermissionDenied, got a different variant");
+        };
+        assert_eq!(msg, "sidecar not granted: tts");
+    }
+
+    #[test]
+    fn ensure_started_unknown_sidecar_is_reported_as_such() {
+        use crate::plugin::sidecar_runtime::sidecars_json_string;
+        let mut ctx = test_driver_ctx_with(
+            &sidecars_json_string(&[sidecar_entry(true, "/bin/sh")]),
+            "[]",
+        );
+
+        let err = ctx
+            .ensure_started("nope".to_string())
+            .expect_err("unknown sidecar must be rejected");
+        let WitProcessError::UnknownSidecar(msg) = err else {
+            panic!("expected UnknownSidecar, got a different variant");
+        };
+        assert_eq!(msg, "no such sidecar: nope");
+    }
+
+    #[test]
+    fn ensure_started_granted_but_unconfigured_command_is_not_configured() {
+        use crate::plugin::sidecar_runtime::sidecars_json_string;
+        let mut ctx = test_driver_ctx_with(&sidecars_json_string(&[sidecar_entry(true, "")]), "[]");
+
+        let err = ctx
+            .ensure_started("tts".to_string())
+            .expect_err("empty command must be reported as not-configured");
+        let WitProcessError::NotConfigured(msg) = err else {
+            panic!("expected NotConfigured, got a different variant");
+        };
+        assert_eq!(msg, "sidecar tts has no executable configured");
+    }
+
+    #[test]
+    fn read_unknown_root_is_reported_as_such() {
+        use crate::plugin::fs_runtime::filesystem_json_string;
+        let dir = tempfile::tempdir().unwrap();
+        let mut ctx = test_driver_ctx_with(
+            "[]",
+            &filesystem_json_string(&[fs_entry(true, "read-write", &dir.path().to_string_lossy())]),
+        );
+
+        let err = ctx
+            .read("nope".to_string(), "a.txt".to_string())
+            .expect_err("unknown root must be reported as such");
+        let WitFsError::UnknownRoot(msg) = err else {
+            panic!("expected UnknownRoot, got a different variant");
+        };
+        assert_eq!(msg, "no such root: nope");
+    }
+
+    #[test]
+    fn write_under_read_mode_root_is_permission_denied() {
+        use crate::plugin::fs_runtime::filesystem_json_string;
+        let dir = tempfile::tempdir().unwrap();
+        let mut ctx = test_driver_ctx_with(
+            "[]",
+            &filesystem_json_string(&[fs_entry(true, "read", &dir.path().to_string_lossy())]),
+        );
+
+        let err = ctx
+            .write("exports".to_string(), "a.txt".to_string(), vec![1])
+            .expect_err("write under read mode must be denied");
+        let WitFsError::PermissionDenied(msg) = err else {
+            panic!("expected PermissionDenied, got a different variant");
+        };
+        assert_eq!(msg, "root exports is read-only");
+    }
+
+    #[test]
+    fn send_with_no_effective_hosts_is_permission_denied() {
+        let bus = edlr_driver_channel::Bus::new();
+        let mut ctx = test_driver_ctx(bus);
+
+        let req = WitRequest {
+            method: "GET".to_string(),
+            url: "https://api.example.com/ping".to_string(),
+            headers: Vec::new(),
+            body: None,
+        };
+        let err = ctx
+            .send(req)
+            .expect_err("no effective hosts means every call is denied");
+        let WitDriverError::PermissionDenied(msg) = err else {
+            panic!("expected PermissionDenied, got a different variant");
+        };
+        assert_eq!(msg, "capability not granted");
+    }
 }
