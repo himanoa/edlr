@@ -3,7 +3,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
-use crate::plugin::{Manifest, SettingField};
+use crate::plugin::Manifest;
 
 /// RPC 応答用に、秘密情報を取り除いた設定値と「設定済みの秘密情報キー」の
 /// 一覧に分ける。
@@ -109,96 +109,6 @@ impl SettingsStore {
         self.dir.join(format!("{}.json", manifest.id))
     }
 
-    /// `value` が `field` の宣言型(および Select の `options`)に適合するか検証する。
-    fn validate_value(
-        field: &SettingField,
-        value: &serde_json::Value,
-    ) -> Result<(), SettingsError> {
-        match field {
-            SettingField::Boolean { key, .. } => {
-                if !value.is_boolean() {
-                    return Err(SettingsError::TypeMismatch {
-                        key: key.clone(),
-                        expected: "boolean",
-                    });
-                }
-            }
-            // 秘密情報も保存形式は文字列。違うのは読み出し側の扱いだけ
-            // (`SettingField::Secret` のドキュメントコメント参照)。
-            SettingField::String { key, .. } | SettingField::Secret { key, .. } => {
-                if !value.is_string() {
-                    return Err(SettingsError::TypeMismatch {
-                        key: key.clone(),
-                        expected: "string",
-                    });
-                }
-            }
-            SettingField::Number { key, .. } => {
-                if !value.is_number() {
-                    return Err(SettingsError::TypeMismatch {
-                        key: key.clone(),
-                        expected: "number",
-                    });
-                }
-            }
-            SettingField::Select {
-                key,
-                options,
-                options_from,
-                ..
-            } => {
-                let Some(s) = value.as_str() else {
-                    return Err(SettingsError::TypeMismatch {
-                        key: key.clone(),
-                        expected: "string",
-                    });
-                };
-                // **`options-from` の select は候補と照合しない。** 候補は
-                // ドライバの retain トピック越しに非同期で届き、ドライバの
-                // 無効化で消えもする。照合すると同じ操作がタイミングで成否を
-                // 変え、「ドライバが起動するまで設定を保存できない時間帯」が
-                // できてしまう。UI はドロップダウンなので、綴りを間違える経路は
-                // そちらで塞がっている(設計書「保存時の検証」参照)。
-                //
-                // マニフェスト検証(`validate_settings`)が両方指定を弾いて
-                // いるので、`options_from` が Some なら `options` は None。
-                if options_from.is_none() {
-                    let in_options = options
-                        .as_ref()
-                        .is_some_and(|list| list.iter().any(|o| o.value == s));
-                    if !in_options {
-                        return Err(SettingsError::NotAnOption {
-                            key: key.clone(),
-                            value: s.to_string(),
-                        });
-                    }
-                }
-            }
-            // `string -> string` に限る。値に number/bool/入れ子を許すと、
-            // プラグイン側が受け取る形が行ごとに変わってしまう。
-            SettingField::Map { key, .. } => {
-                let Some(entries) = value.as_object() else {
-                    return Err(SettingsError::TypeMismatch {
-                        key: key.clone(),
-                        expected: "map",
-                    });
-                };
-                for (entry_key, entry_value) in entries {
-                    if entry_key.is_empty() {
-                        return Err(SettingsError::EmptyMapKey { key: key.clone() });
-                    }
-                    if !entry_value.is_string() {
-                        return Err(SettingsError::TypeMismatch {
-                            key: key.clone(),
-                            expected: "map",
-                        });
-                    }
-                }
-            }
-        }
-        Ok(())
-    }
-
     /// manifest 由来の defaults に保存済みの値をマージして返す。
     ///
     /// ファイルが存在しない・JSON が壊れている・トップレベルがオブジェクトでない
@@ -216,28 +126,14 @@ impl SettingsStore {
     /// `effective()` の本体。呼び出し元が既に `self.lock` を保持していること
     /// を前提とする(二重ロックしない内部ヘルパー)。
     fn effective_locked(&self, manifest: &Manifest) -> serde_json::Map<String, serde_json::Value> {
-        let mut result = serde_json::Map::new();
-        for setting in &manifest.settings {
-            result.insert(setting.key().to_string(), setting.default_value());
-        }
-
-        let path = self.path_for(manifest);
-        let Ok(content) = fs::read_to_string(&path) else {
-            return result;
-        };
-        let Ok(serde_json::Value::Object(saved)) =
-            serde_json::from_str::<serde_json::Value>(&content)
-        else {
-            return result;
-        };
-
-        for setting in &manifest.settings {
-            if let Some(value) = saved.get(setting.key()) {
-                result.insert(setting.key().to_string(), value.clone());
-            }
-        }
-
-        result
+        let saved = fs::read_to_string(self.path_for(manifest))
+            .ok()
+            .and_then(|content| serde_json::from_str::<serde_json::Value>(&content).ok())
+            .and_then(|value| match value {
+                serde_json::Value::Object(map) => Some(map),
+                _ => None,
+            });
+        crate::settings::validate::effective_values(&manifest.settings, saved.as_ref())
     }
 
     /// 現在の保存値(なければ defaults)に `values` を部分適用して保存する。
@@ -273,7 +169,7 @@ impl SettingsStore {
                 .iter()
                 .find(|s| s.key() == key)
                 .ok_or_else(|| SettingsError::UnknownKey(key.clone()))?;
-            Self::validate_value(field, value)?;
+            crate::settings::validate::validate_value(field, value)?;
         }
 
         let _guard = self.lock.lock().unwrap_or_else(|p| p.into_inner());

@@ -1,9 +1,10 @@
 //! プラグイン設定の検証・マージと永続化の口。
 //!
-//! 検証・マージの純粋ロジックは [`store`] にある(Phase 3 で
-//! `plugin/settings.rs` から移動)。
+//! 検証・マージの純粋ロジックは [`validate`] にある。永続化(ディスク I/O)は
+//! [`store`] が担う。
 
 pub mod store;
+pub mod validate;
 
 use crate::plugin::Manifest;
 use store::{SettingsError, SettingsStore};
