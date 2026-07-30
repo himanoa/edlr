@@ -156,6 +156,23 @@ const SCHEDULE_LESS_FALLBACK_TIMEOUT: Duration = Duration::from_secs(3600);
 /// 0 に戻る。
 const CALL_DEADLINE_STRIKES: u32 = 3;
 
+/// 期限超過が strikes 回連続したときの扱い。判定だけを純関数にし、
+/// 制御フロー(continue/break)と reason 文字列の組み立ては
+/// `handle_call_result!` マクロに残す。
+#[derive(Debug, PartialEq)]
+enum DeadlineVerdict {
+    Restart,
+    GiveUp,
+}
+
+fn deadline_verdict(strikes: u32) -> DeadlineVerdict {
+    if strikes >= CALL_DEADLINE_STRIKES {
+        DeadlineVerdict::GiveUp
+    } else {
+        DeadlineVerdict::Restart
+    }
+}
+
 /// `plugins_dir` を走査し、各プラグインをロードして専用タスクで駆動する。
 ///
 /// 戻り値の `Registry` は起動直後から `snapshot` 可能(= 各プラグインの
@@ -566,7 +583,7 @@ fn run_plugin_thread(
                 }
                 Err(e) if e.is_deadline_exceeded() => {
                     deadline_strikes += 1;
-                    if deadline_strikes >= CALL_DEADLINE_STRIKES {
+                    if deadline_verdict(deadline_strikes) == DeadlineVerdict::GiveUp {
                         disable_and_break!(format!(
                             "{e} on {deadline_strikes} consecutive calls; the plugin is \
                              persistently too slow (a blocked host call, or work that does \
@@ -1346,6 +1363,30 @@ mod tests {
 
             let action_with_due = next_action(Ok(PluginWork::Stop), Some("flush".to_string()));
             assert!(matches!(action_with_due, LoopAction::Stop));
+        }
+    }
+
+    /// `deadline_verdict` は `handle_call_result!` から切り出した判定のみの
+    /// 純粋関数。境界(`CALL_DEADLINE_STRIKES` 未満 / 到達 / 超過)を確認する。
+    mod deadline_verdict_tests {
+        use super::*;
+
+        #[test]
+        fn below_the_limit_restarts() {
+            let verdict = deadline_verdict(CALL_DEADLINE_STRIKES - 1);
+            assert_eq!(verdict, DeadlineVerdict::Restart);
+        }
+
+        #[test]
+        fn at_the_limit_gives_up() {
+            let verdict = deadline_verdict(CALL_DEADLINE_STRIKES);
+            assert_eq!(verdict, DeadlineVerdict::GiveUp);
+        }
+
+        #[test]
+        fn above_the_limit_gives_up() {
+            let verdict = deadline_verdict(CALL_DEADLINE_STRIKES + 1);
+            assert_eq!(verdict, DeadlineVerdict::GiveUp);
         }
     }
 }
