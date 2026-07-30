@@ -144,3 +144,282 @@ pub fn filesystem_result_json(roots: &[crate::plugin::FilesystemInfo]) -> serde_
         .collect();
     serde_json::json!({ "roots": items })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::plugin::grants::GrantState;
+    use crate::plugin::registry::{BusInfo, DashboardInfo, FilesystemInfo, ScheduleInfo, SidecarInfo};
+    use crate::plugin::{
+        BusRequest, CapabilityRequest, DashboardWidget, FilesystemConfig, FilesystemMode,
+        FilesystemRequest, ScheduleSpec, SidecarConfig, SidecarRequest, WidgetSize,
+    };
+    use edlr_driver_process::InstanceStatus;
+
+    #[test]
+    fn capabilities_json_has_requests_granted_and_stale_grant() {
+        let state = GrantState {
+            granted: true,
+            stale: false,
+        };
+        let json = capabilities_result_json(&[], &state);
+        assert_eq!(
+            json,
+            serde_json::json!({ "requests": [], "granted": true, "staleGrant": false })
+        );
+    }
+
+    #[test]
+    fn capabilities_json_includes_populated_http_request() {
+        let requests = [CapabilityRequest::Http {
+            hosts: vec!["https://api.example.com".to_string()],
+            reason: "call the api".to_string(),
+        }];
+        let state = GrantState {
+            granted: false,
+            stale: true,
+        };
+        let json = capabilities_result_json(&requests, &state);
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "requests": [
+                    { "kind": "http", "hosts": ["https://api.example.com"], "reason": "call the api" }
+                ],
+                "granted": false,
+                "staleGrant": true,
+            })
+        );
+    }
+
+    #[test]
+    fn dashboard_json_is_empty_for_empty_slice() {
+        let json = dashboard_result_json(&[]);
+        assert_eq!(json, serde_json::json!({ "dashboard": [] }));
+    }
+
+    #[test]
+    fn dashboard_json_includes_populated_widget() {
+        let dashboard = [DashboardInfo {
+            request: DashboardWidget {
+                id: "widget-1".to_string(),
+                title: "Widget One".to_string(),
+                entry: "widget.html".to_string(),
+                size: WidgetSize::Medium,
+            },
+            grant: GrantState {
+                granted: true,
+                stale: false,
+            },
+            resolved: true,
+        }];
+        let json = dashboard_result_json(&dashboard);
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "dashboard": [
+                    {
+                        "id": "widget-1",
+                        "title": "Widget One",
+                        "entry": "widget.html",
+                        "size": "medium",
+                        "granted": true,
+                        "staleGrant": false,
+                        "resolved": true,
+                    }
+                ]
+            })
+        );
+    }
+
+    #[test]
+    fn bus_json_is_empty_for_empty_slice() {
+        let json = bus_result_json(&[]);
+        assert_eq!(json, serde_json::json!({ "bus": [] }));
+    }
+
+    #[test]
+    fn bus_json_includes_populated_connection() {
+        let bus = [BusInfo {
+            request: BusRequest {
+                driver: "mqtt".to_string(),
+                publish: vec!["topic/out".to_string()],
+                subscribe: vec!["topic/in".to_string()],
+                reason: "telemetry".to_string(),
+            },
+            grant: GrantState {
+                granted: true,
+                stale: false,
+            },
+            resolved: false,
+        }];
+        let json = bus_result_json(&bus);
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "bus": [
+                    {
+                        "driver": "mqtt",
+                        "publish": ["topic/out"],
+                        "subscribe": ["topic/in"],
+                        "reason": "telemetry",
+                        "granted": true,
+                        "staleGrant": false,
+                        "resolved": false,
+                    }
+                ]
+            })
+        );
+    }
+
+    #[test]
+    fn dropped_json_reports_event_and_bus_delivery_counts() {
+        let dropped = crate::plugin::dropped::DroppedCounts {
+            events: 3,
+            bus_deliveries: 7,
+        };
+        let json = dropped_result_json(&dropped);
+        assert_eq!(json, serde_json::json!({ "events": 3, "busDeliveries": 7 }));
+    }
+
+    #[test]
+    fn schedules_json_is_empty_for_empty_slice() {
+        let json = schedules_result_json(&[]);
+        assert_eq!(json, serde_json::json!({ "schedules": [] }));
+    }
+
+    #[test]
+    fn schedules_json_includes_populated_schedule_with_fixed_timestamp() {
+        let next = chrono::DateTime::parse_from_rfc3339("2026-07-30T12:00:00+09:00")
+            .unwrap()
+            .with_timezone(&chrono::Local);
+        let schedules = [ScheduleInfo {
+            name: "daily-report".to_string(),
+            spec: ScheduleSpec::Cron("0 9 * * *".to_string()),
+            next,
+        }];
+        let json = schedules_result_json(&schedules);
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "schedules": [
+                    {
+                        "name": "daily-report",
+                        "spec": "cron: 0 9 * * *",
+                        "next": schedules[0].next.to_rfc3339(),
+                    }
+                ]
+            })
+        );
+    }
+
+    #[test]
+    fn sidecars_json_is_empty_for_empty_slice() {
+        let json = sidecars_result_json(&[]);
+        assert_eq!(json, serde_json::json!({ "sidecars": [] }));
+    }
+
+    #[test]
+    fn sidecars_json_includes_populated_sidecar_with_instances() {
+        let sidecars = [SidecarInfo {
+            request: SidecarRequest {
+                name: "worker".to_string(),
+                reason: "background jobs".to_string(),
+                args: vec!["--verbose".to_string()],
+                port: 8080,
+                scalable: true,
+            },
+            config: SidecarConfig {
+                command: "/usr/bin/worker".to_string(),
+                args: vec!["--verbose".to_string()],
+                port: 8080,
+                replicas: 2,
+            },
+            grant: GrantState {
+                granted: true,
+                stale: false,
+            },
+            instances: vec![
+                InstanceStatus {
+                    index: 0,
+                    port: 8080,
+                    running: true,
+                    exit_code: None,
+                },
+                InstanceStatus {
+                    index: 1,
+                    port: 8081,
+                    running: false,
+                    exit_code: Some(1),
+                },
+            ],
+        }];
+        let json = sidecars_result_json(&sidecars);
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "sidecars": [
+                    {
+                        "name": "worker",
+                        "reason": "background jobs",
+                        "args": ["--verbose"],
+                        "port": 8080,
+                        "scalable": true,
+                        "granted": true,
+                        "staleGrant": false,
+                        "config": {
+                            "command": "/usr/bin/worker",
+                            "args": ["--verbose"],
+                            "port": 8080,
+                            "replicas": 2,
+                        },
+                        "instances": [
+                            { "index": 0, "port": 8080, "state": "running", "exitCode": null },
+                            { "index": 1, "port": 8081, "state": "exited", "exitCode": 1 },
+                        ],
+                    }
+                ]
+            })
+        );
+    }
+
+    #[test]
+    fn filesystem_json_is_empty_for_empty_slice() {
+        let json = filesystem_result_json(&[]);
+        assert_eq!(json, serde_json::json!({ "roots": [] }));
+    }
+
+    #[test]
+    fn filesystem_json_includes_populated_root() {
+        let roots = [FilesystemInfo {
+            request: FilesystemRequest {
+                name: "data".to_string(),
+                reason: "read config files".to_string(),
+                mode: FilesystemMode::ReadWrite,
+            },
+            config: FilesystemConfig {
+                path: "/home/user/data".to_string(),
+            },
+            grant: GrantState {
+                granted: false,
+                stale: false,
+            },
+        }];
+        let json = filesystem_result_json(&roots);
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "roots": [
+                    {
+                        "name": "data",
+                        "reason": "read config files",
+                        "mode": "read-write",
+                        "granted": false,
+                        "staleGrant": false,
+                        "config": { "path": "/home/user/data" },
+                    }
+                ]
+            })
+        );
+    }
+}
