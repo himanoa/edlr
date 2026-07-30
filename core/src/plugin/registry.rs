@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 
 use edlr_driver_channel::Bus;
-use edlr_driver_process::{InstanceStatus, ProcessDriver, ProcessSpec};
+use edlr_driver_process::{InstanceStatus, ProcessDriver};
 
 use crate::driver::registry::DriverRegistry;
 use crate::plugin::dropped::{DropCounters, DroppedCounts};
@@ -19,10 +19,8 @@ use crate::plugin::host::{capabilities_json_string, parse_capability_hosts, Plug
 use crate::plugin::runner::PluginWork;
 use crate::plugin::schedule::{Clock, ScheduleState, ScheduleView};
 use crate::plugin::settings::{split_secrets, SettingsStore};
-use crate::plugin::sidecar::{assign_ports, SidecarConfig, SidecarConfigError, SidecarConfigStore};
-use crate::plugin::sidecar_runtime::{
-    implicit_http_hosts, sidecars_json_string, SidecarRuntimeEntry,
-};
+use crate::plugin::sidecar::{SidecarConfig, SidecarConfigError, SidecarConfigStore};
+use crate::plugin::sidecar_runtime::{implicit_http_hosts, SidecarRuntimeEntry};
 use crate::plugin::{
     BusRequest, CapabilityRequest, DashboardWidget, FilesystemRequest, Manifest, ScheduleSpec,
     SettingsError, SidecarRequest,
@@ -30,6 +28,7 @@ use crate::plugin::{
 use crate::registry::bus::DiskBusService;
 use crate::registry::entries::{EntryTable, IdLocks};
 use crate::registry::filesystem::DiskFilesystemService;
+use crate::registry::sidecar::SidecarService;
 use crate::registry::supervisor::ThreadSupervisor;
 
 /// プラグイン 1 件の現在の駆動状態。
@@ -237,17 +236,18 @@ pub struct Registry {
     _host: Arc<PluginHost>,
     settings_store: Arc<SettingsStore>,
     grants_store: Arc<GrantsStore>,
-    sidecar_config_store: Arc<SidecarConfigStore>,
     /// fs 群(`filesystem` / `set_filesystem_config` / `set_filesystem_grant`
     /// とその内部ヘルパー)の実体。`registry::filesystem::FilesystemService`
     /// のドキュメント参照(Phase 4 タスク4で移動)。
     filesystem_service: DiskFilesystemService<PluginEntry>,
-    /// サイドカープロセスを実際に所有するドライバ。`PluginHost` が全プラグ
-    /// インで共有している 1 インスタンスをそのまま指す(`HostCtx` に配線
-    /// されているものと同じ `Arc`)。`Registry` はここに直接
-    /// `ensure_started`/`status`/`stop`/`stop_all` を発行することで、
-    /// wasm 呼び出しを経由せずホスト起点でサイドカーを操作できる。
-    process_driver: Arc<ProcessDriver>,
+    /// サイドカー群(`sidecars` / `set_sidecar_config` / `set_sidecar_grant` /
+    /// `control_sidecar` / `stop_all_sidecars` とその内部ヘルパー)の実体。
+    /// `registry::sidecar::SidecarService` のドキュメント参照(Phase 4
+    /// タスク6で移動)。`capabilities_lock` のみ、下のフィールドとして
+    /// `Registry` 自身にも残す(`set_capabilities` が使うのと**同一の**
+    /// `Arc` をこのサービスにも注入している -- `SidecarService` のドキュメント
+    /// コメント参照)。
+    sidecar_service: SidecarService,
     /// Serializes the whole "persist to `GrantsStore` + overwrite the shared
     /// `capabilities_json` buffer" sequence in `set_capabilities`, so the two
     /// writes for a given call always land together and in order relative to
@@ -255,42 +255,13 @@ pub struct Registry {
     /// for why this is needed (disk and the live buffer could otherwise
     /// disagree under concurrent callers, e.g. two RPC clients toggling the
     /// same plugin's capability at once).
+    ///
+    /// `sidecar_service` にも同一の `Arc` を注入している(`SidecarService`
+    /// のドキュメントコメント参照)。`sidecar_runtime_lock_for` によるプラグイン
+    /// ID ごとのロックマップ自体は `sidecar_service` が保持するようになった
+    /// (Phase 4 タスク6で移動)が、ロック取得順序(`entries` → マップの
+    /// Mutex → id 別ロック → `capabilities_lock` の一方向のみ)は変えていない。
     capabilities_lock: Arc<Mutex<()>>,
-    /// `set_sidecar_config` / `set_sidecar_grant` が呼ぶ
-    /// `refresh_sidecar_runtime`(停止 → `sidecars_json` の作り直し →
-    /// `capabilities_json` の作り直し)の臨界区間を **プラグイン ID ごとに**
-    /// 直列化するロックのマップ。id → 専用 `Arc<Mutex<()>>` を引く。
-    ///
-    /// なぜプラグイン単位にしたか: `refresh_sidecar_runtime` は同期版
-    /// `ProcessDriver::stop` を臨界区間の中で呼ぶため、SIGTERM を無視する
-    /// サイドカーが 1 つあれば `shutdown_grace`(既定 3 秒)× 停止対象の
-    /// インスタンス数ブロックしうる。単一のグローバルロックだと、あるプラグ
-    /// インのサイドカー停止待ちの間、無関係な別プラグインの
-    /// `set_sidecar_config`/`set_sidecar_grant` まで足止めされてしまう。
-    /// `capabilities_lock`(こちらは全プラグイン共有のグローバルロックの
-    /// まま)が守っているのはインメモリのバッファ差し替えだけで済むのとは
-    /// リスクの質が違うため、こちらだけプラグイン単位に分けてある。
-    ///
-    /// マップ自体を保護する `Mutex`(`sidecar_runtime_lock_for` を参照)は
-    /// 「id からロックの `Arc` を引く/無ければ作る」間だけ保持し、返した
-    /// `Arc<Mutex<()>>` の実際の臨界区間(プロセス停止・ディスク読み書き)の
-    /// 間は保持しない。したがってマップの Mutex 自体がボトルネックになる
-    /// ことはない(id ごとの `Arc<Mutex<()>>` を作る/引くだけの一瞬)。
-    ///
-    /// ロック取得順序は一方向を保っている: `entries` は「manifest と共有
-    /// ハンドルのクローンを取る」瞬間だけ握ってすぐ手放し(この時点でマップの
-    /// Mutex も id 別ロックもまだ取っていない)、その後
-    /// `sidecar_runtime_lock_for(id)` でマップから id 別ロックを引いて
-    /// (マップの Mutex は取得直後に手放す)、最後にその id 別ロックを取る。
-    /// id 別ロックの臨界区間の中で `capabilities_lock` を(id をまたいで共有
-    /// される `capabilities_json` バッファのため)追加で取ることがある
-    /// (`refresh_sidecar_runtime` を参照)が、逆方向(`capabilities_lock` を
-    /// 保持したまま id 別ロックやマップの Mutex を取る)は無い。
-    /// `set_capabilities` は `capabilities_lock` だけを取り、id 別ロックにも
-    /// マップの Mutex にも触れない。したがって「entries → マップの Mutex →
-    /// id 別ロック → capabilities_lock」の一方向のみが成立し、循環しないので
-    /// デッドロックしない。
-    sidecar_runtime_locks: IdLocks,
     /// bus 群(`bus` / `bus_buffer` / `set_bus_grant` とその内部ヘルパー)の
     /// 実体。`registry::bus::BusService`(Phase 4 タスク5で抽出)。
     /// `bus_runtime_locks` と `BusInfo::resolved` 計算用の `DriverRegistry`
@@ -336,16 +307,23 @@ impl Registry {
             driver_registry,
             IdLocks::new(),
         );
+        let capabilities_lock = Arc::new(Mutex::new(()));
+        let sidecar_service = SidecarService::new(
+            entries.clone(),
+            grants_store.clone(),
+            sidecar_config_store,
+            process_driver,
+            capabilities_lock.clone(),
+            IdLocks::new(),
+        );
         Registry {
             entries,
             _host: host,
             settings_store,
             grants_store,
-            sidecar_config_store,
             filesystem_service,
-            process_driver,
-            capabilities_lock: Arc::new(Mutex::new(())),
-            sidecar_runtime_locks: IdLocks::new(),
+            sidecar_service,
+            capabilities_lock,
             bus_service,
             bus,
             plugins_dir,
@@ -375,7 +353,8 @@ impl Registry {
         handle: thread::JoinHandle<()>,
         stop_flag: Arc<AtomicBool>,
     ) {
-        self.supervisor.register_thread(id, work_tx, handle, stop_flag);
+        self.supervisor
+            .register_thread(id, work_tx, handle, stop_flag);
     }
 
     /// プラグイン専用スレッドが、自分のスケジュール状態を公開する窓口を
@@ -463,7 +442,7 @@ impl Registry {
                     split_secrets(&manifest, self.settings_store.effective(&manifest));
                 let grant_state = self.grants_store.state(&manifest);
                 let capability_requests = manifest.capabilities.clone();
-                let sidecars = self.build_sidecar_infos(&manifest);
+                let sidecars = self.sidecar_service.build_sidecar_infos(&manifest);
                 let filesystem = self.filesystem_service.build_filesystem_infos(&manifest);
                 let dashboard = self.build_dashboard_infos(&manifest);
                 let schedules = self.build_schedule_infos(&manifest);
@@ -483,70 +462,6 @@ impl Registry {
                 }
             })
             .collect()
-    }
-
-    /// `<plugin-id>/<sidecar-name>` の形で `ProcessDriver` のキーを組み立てる。
-    /// `HostCtx::sidecar_key`(`core/src/plugin/host.rs`)と同じ規則。
-    fn sidecar_key(plugin_id: &str, name: &str) -> String {
-        format!("{plugin_id}/{name}")
-    }
-
-    /// `manifest.sidecars` の宣言順に `SidecarInfo` を組み立てる。設定
-    /// (`SidecarConfigStore`)・承認(`GrantsStore`)はディスクを読むが、
-    /// `ProcessDriver::status` は読み取り専用(プロセスを起動も停止もしない)。
-    fn build_sidecar_infos(&self, manifest: &Manifest) -> Vec<SidecarInfo> {
-        let configs = self.sidecar_config_store.effective(manifest);
-        manifest
-            .sidecars
-            .iter()
-            .map(|request| {
-                let config = configs
-                    .get(&request.name)
-                    .cloned()
-                    .unwrap_or_else(|| SidecarConfig::from_request(request));
-                let grant = self.grants_store.sidecar_state(manifest, &request.name);
-                self.sidecar_info_and_entry(manifest, request, config, grant)
-                    .0
-            })
-            .collect()
-    }
-
-    /// `request` 1 件分の(既に取得済みの)設定・承認状態から、`SidecarInfo`
-    /// と(`sidecars_json` バッファ用の)`SidecarRuntimeEntry` を両方組み立
-    /// てる。`ProcessDriver::status` の呼び出しを両者で 1 回だけ共有する
-    /// (`config`/`grant` の取得元は呼び出し側に委ねているので、ここではもう
-    /// ディスクを読まない -- `refresh_sidecar_runtime` が前半で読んだ値を
-    /// そのまま渡し、末尾で読み直さずに済ませるための分離)。
-    fn sidecar_info_and_entry(
-        &self,
-        manifest: &Manifest,
-        request: &SidecarRequest,
-        config: SidecarConfig,
-        grant: GrantState,
-    ) -> (SidecarInfo, SidecarRuntimeEntry) {
-        let ports = assign_ports(&config);
-        let spec = ProcessSpec {
-            command: PathBuf::from(&config.command),
-            args: config.args.clone(),
-            ports: ports.clone(),
-        };
-        let key = Self::sidecar_key(&manifest.id, &request.name);
-        let instances = self.process_driver.status(&key, &spec);
-
-        let runtime_entry = SidecarRuntimeEntry {
-            name: request.name.clone(),
-            granted: grant.granted,
-            command: config.command.clone(),
-            args: config.args.clone(),
-            ports,
-        };
-        let info = SidecarInfo {
-            request: request.clone(),
-            config,
-            grant,
-            instances,
-        };
-        (info, runtime_entry)
     }
 
     fn build_dashboard_infos(&self, manifest: &Manifest) -> Vec<DashboardInfo> {
@@ -691,14 +606,6 @@ impl Registry {
             return Err(RegistryError::UnknownDashboard(widget.to_string()));
         }
         Ok(base.join(rel))
-    }
-
-    /// `id` 用のサイドカー実行時ロック(`sidecar_runtime_locks`)を引く。
-    /// 無ければ作る。マップ自体を保護する `Mutex` は、id からロックの `Arc`
-    /// を引く/挿入する間だけ保持し、返した `Arc<Mutex<()>>` の実際の臨界
-    /// 区間(呼び出し側が別途 `.lock()` する)の間は保持しない。
-    fn sidecar_runtime_lock_for(&self, id: &str) -> Arc<Mutex<()>> {
-        self.sidecar_runtime_locks.lock_for(id)
     }
 
     /// `id` のプラグインの capability 要求一覧と現在の承認状態を返す。
@@ -870,18 +777,6 @@ impl Registry {
         Ok(state)
     }
 
-    /// `id` のプラグインが現在 `Disabled` かどうか。未登録の id は `false`
-    /// (`control_sidecar` はこの手前で既に `find_manifest` を通しているので、
-    /// 未登録を別扱いする必要はない)。
-    fn is_disabled(&self, id: &str) -> bool {
-        self.entries
-            .find(
-                |entry| entry.manifest.id == id,
-                |entry| matches!(entry.state, PluginState::Disabled { .. }),
-            )
-            .unwrap_or(false)
-    }
-
     /// `id` のプラグインの manifest クローンを返す(`entries` ロック保持は
     /// このルックアップの間だけ)。
     fn find_manifest(&self, id: &str) -> Result<Manifest, RegistryError> {
@@ -912,10 +807,10 @@ impl Registry {
     }
 
     /// `id` のプラグインの現在のサイドカー状態一覧(manifest の `[[sidecar]]`
-    /// 宣言順)を返す。
+    /// 宣言順)を返す。実体は `registry::sidecar::SidecarService::sidecars`
+    /// (Phase 4 タスク6で移動)。
     pub fn sidecars(&self, id: &str) -> Result<Vec<SidecarInfo>, RegistryError> {
-        let manifest = self.find_manifest(id)?;
-        Ok(self.build_sidecar_infos(&manifest))
+        self.sidecar_service.sidecars(id)
     }
 
     /// `id` のプラグインの現在のファイルアクセス状態一覧(manifest の
@@ -985,323 +880,51 @@ impl Registry {
         self.bus_service.set_bus_grant(id, driver, granted)
     }
 
-    /// サイドカーの設定変更・承認変更のあとに必ず呼ぶ内部ヘルパー。
-    ///
-    /// 1. `stop_names` に挙げられたサイドカーを(同期版 `ProcessDriver::stop`
-    ///    で)停止する。設定が変わった/承認が消えた以上、走り続けてよい根拠が
-    ///    無い -- 次の `ensure-started`(プラグインの明示操作かユーザー操作)
-    ///    で新しい設定・承認のもとに起動し直される。
-    /// 2. `sidecars_json` を(`SidecarConfigStore`/`GrantsStore` の現在値から)
-    ///    作り直す。
-    /// 3. `capabilities_json` を「http capability が承認済みなら manifest
-    ///    hosts」+「承認済みサイドカーの暗黙 127.0.0.1 ポート」で作り直す。
-    ///
-    /// 2 と 3 を同じ臨界区間で更新するのが重要で、片方だけ更新されると
-    /// 「起動はできるが通信できない(2 だけ進んだ)」「通信できるが承認は消えて
-    /// いる(3 だけ進んだ)」という中途半端な状態が観測されうる。そのため
-    /// 呼び出しごとに `sidecar_runtime_lock_for(id)` で **`id` 専用の**
-    /// ロックを取り、停止からバッファ書き込みまでを 1 つの臨界区間として
-    /// 保持する(`set_capabilities` の `capabilities_lock` と同じ理由: 2 つの
-    /// 同時呼び出し -- 例えば同じサイドカーの設定変更と承認取消を 2 つの RPC
-    /// クライアントがほぼ同時に行う -- がディスクと共有バッファを食い違わせ
-    /// ないようにするため)。
-    ///
-    /// このロックは(`capabilities_lock` と違って)**プラグイン ID ごと**に
-    /// 分かれている(`sidecar_runtime_locks` のドキュメントコメント参照)。
-    /// 手順 1 の `ProcessDriver::stop` は SIGTERM 無視の子がいれば
-    /// `shutdown_grace` 秒ブロックしうる同期呼び出しであり、これを全プラグ
-    /// イン共有のロックの中で行うと、無関係な別プラグインのサイドカー操作
-    /// まで同じだけ足止めしてしまうため。
-    ///
-    /// `capabilities_json` への書き込みは、`set_capabilities` とも共有する
-    /// 書き込み先であるため、内側で追加に `capabilities_lock` を取ってから
-    /// 行う(`set_capabilities` のドキュメントコメント参照)。ロック順序は
-    /// 常に「id 別ロック → `capabilities_lock`」の一方向のみで、
-    /// `set_capabilities` は `capabilities_lock` だけを取り id 別ロックにも
-    /// そのマップにも触れないため、循環せずデッドロックしない。
-    ///
-    /// 手順 2 の材料(`SidecarConfigStore::effective` / `GrantsStore::
-    /// sidecar_state`)はこの関数の中で 1 回だけディスクから読み、
-    /// `sidecar_info_and_entry` で `SidecarInfo`(戻り値用)と
-    /// `SidecarRuntimeEntry`(`sidecars_json` 用)を同時に組み立てる。
-    /// 末尾で改めて `self.sidecars(id)` を呼んで読み直すことはしない --
-    /// 以前の実装はそうしており、id 別ロックの臨界区間をディスク I/O 分
-    /// 余計に伸ばしていた。
-    fn refresh_sidecar_runtime(
-        &self,
-        id: &str,
-        stop_names: &[String],
-    ) -> Result<Vec<SidecarInfo>, RegistryError> {
-        let (manifest, sidecars_json, capabilities_json) = self
-            .entries
-            .find(
-                |entry| entry.manifest.id == id,
-                |entry| {
-                    (
-                        entry.manifest.clone(),
-                        entry.sidecars_json.clone(),
-                        entry.capabilities_json.clone(),
-                    )
-                },
-            )
-            .ok_or_else(|| RegistryError::UnknownPlugin(id.to_string()))?;
-
-        let runtime_lock = self.sidecar_runtime_lock_for(id);
-        let _runtime_guard = runtime_lock
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-
-        for name in stop_names {
-            let key = Self::sidecar_key(&manifest.id, name);
-            self.process_driver.stop(&key);
-        }
-
-        let sidecar_configs = self.sidecar_config_store.effective(&manifest);
-        let mut infos = Vec::with_capacity(manifest.sidecars.len());
-        let mut runtime_entries = Vec::with_capacity(manifest.sidecars.len());
-        for request in &manifest.sidecars {
-            let config = sidecar_configs
-                .get(&request.name)
-                .cloned()
-                .unwrap_or_else(|| SidecarConfig::from_request(request));
-            let grant = self.grants_store.sidecar_state(&manifest, &request.name);
-            let (info, runtime_entry) =
-                self.sidecar_info_and_entry(&manifest, request, config, grant);
-            infos.push(info);
-            runtime_entries.push(runtime_entry);
-        }
-        *sidecars_json
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) =
-            sidecars_json_string(&runtime_entries);
-
-        {
-            let _capabilities_guard = self
-                .capabilities_lock
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            let http_granted = self.grants_store.state(&manifest).granted;
-            let mut hosts = if http_granted {
-                manifest.capability_hosts()
-            } else {
-                Vec::new()
-            };
-            hosts.extend(implicit_http_hosts(&runtime_entries));
-            *capabilities_json
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner()) =
-                capabilities_json_string(&hosts);
-        }
-
-        Ok(infos)
-    }
-
     /// `id` のプラグインの `name` サイドカーの設定を検証・永続化し、稼働中の
-    /// 実行を止めてから(`refresh_sidecar_runtime`)、最新の `SidecarInfo` 一覧
-    /// を返す。検証(`SidecarConfigStore::update_and_effective`)に失敗した
-    /// 場合は何も変更されない。
+    /// 実行を止めてから最新の `SidecarInfo` 一覧を返す。検証に失敗した場合は
+    /// 何も変更されない。実体は
+    /// `registry::sidecar::SidecarService::set_sidecar_config`(Phase 4
+    /// タスク6で移動)。
     pub fn set_sidecar_config(
         &self,
         id: &str,
         name: &str,
         config: &SidecarConfig,
     ) -> Result<Vec<SidecarInfo>, RegistryError> {
-        let manifest = self.find_manifest(id)?;
-        self.sidecar_config_store
-            .update_and_effective(&manifest, name, config)
-            .map_err(RegistryError::SidecarConfig)?;
-        let stop_names = vec![name.to_string()];
-        self.refresh_sidecar_runtime(id, &stop_names)
+        self.sidecar_service.set_sidecar_config(id, name, config)
     }
 
     /// `id` のプラグインの `name` サイドカーの承認/取消を `GrantsStore` に
-    /// 永続化する。取消(`granted == false`)のときは稼働中の実行を止める
-    /// (走り続けてよい根拠が承認と共に無くなるため)。
-    ///
-    /// `granted == true` のとき、`command` が未設定(空文字)のサイドカーは
-    /// 拒否する(`RegistryError::Sidecar`)。UI 側(`SidecarSection.tsx`)は
-    /// `command` 未設定の間チェックボックスを `disabled` にしているが、それは
-    /// UI 上の防御に過ぎない -- RPC を直接叩けば(あるいは将来別の UI 経路が
-    /// 増えれば)この検証を経由せずに「ユーザーが何が走るか一度も見ていない」
-    /// 状態のサイドカーを承認できてしまう。設計書・docs/capabilities.md が明言する
-    /// 「`command` 未設定では承認できない」という不変条件はここ(ストア/
-    /// `Registry` 側)で強制し、UI・RPC 層では二重実装しない(Important:
-    /// 最終レビューで見つかった取りこぼし)。取消は逆に常に許す --
-    /// `command` を消した状態でも稼働中の承認を取り消せなければ fail-open に
-    /// なってしまうため。
+    /// 永続化する。実体は
+    /// `registry::sidecar::SidecarService::set_sidecar_grant`(Phase 4
+    /// タスク6で移動)。
     pub fn set_sidecar_grant(
         &self,
         id: &str,
         name: &str,
         granted: bool,
     ) -> Result<Vec<SidecarInfo>, RegistryError> {
-        let manifest = self.find_manifest(id)?;
-        if manifest.sidecar(name).is_none() {
-            return Err(RegistryError::UnknownSidecar(name.to_string()));
-        }
-
-        if granted {
-            let configs = self.sidecar_config_store.effective(&manifest);
-            let command_configured = configs
-                .get(name)
-                .map(|config| !config.command.is_empty())
-                .unwrap_or(false);
-            if !command_configured {
-                return Err(RegistryError::Sidecar(format!(
-                    "sidecar {name} has no executable configured; cannot grant"
-                )));
-            }
-        }
-
-        self.grants_store
-            .set_sidecar(&manifest, name, granted)
-            .map_err(RegistryError::Grants)?;
-
-        let stop_names: Vec<String> = if granted {
-            Vec::new()
-        } else {
-            vec![name.to_string()]
-        };
-        self.refresh_sidecar_runtime(id, &stop_names)
+        self.sidecar_service.set_sidecar_grant(id, name, granted)
     }
 
     /// `id` のプラグインの `name` サイドカーを直接操作する(ユーザー操作
-    /// 起点)。`Stop` は同期版 `ProcessDriver::stop`、`Start` は
-    /// `ProcessDriver::ensure_started`、`Restart` は停止してから
-    /// `ensure_started`。`Start`/`Restart` は未承認・`command` 未設定を
-    /// `RegistryError::Sidecar` として拒否する(`refresh_sidecar_runtime` の
-    /// ような JSON バッファの作り直しは、設定・承認自体は変わらないので行わない)。
-    ///
-    /// **TOCTOU 対策**: `Start`/`Restart` は `sidecar_runtime_lock_for(id)`
-    /// (`refresh_sidecar_runtime` -- `set_sidecar_config`/`set_sidecar_grant`
-    /// が呼ぶ -- と共有する、プラグイン単位のロック)を、承認・設定を読む
-    /// 前から `ensure_started` を呼び終えるまで保持する。これが無いと、
-    /// 「grant を読む」→「(ここで承認取消が割り込む)」→「その grant を
-    /// 信じて spawn する」という窓ができ、取消の裏で起動してしまう
-    /// (Important: 最終レビューで見つかった取りこぼし)。ロックを取ることで、
-    /// この関数と `refresh_sidecar_runtime` は互いに排他になり、
-    /// 「読んだ承認状態」と「実際に spawn する」の間に他の書き込みが
-    /// 挟まらないことを保証する。ロック取得順序は既存のドキュメント
-    /// (`sidecar_runtime_locks` を参照)のとおり一方向のまま
-    /// (`entries` → マップの Mutex → id 別ロック)であり、この関数は
-    /// `capabilities_lock` にも `sidecar_runtime_locks` のマップ自体にも
-    /// 触れないので新たな循環は生じない。
-    ///
-    /// この対策はホスト起点(RPC/UI)の経路のみをカバーする。ゲスト
-    /// (wasm)からの `ensure-started` は `HostCtx::ensure_started`
-    /// (`host.rs`)経由で、こちらとは別に `sidecars_json` 共有バッファを
-    /// 直接読むだけなので同じレースが理論上は残る -- が、それは意図的:
-    /// ゲスト呼び出しにこの id 別ロックを取らせると、`refresh_sidecar_runtime`
-    /// が同じロックを持って `shutdown_grace`(既定 3 秒)まで `stop` を待つ
-    /// 間、`ensure-started` を呼んだプラグインのスレッドがブロックされ、
-    /// `PluginInstance::CALL_DEADLINE`(2 秒)を超えて trap してしまう。
-    /// ゲスト経路のレース窓は「取消が `sidecars_json` バッファに反映されて
-    /// から `HostCtx::resolve_sidecar` が次に読むまで」の間だけで、次回の
-    /// `ensure-started`/`status` 呼び出しでは新しい(取消済みの)状態が
-    /// 見え、既に走っているインスタンスは UI から `stop` できる。
-    ///
-    /// **無効化されたプラグインは `Start`/`Restart` できない**(再レビューで
-    /// 見つかった Minor な取りこぼし): `set_disabled` はそのプラグインの
-    /// 全サイドカーを停止するが、`control_sidecar` が `PluginState` を見て
-    /// いなかったため、無効化後(あるいは並行中)に `sidecar-control` の
-    /// `start` が来ると、もう生きているプラグインスレッドが無いサイドカーが
-    /// 再び起動してしまっていた。この関数は `sidecar_runtime_lock_for(id)`
-    /// を取った**後**に現在の `PluginState` を読み、`Disabled` なら拒否する
-    /// -- `set_disabled` 自身もサイドカー停止の前に同じ id 別ロックを取る
-    /// ように直したので(`set_disabled` のドキュメント参照)、「状態を
-    /// `Disabled` にする」→「サイドカーを止める」という一連の操作と、この
-    /// 関数の「状態を読む」→「spawn する」は互いに排他になり、無効化の裏で
-    /// 起動してしまう窓は無い。`Stop` はプラグインの状態に関わらず常に許す
-    /// (止める操作を無効化状態で塞いではいけない)。
+    /// 起点)。TOCTOU 対策・無効化されたプラグインへの拒否を含め、実体は
+    /// `registry::sidecar::SidecarService::control_sidecar`(Phase 4
+    /// タスク6で移動。ロック規律・挙動は一切変えていない)。
     pub fn control_sidecar(
         &self,
         id: &str,
         name: &str,
         action: SidecarAction,
     ) -> Result<Vec<SidecarInfo>, RegistryError> {
-        let manifest = self.find_manifest(id)?;
-        let request = manifest
-            .sidecar(name)
-            .ok_or_else(|| RegistryError::UnknownSidecar(name.to_string()))?;
-        let key = Self::sidecar_key(&manifest.id, name);
-
-        match action {
-            SidecarAction::Stop => {
-                self.process_driver.stop(&key);
-            }
-            SidecarAction::Start | SidecarAction::Restart => {
-                let runtime_lock = self.sidecar_runtime_lock_for(id);
-                let _runtime_guard = runtime_lock
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner());
-
-                // ロック保持中に読む: `set_disabled` も同じ id 別ロックを
-                // 取ってからサイドカーを止めるので、ここで見る状態は
-                // 「無効化処理が確定済みならその後の値」であることが保証
-                // される(無効化される前の "running" を信じて spawn する
-                // ことはない)。
-                if self.is_disabled(id) {
-                    return Err(RegistryError::Sidecar(format!("plugin {id} is disabled")));
-                }
-
-                if action == SidecarAction::Restart {
-                    self.process_driver.stop(&key);
-                }
-
-                // ロック保持中に読み直す: `refresh_sidecar_runtime` は同じ
-                // ロックを取ってから承認取消/設定変更を確定するので、ここで
-                // 読む値は「取消/変更が確定済みならその後の値」であることが
-                // 保証される(取消が確定する前の古い値を信じて spawn する
-                // ことはない)。
-                let grant = self.grants_store.sidecar_state(&manifest, name);
-                if !grant.granted {
-                    return Err(RegistryError::Sidecar(format!(
-                        "sidecar {name} is not granted"
-                    )));
-                }
-
-                let configs = self.sidecar_config_store.effective(&manifest);
-                let config = configs
-                    .get(name)
-                    .cloned()
-                    .unwrap_or_else(|| SidecarConfig::from_request(request));
-                if config.command.is_empty() {
-                    return Err(RegistryError::Sidecar(format!(
-                        "sidecar {name} has no executable configured"
-                    )));
-                }
-
-                let spec = ProcessSpec {
-                    command: PathBuf::from(&config.command),
-                    args: config.args.clone(),
-                    ports: assign_ports(&config),
-                };
-                self.process_driver
-                    .ensure_started(&key, &spec)
-                    .map_err(|e| RegistryError::Sidecar(e.to_string()))?;
-            }
-        }
-
-        self.sidecars(id)
+        self.sidecar_service.control_sidecar(id, name, action)
     }
 
     /// 全プラグインの全サイドカーインスタンスを停止する(デーモン shutdown 用)。
-    ///
-    /// `ProcessDriver::stop_all` をそのまま呼ぶ。`ProcessDriver` 自身も
-    /// `Drop` で `stop_all` を最後の砦として呼ぶが(`PluginHost::drop` 経由)、
-    /// こちらは `Registry`/`PluginHost` がまだ生きている shutdown シーケンスの
-    /// 一部として明示的に呼ぶための入口であり、2 つ目の `stop_all` 呼び出し元
-    /// になる。`stop_all` はどのキーについても「戻った時点で実際に死んでいる」
-    /// ことを保証し(`stop_detached` 経由で detach 済みの kill も
-    /// `pending_detached` 経由で待つ)、この保証はこの関数がゲスト側の
-    /// `stop_detached` 呼び出しと同時に走っても成り立つ(`ProcessDriver::
-    /// stop_detached` のドキュメントコメント参照: `stop_detached` は
-    /// `groups` ロックを、バックグラウンドスレッドを立てて `pending_detached`
-    /// に登録し終えるまで保持し続けるので、`stop_all` が「まだ `terminating`
-    /// にもなっておらず `pending_detached` にも登録されていない」中間状態を
-    /// 観測することはない)。
+    /// 実体は `registry::sidecar::SidecarService::stop_all`(Phase 4
+    /// タスク6で移動)。
     pub fn stop_all_sidecars(&self) {
-        self.process_driver.stop_all();
+        self.sidecar_service.stop_all();
     }
 
     /// 全プラグインの `spawn_bus_subscriber` タスクへ shutdown を通知する
@@ -1376,22 +999,16 @@ impl Registry {
             return;
         };
 
-        // `entries` ロックを既に手放した後で `sidecar_runtime_lock_for(id)`
-        // を取る(ロック取得順序は他の箇所と同じ: `entries` → id 別ロック)。
-        // ここで id 別ロックを取ることで、`control_sidecar` の `Start`/
-        // `Restart`(こちらも同じロックを取ってから `PluginState` を読む)と
-        // 互いに排他になる -- 「状態を `Disabled` にする」→「サイドカーを
-        // 止める」の一連と、「(無効化前の)状態を読む」→「spawn する」が
-        // 交差して、無効化の裏でサイドカーが起動されたまま残ることはない
-        // (`control_sidecar` のドキュメント参照)。
-        let runtime_lock = self.sidecar_runtime_lock_for(id);
-        let _runtime_guard = runtime_lock
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        for name in names {
-            let key = Self::sidecar_key(id, &name);
-            self.process_driver.stop(&key);
-        }
+        // `entries` ロックを既に手放した後で `SidecarService::stop_named`
+        // (内部で同じ id 別ロックを取る)を呼ぶ(ロック取得順序は他の箇所と
+        // 同じ: `entries` → id 別ロック)。ここで id 別ロックを取ることで、
+        // `control_sidecar` の `Start`/`Restart`(こちらも同じロックを取って
+        // から `PluginState` を読む)と互いに排他になる -- 「状態を
+        // `Disabled` にする」→「サイドカーを止める」の一連と、「(無効化前の)
+        // 状態を読む」→「spawn する」が交差して、無効化の裏でサイドカーが
+        // 起動されたまま残ることはない(`control_sidecar` のドキュメント
+        // 参照)。
+        self.sidecar_service.stop_named(id, &names);
     }
 }
 
@@ -1400,6 +1017,7 @@ pub(crate) mod tests {
     use super::*;
     use crate::event::Event;
     use crate::plugin::SettingField;
+    use edlr_driver_process::ProcessSpec;
     use std::sync::atomic::Ordering;
     use std::thread;
     use std::time::Duration;
@@ -2262,7 +1880,9 @@ pub(crate) mod tests {
 
         // サイドカー停止(`ProcessDriver::stop`)がまだ終わっていない状態を、
         // その臨界区間で使われる id 別ロックを掴んだまま模す。
-        let sidecar_lock = registry.sidecar_runtime_lock_for("fs-plugin");
+        let sidecar_lock = registry
+            .sidecar_service
+            .sidecar_runtime_lock_for("fs-plugin");
         let sidecar_guard = sidecar_lock
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -2338,25 +1958,34 @@ pub(crate) mod tests {
             bus_json: Arc::new(Mutex::new("[]".to_string())),
         });
 
-        let key = Registry::sidecar_key("sc-plugin", "tts");
+        let key = crate::registry::sidecar::sidecar_key("sc-plugin", "tts");
         let spec = ProcessSpec {
             command: PathBuf::from("/bin/sh"),
             args: vec!["-c".into(), "sleep 30".into()],
             ports: vec![50900],
         };
         registry
-            .process_driver
+            .sidecar_service
+            .process_driver()
             .ensure_started(&key, &spec)
             .expect("start sidecar directly via the driver, bypassing wasm entirely");
         assert!(
-            registry.process_driver.status(&key, &spec)[0].running,
+            registry
+                .sidecar_service
+                .process_driver()
+                .status(&key, &spec)[0]
+                .running,
             "sidecar should be running before disabling the plugin"
         );
 
         registry.set_disabled("sc-plugin", "on-event trapped".to_string());
 
         assert!(
-            !registry.process_driver.status(&key, &spec)[0].running,
+            !registry
+                .sidecar_service
+                .process_driver()
+                .status(&key, &spec)[0]
+                .running,
             "set_disabled must stop the disabled plugin's sidecars"
         );
         let snapshot = registry.snapshot();
@@ -2398,7 +2027,8 @@ pub(crate) mod tests {
             .set_sidecar(&manifest, "tts", true)
             .expect("grant should persist");
         registry
-            .sidecar_config_store
+            .sidecar_service
+            .sidecar_config_store()
             .update_and_effective(
                 &manifest,
                 "tts",
@@ -2428,14 +2058,18 @@ pub(crate) mod tests {
             ),
         }
 
-        let key = Registry::sidecar_key("sc-plugin", "tts");
+        let key = crate::registry::sidecar::sidecar_key("sc-plugin", "tts");
         let spec = ProcessSpec {
             command: PathBuf::from("/bin/sh"),
             args: vec!["-c".to_string(), "sleep 30".to_string()],
             ports: vec![50930],
         };
         assert!(
-            !registry.process_driver.status(&key, &spec)[0].running,
+            !registry
+                .sidecar_service
+                .process_driver()
+                .status(&key, &spec)[0]
+                .running,
             "rejected Start/Restart must not have spawned anything"
         );
 
@@ -2485,7 +2119,8 @@ pub(crate) mod tests {
             .set_sidecar(&manifest, "tts", true)
             .expect("grant should persist");
         registry
-            .sidecar_config_store
+            .sidecar_service
+            .sidecar_config_store()
             .update_and_effective(
                 &manifest,
                 "tts",
@@ -2537,9 +2172,10 @@ pub(crate) mod tests {
             .grants_store
             .sidecar_state(&manifest, "tts")
             .granted;
-        let key = Registry::sidecar_key("sc-plugin", "tts");
+        let key = crate::registry::sidecar::sidecar_key("sc-plugin", "tts");
         let running = registry
-            .process_driver
+            .sidecar_service
+            .process_driver()
             .status(
                 &key,
                 &ProcessSpec {
@@ -2558,7 +2194,7 @@ pub(crate) mod tests {
              value read before the concurrent revoke took effect"
         );
 
-        registry.process_driver.stop(&key);
+        registry.sidecar_service.process_driver().stop(&key);
     }
 
     /// Regression test for a review finding: `set_sidecar_grant` used to
@@ -2608,7 +2244,8 @@ pub(crate) mod tests {
 
         // Once a command is configured, granting succeeds.
         registry
-            .sidecar_config_store
+            .sidecar_service
+            .sidecar_config_store()
             .update_and_effective(
                 &manifest,
                 "tts",
