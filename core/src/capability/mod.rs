@@ -9,8 +9,8 @@ pub mod grants;
 pub mod request;
 pub mod validate;
 
-use grants::{GrantState, GrantsError, GrantsStore};
 use crate::plugin::Manifest;
+use grants::{GrantState, GrantsError, GrantsStore};
 
 /// capability 承認の永続化の口。ディスク実装は [`GrantsStore`]。
 /// テストではインメモリ実装を注入して、tempdir なしの純粋テストを書く。
