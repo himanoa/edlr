@@ -4,3 +4,4 @@ pub mod driver;
 pub(crate) mod drivers;
 pub(crate) mod engine;
 pub mod plugin;
+pub(crate) mod resolve;

@@ -998,9 +998,13 @@ fn spawn_bus_subscriber(
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone();
         let entries = parse_bus(&raw);
-        let still_granted = entries
-            .get(&delivery.driver_id)
-            .is_some_and(|entry| entry.granted && entry.subscribe.contains(&delivery.topic));
+        let still_granted = crate::host::resolve::check_bus_permission(
+            &entries,
+            &delivery.driver_id,
+            &delivery.topic,
+            crate::host::resolve::BusDirection::Subscribe,
+        )
+        .is_ok();
         if !still_granted {
             // 承認が取り消された(か、そもそも一度も承認されていない)。
             // 黙って捨てる -- `check_bus` が publish/get 側で同じ状況を

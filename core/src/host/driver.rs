@@ -40,7 +40,9 @@ use bindings::edlr::plugin::host_log::{Host as HostLogHost, Level as WitLevel};
 use bindings::edlr::plugin::host_settings::Host as HostSettingsHost;
 use bindings::Driver as DriverBindings;
 
-use crate::plugin::allowlist::check_url;
+use super::resolve::{
+    check_http_permission, resolve_root, resolve_sidecar, RootResolveError, SidecarResolveError,
+};
 
 /// ドライバ向けの HTTP タイムアウト。プラグインの `HTTP_TIMEOUT`(1.5 秒)では
 /// 音声合成のような数秒かかる呼び出しが完了しないため、ドライバ専用に長く取る。
@@ -214,12 +216,7 @@ impl DriverHttpHost for DriverCtx {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone();
         let hosts = crate::plugin::host::parse_capability_hosts(&raw);
-        if hosts.is_empty() {
-            return Err(WitDriverError::PermissionDenied(
-                "capability not granted".to_string(),
-            ));
-        }
-        check_url(&hosts, &req.url).map_err(WitDriverError::PermissionDenied)?;
+        check_http_permission(&hosts, &req.url).map_err(WitDriverError::PermissionDenied)?;
 
         let driver_request = edlr_driver_http::HttpRequest {
             method: req.method,
@@ -280,8 +277,9 @@ fn bus_error_to_wit(error: edlr_driver_channel::BusError) -> WitBusError {
 }
 
 impl DriverCtx {
-    /// `sidecars_json` から当該サイドカーの実行仕様を解決する。
-    /// `crate::plugin::host::HostCtx::resolve_sidecar` と同じロジック。
+    /// `sidecars_json` から当該サイドカーの実行仕様を解決する。判定自体は
+    /// `resolve::resolve_sidecar`(`crate::plugin::host::HostCtx::resolve_sidecar`
+    /// と共有)へ委譲し、ここでは variant を写像するだけ。
     fn resolve_sidecar(
         &self,
         name: &str,
@@ -293,26 +291,10 @@ impl DriverCtx {
             .clone();
         let entries = crate::plugin::sidecar_runtime::parse_sidecars(&raw);
 
-        let Some(entry) = entries.get(name) else {
-            return Err(WitProcessError::UnknownSidecar(format!(
-                "no such sidecar: {name}"
-            )));
-        };
-        if !entry.granted {
-            return Err(WitProcessError::PermissionDenied(format!(
-                "sidecar not granted: {name}"
-            )));
-        }
-        if entry.command.is_empty() {
-            return Err(WitProcessError::NotConfigured(format!(
-                "sidecar {name} has no executable configured"
-            )));
-        }
-
-        Ok(edlr_driver_process::ProcessSpec {
-            command: std::path::PathBuf::from(&entry.command),
-            args: entry.args.clone(),
-            ports: entry.ports.clone(),
+        resolve_sidecar(&entries, name).map_err(|e| match e {
+            SidecarResolveError::Unknown(m) => WitProcessError::UnknownSidecar(m),
+            SidecarResolveError::NotGranted(m) => WitProcessError::PermissionDenied(m),
+            SidecarResolveError::NotConfigured(m) => WitProcessError::NotConfigured(m),
         })
     }
 
@@ -382,8 +364,9 @@ impl DriverProcessHost for DriverCtx {
 }
 
 impl DriverCtx {
-    /// `filesystem_json` から当該ルートの実パスと mode を解決する。
-    /// `crate::plugin::host::HostCtx::resolve_root` と同じロジック。
+    /// `filesystem_json` から当該ルートの実パスと mode を解決する。判定自体は
+    /// `resolve::resolve_root`(`crate::plugin::host::HostCtx::resolve_root`
+    /// と共有)へ委譲し、ここでは variant を写像するだけ。
     fn resolve_root(&self, root: &str, need_write: bool) -> Result<std::path::PathBuf, WitFsError> {
         let raw = self
             .filesystem_json
@@ -392,25 +375,12 @@ impl DriverCtx {
             .clone();
         let entries = crate::plugin::fs_runtime::parse_filesystem(&raw);
 
-        let Some(entry) = entries.get(root) else {
-            return Err(WitFsError::UnknownRoot(format!("no such root: {root}")));
-        };
-        if !entry.granted {
-            return Err(WitFsError::PermissionDenied(format!(
-                "filesystem root not granted: {root}"
-            )));
-        }
-        if entry.path.is_empty() {
-            return Err(WitFsError::NotConfigured(format!(
-                "root {root} has no directory configured"
-            )));
-        }
-        if need_write && entry.mode != "read-write" {
-            return Err(WitFsError::PermissionDenied(format!(
-                "root {root} is read-only"
-            )));
-        }
-        Ok(std::path::PathBuf::from(&entry.path))
+        resolve_root(&entries, root, need_write).map_err(|e| match e {
+            RootResolveError::Unknown(m) => WitFsError::UnknownRoot(m),
+            RootResolveError::NotGranted(m) => WitFsError::PermissionDenied(m),
+            RootResolveError::NotConfigured(m) => WitFsError::NotConfigured(m),
+            RootResolveError::ReadOnly(m) => WitFsError::PermissionDenied(m),
+        })
     }
 }
 

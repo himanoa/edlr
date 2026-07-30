@@ -37,7 +37,10 @@ use bindings::edlr::plugin::host_log::{Host as HostLogHost, Level as WitLevel};
 use bindings::edlr::plugin::host_settings::Host as HostSettingsHost;
 use bindings::{Event as WitEvent, Plugin as PluginBindings};
 
-use crate::plugin::allowlist::check_url;
+use super::resolve::{
+    check_bus_permission, check_http_permission, resolve_root, resolve_sidecar, BusDirection,
+    RootResolveError, SidecarResolveError,
+};
 
 /// Public re-exports of the generated `driver-process` WIT types, for the
 /// same reason `driver-http`'s equivalents are re-exported above: in-tree
@@ -351,12 +354,7 @@ impl DriverHttpHost for HostCtx {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone();
         let hosts = parse_capability_hosts(&raw);
-        if hosts.is_empty() {
-            return Err(WitDriverError::PermissionDenied(
-                "capability not granted".to_string(),
-            ));
-        }
-        check_url(&hosts, &req.url).map_err(WitDriverError::PermissionDenied)?;
+        check_http_permission(&hosts, &req.url).map_err(WitDriverError::PermissionDenied)?;
 
         let driver_request = edlr_driver_http::HttpRequest {
             method: req.method,
@@ -412,16 +410,12 @@ impl BusHost for HostCtx {
     }
 }
 
-enum BusDirection {
-    Publish,
-    Subscribe,
-}
-
 impl HostCtx {
     /// 承認と宣言済みトピックの照合。プラグインは自分の ID も承認状態も
     /// 引数で渡さない -- `bus_json` は `Registry` だけが書き込む共有バッファで、
     /// 未承認のエントリはトピック一覧を持たないため、他プラグインの接続を
-    /// 騙ることも、宣言していないトピックへ触ることもできない。
+    /// 騙ることも、宣言していないトピックへ触ることもできない。判定自体は
+    /// `resolve::check_bus_permission` へ委譲する。
     fn check_bus(
         &self,
         driver: &str,
@@ -434,19 +428,8 @@ impl HostCtx {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone();
         let entries = crate::plugin::bus_runtime::parse_bus(&raw);
-        let entry = entries.get(driver).filter(|e| e.granted).ok_or_else(|| {
-            WitBusError::PermissionDenied(format!("bus access to {driver} is not granted"))
-        })?;
-        let topics = match direction {
-            BusDirection::Publish => &entry.publish,
-            BusDirection::Subscribe => &entry.subscribe,
-        };
-        if !topics.iter().any(|t| t == topic) {
-            return Err(WitBusError::PermissionDenied(format!(
-                "{driver}/{topic} is not in this plugin's granted bus topics"
-            )));
-        }
-        Ok(())
+        check_bus_permission(&entries, driver, topic, direction)
+            .map_err(WitBusError::PermissionDenied)
     }
 }
 
@@ -469,7 +452,8 @@ impl HostCtx {
     ///
     /// 判定順は「manifest に存在するか」→「承認済みか」→「設定済みか」。
     /// `driver-http.send` と同じく、判定材料は全て `HostCtx` 側にあり、
-    /// ゲストが渡すのはサイドカー名だけ。
+    /// ゲストが渡すのはサイドカー名だけ。判定自体は
+    /// `resolve::resolve_sidecar` へ委譲し、ここでは variant を写像するだけ。
     fn resolve_sidecar(
         &self,
         name: &str,
@@ -481,26 +465,10 @@ impl HostCtx {
             .clone();
         let entries = crate::plugin::sidecar_runtime::parse_sidecars(&raw);
 
-        let Some(entry) = entries.get(name) else {
-            return Err(WitProcessError::UnknownSidecar(format!(
-                "no such sidecar: {name}"
-            )));
-        };
-        if !entry.granted {
-            return Err(WitProcessError::PermissionDenied(format!(
-                "sidecar not granted: {name}"
-            )));
-        }
-        if entry.command.is_empty() {
-            return Err(WitProcessError::NotConfigured(format!(
-                "sidecar {name} has no executable configured"
-            )));
-        }
-
-        Ok(edlr_driver_process::ProcessSpec {
-            command: std::path::PathBuf::from(&entry.command),
-            args: entry.args.clone(),
-            ports: entry.ports.clone(),
+        resolve_sidecar(&entries, name).map_err(|e| match e {
+            SidecarResolveError::Unknown(m) => WitProcessError::UnknownSidecar(m),
+            SidecarResolveError::NotGranted(m) => WitProcessError::PermissionDenied(m),
+            SidecarResolveError::NotConfigured(m) => WitProcessError::NotConfigured(m),
         })
     }
 
@@ -605,7 +573,8 @@ impl HostCtx {
     /// `driver-http` / `driver-process` と同じく、判定材料は全て `HostCtx`
     /// 側にあり、ゲストが渡すのはルート名と相対パスだけ。判定順は
     /// `resolve_sidecar` と揃える:「存在するか」→「承認済みか」→
-    /// 「設定済みか」→(書き込み系なら)「mode が read-write か」。
+    /// 「設定済みか」→(書き込み系なら)「mode が read-write か」。判定自体は
+    /// `resolve::resolve_root` へ委譲し、ここでは variant を写像するだけ。
     fn resolve_root(&self, root: &str, need_write: bool) -> Result<std::path::PathBuf, WitFsError> {
         let raw = self
             .filesystem_json
@@ -614,25 +583,12 @@ impl HostCtx {
             .clone();
         let entries = crate::plugin::fs_runtime::parse_filesystem(&raw);
 
-        let Some(entry) = entries.get(root) else {
-            return Err(WitFsError::UnknownRoot(format!("no such root: {root}")));
-        };
-        if !entry.granted {
-            return Err(WitFsError::PermissionDenied(format!(
-                "filesystem root not granted: {root}"
-            )));
-        }
-        if entry.path.is_empty() {
-            return Err(WitFsError::NotConfigured(format!(
-                "root {root} has no directory configured"
-            )));
-        }
-        if need_write && entry.mode != "read-write" {
-            return Err(WitFsError::PermissionDenied(format!(
-                "root {root} is read-only"
-            )));
-        }
-        Ok(std::path::PathBuf::from(&entry.path))
+        resolve_root(&entries, root, need_write).map_err(|e| match e {
+            RootResolveError::Unknown(m) => WitFsError::UnknownRoot(m),
+            RootResolveError::NotGranted(m) => WitFsError::PermissionDenied(m),
+            RootResolveError::NotConfigured(m) => WitFsError::NotConfigured(m),
+            RootResolveError::ReadOnly(m) => WitFsError::PermissionDenied(m),
+        })
     }
 }
 
