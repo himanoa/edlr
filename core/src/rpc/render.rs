@@ -314,6 +314,31 @@ mod tests {
     }
 
     #[test]
+    fn schedules_json_includes_populated_interval_schedule_with_fixed_timestamp() {
+        let next = chrono::DateTime::parse_from_rfc3339("2026-07-30T12:00:00+09:00")
+            .unwrap()
+            .with_timezone(&chrono::Local);
+        let schedules = [ScheduleInfo {
+            name: "poll-status".to_string(),
+            spec: ScheduleSpec::IntervalSeconds(30),
+            next,
+        }];
+        let json = schedules_result_json(&schedules);
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "schedules": [
+                    {
+                        "name": "poll-status",
+                        "spec": "every 30s",
+                        "next": schedules[0].next.to_rfc3339(),
+                    }
+                ]
+            })
+        );
+    }
+
+    #[test]
     fn sidecars_json_is_empty_for_empty_slice() {
         let json = sidecars_result_json(&[]);
         assert_eq!(json, serde_json::json!({ "sidecars": [] }));

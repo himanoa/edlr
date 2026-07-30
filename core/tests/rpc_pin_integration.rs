@@ -222,6 +222,91 @@ fn ed_state_driver_registry() -> (tempfile::TempDir, DriverRegistry) {
     (tmp, drivers)
 }
 
+/// `examples/drivers/ed-state` の manifest に、secret 型 setting を1件
+/// 足したもの(分析 §6 リスク4: driver の `values`/`set_values` は plugin と
+/// 違い secret を剥がさない -- この挙動を固定するテストが今までなかった)。
+fn write_secret_driver(drivers_dir: &Path) {
+    let dir = drivers_dir.join("secret-driver");
+    fs::create_dir_all(&dir).unwrap();
+    let wasm_src = ed_state_driver_wasm();
+    fs::copy(&wasm_src, dir.join("driver.wasm")).unwrap();
+    fs::write(
+        dir.join("driver.toml"),
+        r#"
+id = "secret-driver"
+name = "Secret Driver"
+version = "0.1.0"
+description = "secret 型 setting を持つ fixture ドライバ"
+entry = "driver.wasm"
+
+[[topics]]
+name = "set-system"
+retain = false
+description = "プラグインからのシステム名の更新"
+
+[[topics]]
+name = "current-system"
+retain = true
+description = "現在のスターシステム"
+
+[[settings]]
+type = "secret"
+key = "api-key"
+label = "API Key"
+"#,
+    )
+    .unwrap();
+}
+
+/// secret 型 setting を持つ fixture ドライバ 1 件を持つ `DriverRegistry`
+/// (`ed_state_driver_registry` と同じ流儀)。
+fn secret_driver_registry() -> (tempfile::TempDir, DriverRegistry) {
+    let tmp = tempfile::tempdir().unwrap();
+    let drivers_dir = tmp.path().join("drivers");
+    fs::create_dir_all(&drivers_dir).unwrap();
+    write_secret_driver(&drivers_dir);
+
+    let settings_store = SettingsStore::new(tmp.path().join("driver-settings"));
+    let sidecar_config_store = SidecarConfigStore::new(tmp.path().join("driver-settings"));
+    let filesystem_config_store =
+        FilesystemConfigStore::new(tmp.path().join("driver-settings"), Vec::new());
+    let grants_store = GrantsStore::new_for_drivers(tmp.path().join("driver-grants"));
+    let host = DriverHost::new().expect("driver host should build");
+
+    let drivers = start_drivers(
+        &drivers_dir,
+        settings_store,
+        sidecar_config_store,
+        filesystem_config_store,
+        grants_store,
+        edlr_driver_channel::Bus::new(),
+        host,
+    );
+    (tmp, drivers)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn pin_drivers_set_settings_does_not_strip_secret_value() {
+    let (_tmp, drivers) = secret_driver_registry();
+    let (_router, addr) = setup(None, Some(drivers)).await;
+    let mut ws = connect(addr).await;
+    recv_hello(&mut ws).await;
+
+    send_rpc(
+        &mut ws,
+        1,
+        "drivers/set-settings",
+        serde_json::json!({"driver": "secret-driver", "values": {"api-key": "sk-live-123"}}),
+    )
+    .await;
+    let resp = recv_json(&mut ws).await;
+
+    assert_eq!(resp["type"], "rpc-result");
+    assert_eq!(resp["id"], 1);
+    let expected = serde_json::json!({ "api-key": "sk-live-123" });
+    assert_eq!(resp["result"], expected);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn pin_plugins_list_with_sidecar_plugin() {
     let sidecar_env = support::sidecar_env("svc", 50501, false);
