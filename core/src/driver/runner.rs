@@ -65,6 +65,18 @@ pub fn start_drivers(
     host: DriverHost,
 ) -> DriverRegistry {
     let host = Arc::new(host);
+
+    // spawn したサイドカーの port が初めて繋がった時点で、当該ドライバの
+    // on-message へ sidecar-ready を届ける(設計書 sidecar-ready 参照)。
+    // ドライバの init が最初の ensure-started を呼ぶより前に設定しておく
+    // 必要があるため、走査ループより先に配線する。プラグイン側の
+    // `PluginHost` は別の `ProcessDriver` を持つので影響しない。
+    {
+        let bus = bus.clone();
+        host.process_driver()
+            .set_ready_callback(Arc::new(move |event| forward_sidecar_ready(&bus, event)));
+    }
+
     let settings_store = Arc::new(settings_store);
     let grants_store = Arc::new(grants_store);
     let sidecar_config_store = Arc::new(sidecar_config_store);
@@ -122,6 +134,32 @@ pub fn start_drivers(
     }
 
     registry
+}
+
+/// `ProcessDriver` の ready 監視(spawn したサイドカーの port へ初めて TCP
+/// 接続できた)を、当該ドライバの `on-message` キューへ
+/// `from = "host", topic = "sidecar-ready"` の合成メッセージとして届ける
+/// (設計書 sidecar-ready 参照)。
+///
+/// `event.key` は `DriverCtx::sidecar_key` が組み立てる
+/// `<driver-id>/<sidecar-name>`。配送失敗(ドライバが Disabled 等)は warn
+/// ログに出して捨てる — ready 通知は起動直後の空白期間を埋める最適化であり、
+/// 既存の「speak 受信時に取り直す」経路が保険として残っているため。
+fn forward_sidecar_ready(bus: &Bus, event: edlr_driver_process::ReadyEvent) {
+    let Some((driver_id, name)) = event.key.split_once('/') else {
+        tracing::warn!(key = %event.key, "sidecar-ready with an unrecognized key; dropping");
+        return;
+    };
+    let payload = serde_json::json!({
+        "name": name,
+        "index": event.index,
+        "port": event.port,
+    });
+    if let Err(e) =
+        bus.notify_from_host(driver_id, "sidecar-ready", payload.to_string().into_bytes())
+    {
+        tracing::warn!(driver_id, sidecar = name, "failed to deliver sidecar-ready: {e}");
+    }
 }
 
 /// 1 ドライバをロードし、成功すれば専用スレッドを起動し、結果
@@ -339,6 +377,50 @@ fn run_driver_thread(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn forward_sidecar_ready_delivers_to_the_driver_queue_as_host() {
+        let bus = Bus::new();
+        let (tx, rx) = std_mpsc::sync_channel::<Message>(4);
+        bus.register_driver("coeiroink", vec![], tx);
+
+        forward_sidecar_ready(
+            &bus,
+            edlr_driver_process::ReadyEvent {
+                key: "coeiroink/worker".to_string(),
+                index: 0,
+                port: 50021,
+            },
+        );
+
+        let msg = rx.try_recv().expect("sidecar-ready must be queued");
+        assert_eq!(msg.from, edlr_driver_channel::HOST_SENDER);
+        assert_eq!(msg.topic, "sidecar-ready");
+        let payload: serde_json::Value = serde_json::from_slice(&msg.payload).unwrap();
+        assert_eq!(payload["name"], "worker");
+        assert_eq!(payload["index"], 0);
+        assert_eq!(payload["port"], 50021);
+    }
+
+    /// key が `<driver-id>/<sidecar-name>` の形でない(想定外の呼び出し元)
+    /// 場合は、panic せず黙って捨てる。
+    #[test]
+    fn forward_sidecar_ready_drops_an_unrecognized_key() {
+        let bus = Bus::new();
+        let (tx, rx) = std_mpsc::sync_channel::<Message>(4);
+        bus.register_driver("coeiroink", vec![], tx);
+
+        forward_sidecar_ready(
+            &bus,
+            edlr_driver_process::ReadyEvent {
+                key: "no-slash-here".to_string(),
+                index: 0,
+                port: 50021,
+            },
+        );
+
+        assert!(rx.try_recv().is_err(), "nothing must be delivered");
+    }
 
     #[test]
     fn a_missing_drivers_dir_yields_an_empty_registry() {
