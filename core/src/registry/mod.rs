@@ -1,7 +1,7 @@
 //! プラグイン/ドライバの registry(facade と各サービス)。
 //!
-//! 現状は trait 定義のみ(Phase 0)。Phase 4 で `plugin/registry.rs` と
-//! `driver/registry.rs` の実装がここへ移ってくる。
+//! Phase 4 完了済み。`EntryTable`・`ThreadSupervisor`・各サービス
+//! (filesystem・bus・sidecar・grants・settings)と facade(plugin.rs・driver.rs) が実装済み。
 
 use edlr_driver_process::{InstanceStatus, ProcessError, ProcessSpec};
 

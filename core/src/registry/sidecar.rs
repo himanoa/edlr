@@ -235,7 +235,6 @@ pub(crate) type DiskSidecarService<E> =
     SidecarService<GrantsStore, edlr_driver_process::ProcessDriver, E>;
 
 impl<G: GrantStorage, P: ProcessControl, E: SidecarEntry> SidecarService<G, P, E> {
-    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         entries: EntryTable<E>,
         grants_store: Arc<G>,
