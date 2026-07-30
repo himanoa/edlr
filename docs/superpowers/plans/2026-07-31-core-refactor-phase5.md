@@ -32,7 +32,7 @@
 - Consumes: 既存の `test_driver_ctx` ヘルパー(driver/host.rs 715)— sidecars_json / filesystem_json を差し込めるようコピーして改変した別ヘルパーを足す(既存ヘルパーは変更しない)
 - Produces: Task 5(resolve 共通化)の防衛線
 
-- [ ] **Step 1: driver ctx の resolve_sidecar / resolve_root / send 判定テストを追加**
+- [x] **Step 1: driver ctx の resolve_sidecar / resolve_root / send 判定テストを追加**
 
 分析 §5 リスク4: driver 側 ctx の許可判定に direct テストが無い。plugin/host.rs の同種テスト(`ensure_started_without_grant_is_permission_denied` 1252 / `unknown_root_is_reported_as_such` 1159 / `empty_effective_hosts_means_nothing_is_permitted` 1047 の流儀)を driver ctx 用に写して最低5本:
 
@@ -42,7 +42,7 @@
 
 エラーメッセージ文字列も `matches!` でなく中身まで assert する(例: `format!("no such sidecar: {name}")` との等値)— Task 5 で文字列組み立てが resolve.rs へ移った後も byte 同一であることの pin。
 
-- [ ] **Step 2: テスト・clippy・コミット**
+- [x] **Step 2: テスト・clippy・コミット**
 
 Run: `cargo test --workspace 2>&1 | tail -5` / `cargo clippy --workspace 2>&1 | tail -5`
 
@@ -76,9 +76,9 @@ pub use crate::runner::plugin as runner;
 // driver/mod.rs も同様に pub use crate::runner::driver as runner;
 ```
 
-- [ ] **Step 1**: `git mv` + 配線。ファイル内の相互参照(`crate::plugin::runner::` 表記のドキュメントコメントは触らなくてよい — コメント更新は Phase 6)。`registry/supervisor.rs` の `use crate::plugin::runner::PluginWork` は旧パス pub use で通るため無変更
-- [ ] **Step 2**: `cargo test --workspace` / clippy。move-only 検証(`git diff --cached --color-moved=dimmed-zebra`、非移動行は mod 宣言・use 文のみ)。テスト凍結チェック(`core/tests/` diff 空)
-- [ ] **Step 3**: コミット `refactor(core): runner を runner/ へ再配置(移動のみ、旧パスは pub use 温存)`
+- [x] **Step 1**: `git mv` + 配線。ファイル内の相互参照(`crate::plugin::runner::` 表記のドキュメントコメントは触らなくてよい — コメント更新は Phase 6)。`registry/supervisor.rs` の `use crate::plugin::runner::PluginWork` は旧パス pub use で通るため無変更
+- [x] **Step 2**: `cargo test --workspace` / clippy。move-only 検証(`git diff --cached --color-moved=dimmed-zebra`、非移動行は mod 宣言・use 文のみ)。テスト凍結チェック(`core/tests/` diff 空)
+- [x] **Step 3**: コミット `refactor(core): runner を runner/ へ再配置(移動のみ、旧パスは pub use 温存)`
 
 ---
 
@@ -94,9 +94,9 @@ pub use crate::runner::plugin as runner;
 - Consumes: なし(Task 2 と独立)
 - Produces: `crate::host::plugin::{PluginHost, HostCtx, PluginInstance, PluginCallError, ...}` / `crate::host::driver::{DriverHost, DriverCtx, DriverInstance}`。旧パス `crate::plugin::host` / `crate::driver::host` を pub use で温存(WIT 再輸出 `WitSidecarError` 等は移動先ファイル内にそのまま残るので、モジュール pub use だけで旧パスが通る)
 
-- [ ] **Step 1**: `git mv` + 配線。`bindgen!({path: "wit"})` は CARGO_MANIFEST_DIR 相対なので無変更で通る(分析 §5 リスク6 — ビルドで確認)。`SIDECAR_SHUTDOWN_GRACE` の `edlr_config` 参照・const assert(93/57)もそのまま移動
-- [ ] **Step 2**: テスト・clippy・move-only 検証・テスト凍結チェック(`core/tests/driver_http_integration.rs` / `plugin_host_integration.rs` が import 無変更で通ること)
-- [ ] **Step 3**: コミット `refactor(core): host を host/ へ再配置(移動のみ、旧パスは pub use 温存)`
+- [x] **Step 1**: `git mv` + 配線。`bindgen!({path: "wit"})` は CARGO_MANIFEST_DIR 相対なので無変更で通る(分析 §5 リスク6 — ビルドで確認)。`SIDECAR_SHUTDOWN_GRACE` の `edlr_config` 参照・const assert(93/57)もそのまま移動
+- [x] **Step 2**: テスト・clippy・move-only 検証・テスト凍結チェック(`core/tests/driver_http_integration.rs` / `plugin_host_integration.rs` が import 無変更で通ること)
+- [x] **Step 3**: コミット `refactor(core): host を host/ へ再配置(移動のみ、旧パスは pub use 温存)`
 
 ---
 
@@ -131,9 +131,9 @@ impl SharedDrivers {
 
 **厳守**: `EpochEngine` に `Drop` を付けない。各 host の `Drop` は現行の順序(`stop_ticker()` → `process_driver.stop_all()`)を明示的に呼ぶ(分析 §5 リスク2 — フィールド drop は Drop 本体の後なので、EpochEngine 側に Drop を持たせると順序が反転する)。
 
-- [ ] **Step 1(move-only コミット)**: plugin 側の engine 構築+ticker(host/plugin.rs 747–762)・driver 3点構築(764–772)・accessor(786–802)・`deadline_ticks`(842)・`EPOCH_TICK_INTERVAL` を `EpochEngine`/`SharedDrivers` へ抽出し、`PluginHost` は `{ engine: EpochEngine, drivers: SharedDrivers }` を持って委譲(pub シグネチャ不変: `new`/`load`/`http_driver`/`process_driver`/`fs_driver`)。`Drop` の順序を目視確認
-- [ ] **Step 2(logic コミット)**: driver 側(host/driver.rs 521–546, 557–576, 604–618)も同じ `EpochEngine`/`SharedDrivers` に載せ、旧実装を削除。`DRIVER_HTTP_TIMEOUT` を `SharedDrivers::new` に渡す。`load` は各 host に残す(bindgen 型が world 固有)
-- [ ] **Step 3**: 各コミットでテスト・clippy。コミット例: `refactor(core): wasmtime 配線を host/engine.rs の EpochEngine へ抽出(移動のみ)` / `refactor(core): DriverHost を EpochEngine/SharedDrivers に統合`
+- [x] **Step 1(move-only コミット)**: plugin 側の engine 構築+ticker(host/plugin.rs 747–762)・driver 3点構築(764–772)・accessor(786–802)・`deadline_ticks`(842)・`EPOCH_TICK_INTERVAL` を `EpochEngine`/`SharedDrivers` へ抽出し、`PluginHost` は `{ engine: EpochEngine, drivers: SharedDrivers }` を持って委譲(pub シグネチャ不変: `new`/`load`/`http_driver`/`process_driver`/`fs_driver`)。`Drop` の順序を目視確認
+- [x] **Step 2(logic コミット)**: driver 側(host/driver.rs 521–546, 557–576, 604–618)も同じ `EpochEngine`/`SharedDrivers` に載せ、旧実装を削除。`DRIVER_HTTP_TIMEOUT` を `SharedDrivers::new` に渡す。`load` は各 host に残す(bindgen 型が world 固有)
+- [x] **Step 3**: 各コミットでテスト・clippy。コミット例: `refactor(core): wasmtime 配線を host/engine.rs の EpochEngine へ抽出(移動のみ)` / `refactor(core): DriverHost を EpochEngine/SharedDrivers に統合`
 
 ---
 
@@ -149,24 +149,24 @@ impl SharedDrivers {
 
 ```rust
 pub(crate) enum SidecarResolveError { Unknown(String), NotGranted(String), NotConfigured(String) }
-pub(crate) fn resolve_sidecar(entries: &HashMap<String, SidecarRuntimeEntry>, name: &str)
+pub(crate) fn resolve_sidecar(entries: &BTreeMap<String, SidecarRuntimeEntry>, name: &str)
     -> Result<edlr_driver_process::ProcessSpec, SidecarResolveError>;
 
 pub(crate) enum RootResolveError { Unknown(String), NotGranted(String), NotConfigured(String), ReadOnly(String) }
-pub(crate) fn resolve_root(entries: &HashMap<String, FsRuntimeEntry>, root: &str, need_write: bool)
+pub(crate) fn resolve_root(entries: &BTreeMap<String, FsRuntimeEntry>, root: &str, need_write: bool)
     -> Result<std::path::PathBuf, RootResolveError>;
 
 pub(crate) fn check_http_permission(hosts: &[String], url: &str) -> Result<(), String>;
 
 pub(crate) enum BusDirection { Publish, Subscribe }   // 現 host/plugin.rs 417 から移す
-pub(crate) fn check_bus_permission(entries: &HashMap<String, BusRuntimeEntry>, driver: &str, topic: &str, direction: BusDirection)
+pub(crate) fn check_bus_permission(entries: &BTreeMap<String, BusRuntimeEntry>, driver: &str, topic: &str, direction: BusDirection)
     -> Result<(), String>;
 ```
 
-- [ ] **Step 1**: 上記4関数を実装し、`HostCtx`(resolve_sidecar 475 / resolve_root 611 / send の許可部 349–361 / check_bus 427)と `DriverCtx`(288 / 390 / 213–225)を委譲に置換。各 enum variant → WIT variant の写像は ctx 側の小関数。**エラー文字列 byte 同一 — Task 1 の錨と plugin 側既存テスト(凍結)が防衛**
-- [ ] **Step 2**: `runner/plugin.rs` の `spawn_bus_subscriber` still_granted 判定(996–1010)を `check_bus_permission(..., Subscribe).is_ok()` に置換(ドキュメントコメント 966–971 が「`check_bus` と同じ判定材料・同じ判定規則」と明記している対) 
-- [ ] **Step 3**: `resolve.rs` 内 `#[cfg(test)] mod tests` に純粋テストを追加(各関数 3 本以上: 正常系・拒否系・エラー文字列の等値)
-- [ ] **Step 4**: テスト・clippy。コミット `refactor(core): host の許可判定を resolve.rs の純関数へ抽出(エラー文字列は判定側で一元化)`
+- [x] **Step 1**: 上記4関数を実装し、`HostCtx`(resolve_sidecar 475 / resolve_root 611 / send の許可部 349–361 / check_bus 427)と `DriverCtx`(288 / 390 / 213–225)を委譲に置換。各 enum variant → WIT variant の写像は ctx 側の小関数。**エラー文字列 byte 同一 — Task 1 の錨と plugin 側既存テスト(凍結)が防衛**
+- [x] **Step 2**: `runner/plugin.rs` の `spawn_bus_subscriber` still_granted 判定(996–1010)を `check_bus_permission(..., Subscribe).is_ok()` に置換(ドキュメントコメント 966–971 が「`check_bus` と同じ判定材料・同じ判定規則」と明記している対) 
+- [x] **Step 3**: `resolve.rs` 内 `#[cfg(test)] mod tests` に純粋テストを追加(各関数 3 本以上: 正常系・拒否系・エラー文字列の等値)
+- [x] **Step 4**: テスト・clippy。コミット `refactor(core): host の許可判定を resolve.rs の純関数へ抽出(エラー文字列は判定側で一元化)`
 
 ---
 
@@ -199,9 +199,9 @@ pub(crate) fn build_initial_buffers<S: RegistrySubject>(
 ) -> InitialBuffers;
 ```
 
-- [ ] **Step 1**: `load_and_run_plugin`(runner/plugin.rs 280–352)と `load_and_run_driver`(runner/driver.rs 179–244)の共通部を `build_initial_buffers` に一本化。plugin の bus_entries(360–373)は plugin 側に残す。**registry の refresh 系(SidecarService::refresh_sidecar_runtime 等)とは統合しない**(Global Constraints)。implicit_http_hosts のマージ順(capability hosts → extend(implicit))を変えない
-- [ ] **Step 2**: `bootstrap.rs` に純粋寄りのテストを追加(tempdir の disk store を使い、granted/ungranted × 設定有無で JSON 初期値の等値を確認 — 2 本以上。既存の統合テストは凍結のまま)
-- [ ] **Step 3**: テスト・clippy。コミット `refactor(core): runner の初期バッファ組み立てを RegistrySubject で共通化`
+- [x] **Step 1**: `load_and_run_plugin`(runner/plugin.rs 280–352)と `load_and_run_driver`(runner/driver.rs 179–244)の共通部を `build_initial_buffers` に一本化。plugin の bus_entries(360–373)は plugin 側に残す。**registry の refresh 系(SidecarService::refresh_sidecar_runtime 等)とは統合しない**(Global Constraints)。implicit_http_hosts のマージ順(capability hosts → extend(implicit))を変えない
+- [x] **Step 2**: `bootstrap.rs` に純粋寄りのテストを追加(tempdir の disk store を使い、granted/ungranted × 設定有無で JSON 初期値の等値を確認 — 2 本以上。既存の統合テストは凍結のまま)
+- [x] **Step 3**: テスト・clippy。コミット `refactor(core): runner の初期バッファ組み立てを RegistrySubject で共通化`
 
 ---
 
@@ -223,19 +223,19 @@ enum DeadlineVerdict { Restart, GiveUp }
 fn deadline_verdict(strikes: u32) -> DeadlineVerdict;   // strikes >= CALL_DEADLINE_STRIKES → GiveUp
 ```
 
-- [ ] **Step 1**: `handle_call_result!`(626–650)の `if deadline_strikes >= CALL_DEADLINE_STRIKES` 分岐を `deadline_verdict(deadline_strikes)` の match に置換。reason 文字列・ログ・`load_instance()` 作り直し・`continue`/`break` は 1 行も変えない
-- [ ] **Step 2**: `next_action_tests` と同じ流儀で `deadline_verdict` の純粋テストを追加(境界 3 本: `STRIKES-1` → Restart、`STRIKES` → GiveUp、`STRIKES+1` → GiveUp)
-- [ ] **Step 3**: テスト・clippy。コミット `refactor(core): 期限超過 strikes の判定を deadline_verdict 純関数へ抽出`
+- [x] **Step 1**: `handle_call_result!`(626–650)の `if deadline_strikes >= CALL_DEADLINE_STRIKES` 分岐を `deadline_verdict(deadline_strikes)` の match に置換。reason 文字列・ログ・`load_instance()` 作り直し・`continue`/`break` は 1 行も変えない
+- [x] **Step 2**: `next_action_tests` と同じ流儀で `deadline_verdict` の純粋テストを追加(境界 3 本: `STRIKES-1` → Restart、`STRIKES` → GiveUp、`STRIKES+1` → GiveUp)
+- [x] **Step 3**: テスト・clippy。コミット `refactor(core): 期限超過 strikes の判定を deadline_verdict 純関数へ抽出`
 
 ---
 
 ### Task 8: Phase 5 完了ゲート
 
-- [ ] **Step 1**: `cargo test --workspace`(全パス・pin 含む)+ clippy 0
-- [ ] **Step 2**: 行数記録: `wc -l core/src/runner/*.rs core/src/host/*.rs` と旧4ファイル(plugin/runner.rs, driver/runner.rs, plugin/host.rs, driver/host.rs)の残骸が無いこと
-- [ ] **Step 3**: テスト凍結確認: `git diff e029b6e..HEAD -- core/tests/ --stat` が空 + `#[cfg(test)]` 差分が「丸ごと移動 + 新規追加(Task 1/5/6/7)」で説明できること
-- [ ] **Step 4**: 不変条件の再確認を報告に含める: (a) `PluginHost`/`DriverHost` の `Drop` が `stop_ticker()` → `stop_all()` の順であること(目視)、(b) driver の `bus.register_driver` がスレッド起動前のままであること、(c) エラー文字列 10 種が resolve.rs に集約され Task 1 の錨が通ること
-- [ ] **Step 5**: ユーザーへ報告し、Phase 6(仕上げ: journal 等の中規模ファイル + 旧パス一括削除)の計画作成に進む承認を得る
+- [x] **Step 1**: `cargo test --workspace`(全パス・pin 含む)+ clippy 0
+- [x] **Step 2**: 行数記録: `wc -l core/src/runner/*.rs core/src/host/*.rs` と旧4ファイル(plugin/runner.rs, driver/runner.rs, plugin/host.rs, driver/host.rs)の残骸が無いこと
+- [x] **Step 3**: テスト凍結確認: `git diff e029b6e..HEAD -- core/tests/ --stat` が空 + `#[cfg(test)]` 差分が「丸ごと移動 + 新規追加(Task 1/5/6/7)」で説明できること
+- [x] **Step 4**: 不変条件の再確認を報告に含める: (a) `PluginHost`/`DriverHost` の `Drop` が `stop_ticker()` → `stop_all()` の順であること(目視)、(b) driver の `bus.register_driver` がスレッド起動前のままであること、(c) エラー文字列 10 種が resolve.rs に集約され Task 1 の錨が通ること
+- [x] **Step 5**: ユーザーへ報告し、Phase 6(仕上げ: journal 等の中規模ファイル + 旧パス一括削除)の計画作成に進む承認を得る
 
 ---
 

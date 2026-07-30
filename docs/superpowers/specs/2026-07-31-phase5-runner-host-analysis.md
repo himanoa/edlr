@@ -92,13 +92,13 @@ plugin/host.rs と同形。差分だけ列挙:
 ```rust
 // 値イン値アウト。エラーは (種別, メッセージ文字列) で返す
 pub(crate) enum SidecarResolveError { Unknown(String), NotGranted(String), NotConfigured(String) }
-pub(crate) fn resolve_sidecar(entries: &HashMap<String, SidecarRuntimeEntry>, name: &str)
+pub(crate) fn resolve_sidecar(entries: &BTreeMap<String, SidecarRuntimeEntry>, name: &str)
     -> Result<ProcessSpec, SidecarResolveError>;
 pub(crate) enum RootResolveError { Unknown(String), NotGranted(String), NotConfigured(String), ReadOnly(String) }
-pub(crate) fn resolve_root(entries: &HashMap<String, FsRuntimeEntry>, root: &str, need_write: bool)
+pub(crate) fn resolve_root(entries: &BTreeMap<String, FsRuntimeEntry>, root: &str, need_write: bool)
     -> Result<PathBuf, RootResolveError>;
 pub(crate) fn check_http_permission(hosts: &[String], url: &str) -> Result<(), String>;  // 空→"capability not granted"、以外は check_url
-pub(crate) fn check_bus_permission(entries: &HashMap<String, BusRuntimeEntry>, driver: &str, topic: &str, direction: BusDirection)
+pub(crate) fn check_bus_permission(entries: &BTreeMap<String, BusRuntimeEntry>, driver: &str, topic: &str, direction: BusDirection)
     -> Result<(), String>;
 ```
 
