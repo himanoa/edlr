@@ -41,4 +41,5 @@ core の命令的モジュール(`registry` `runner` `host` `server`)専任の�
 
 - `.claude/rules/pure-imperative-boundary.md`
 - `.claude/rules/procedure-style.md`
+- `.claude/rules/minimal-mut.md`
 - `.claude/rules/testing.md`

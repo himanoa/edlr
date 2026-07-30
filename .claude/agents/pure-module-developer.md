@@ -41,4 +41,5 @@ core の純粋モジュール(`manifest` `capability` `settings` `schedule` `rpc
 
 - `.claude/rules/pure-imperative-boundary.md`
 - `.claude/rules/trait-di.md`
+- `.claude/rules/minimal-mut.md`
 - `.claude/rules/testing.md`
