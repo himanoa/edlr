@@ -12,7 +12,6 @@ use edlr_driver_channel::Bus;
 use edlr_driver_process::{InstanceStatus, ProcessDriver, ProcessSpec};
 
 use crate::driver::registry::DriverRegistry;
-use crate::plugin::bus_runtime::{bus_json_string, BusRuntimeEntry};
 use crate::plugin::dropped::{DropCounters, DroppedCounts};
 use crate::plugin::filesystem::{FilesystemConfig, FilesystemConfigError, FilesystemConfigStore};
 use crate::plugin::grants::{GrantState, GrantsError, GrantsStore};
@@ -28,6 +27,7 @@ use crate::plugin::{
     BusRequest, CapabilityRequest, DashboardWidget, FilesystemRequest, Manifest, ScheduleSpec,
     SettingsError, SidecarRequest,
 };
+use crate::registry::bus::DiskBusService;
 use crate::registry::entries::{EntryTable, IdLocks};
 use crate::registry::filesystem::DiskFilesystemService;
 use crate::registry::supervisor::ThreadSupervisor;
@@ -291,23 +291,12 @@ pub struct Registry {
     /// id 別ロック → capabilities_lock」の一方向のみが成立し、循環しないので
     /// デッドロックしない。
     sidecar_runtime_locks: IdLocks,
-    /// `set_bus_grant` が呼ぶ `refresh_bus_runtime`(`bus_json` の作り直し)の
-    /// 臨界区間を **プラグイン ID ごとに** 直列化するロックのマップ。
-    ///
-    /// ファイルアクセス側の同種のロック(`registry::filesystem::FilesystemService`
-    /// が持つ)と同じ理由で別マップにしてある: バス承認は
-    /// 止めるべきプロセスを持たないので臨界区間自体は短いが、サイドカー側の
-    /// `ProcessDriver::stop`(SIGTERM 無視の子がいれば `shutdown_grace` 秒
-    /// ブロックしうる)と同じマップを共有すると、その停止待ちの間バス承認の
-    /// 取消がロック待ちで足止めされ、その間 `bus_json` が古い `granted:true`
-    /// を保持し続けてしまう(fail-open)。資源が独立している(バス承認 vs.
-    /// プロセス起動/ディレクトリアクセス)以上、分けてもロック順序の一方向性は
-    /// 壊れない。
-    bus_runtime_locks: IdLocks,
-    /// バス接続先の解決状況(`BusInfo::resolved`)を答えるために保持する。
-    /// `DriverRegistry` は `Clone` で安価に持ち回れる(`DriverRegistry` 自身の
-    /// ドキュメント参照)。
-    driver_registry: DriverRegistry,
+    /// bus 群(`bus` / `bus_buffer` / `set_bus_grant` とその内部ヘルパー)の
+    /// 実体。`registry::bus::BusService`(Phase 4 タスク5で抽出)。
+    /// `bus_runtime_locks` と `BusInfo::resolved` 計算用の `DriverRegistry`
+    /// クローンはこのサービスが持つ(元の `Registry` の
+    /// `bus_runtime_locks`/`driver_registry` ドキュメント参照)。
+    bus_service: DiskBusService,
     /// プラグイン間バスの実体。`list()` が `options-from` を持つ select の候補を
     /// retain トピックから解決するために保持する
     /// (`crate::plugin::select_options::resolve`)。`Bus` は `Clone` で内部を
@@ -341,6 +330,12 @@ impl Registry {
             filesystem_config_store,
             IdLocks::new(),
         );
+        let bus_service = DiskBusService::new(
+            entries.clone(),
+            grants_store.clone(),
+            driver_registry,
+            IdLocks::new(),
+        );
         Registry {
             entries,
             _host: host,
@@ -351,8 +346,7 @@ impl Registry {
             process_driver,
             capabilities_lock: Arc::new(Mutex::new(())),
             sidecar_runtime_locks: IdLocks::new(),
-            bus_runtime_locks: IdLocks::new(),
-            driver_registry,
+            bus_service,
             bus,
             plugins_dir,
             supervisor: ThreadSupervisor::new(),
@@ -555,35 +549,6 @@ impl Registry {
         (info, runtime_entry)
     }
 
-    /// `manifest.bus` の宣言順に `BusInfo` を組み立てる。承認
-    /// (`GrantsStore::bus_state`)はディスクを読む。`resolved` は
-    /// `driver_registry.manifest_of` が返す `DriverManifest`(インストール済み
-    /// ドライバの現在の宣言)と、この要求が挙げる `publish`/`subscribe` の
-    /// 全トピックとを突き合わせて決める -- ドライバ自体が無ければ即
-    /// `false`、ドライバはあってもトピックが 1 つでも無ければ `false`。
-    fn build_bus_infos(&self, manifest: &Manifest) -> Vec<BusInfo> {
-        manifest
-            .bus
-            .iter()
-            .map(|request| {
-                let grant = self.grants_store.bus_state(manifest, &request.driver);
-                let resolved = match self.driver_registry.manifest_of(&request.driver) {
-                    Some(driver_manifest) => request
-                        .publish
-                        .iter()
-                        .chain(request.subscribe.iter())
-                        .all(|topic| driver_manifest.topic(topic).is_some()),
-                    None => false,
-                };
-                BusInfo {
-                    request: request.clone(),
-                    grant,
-                    resolved,
-                }
-            })
-            .collect()
-    }
-
     fn build_dashboard_infos(&self, manifest: &Manifest) -> Vec<DashboardInfo> {
         manifest
             .dashboard
@@ -734,13 +699,6 @@ impl Registry {
     /// 区間(呼び出し側が別途 `.lock()` する)の間は保持しない。
     fn sidecar_runtime_lock_for(&self, id: &str) -> Arc<Mutex<()>> {
         self.sidecar_runtime_locks.lock_for(id)
-    }
-
-    /// `id` 用のバス実行時ロック(`bus_runtime_locks`)を引く。サイドカー・
-    /// ファイルアクセスとは**別のマップ**であることが要点
-    /// (`bus_runtime_locks` のドキュメント参照)。
-    fn bus_runtime_lock_for(&self, id: &str) -> Arc<Mutex<()>> {
-        self.bus_runtime_locks.lock_for(id)
     }
 
     /// `id` のプラグインの capability 要求一覧と現在の承認状態を返す。
@@ -977,22 +935,9 @@ impl Registry {
     }
 
     /// `id` のプラグインの `bus_json` 共有バッファの中身をそのまま返す
-    /// (テスト用アクセサ)。`HostCtx::check_bus` /
-    /// `runner::spawn_bus_subscriber` が実際に参照するのと同じ文字列
-    /// (`bus_runtime::bus_json_string` の出力そのもの)。
+    /// (テスト用アクセサ)。実体は `registry::bus::BusService::bus_buffer`。
     pub fn bus_buffer(&self, id: &str) -> Result<String, RegistryError> {
-        let bus_json = self
-            .entries
-            .find(
-                |entry| entry.manifest.id == id,
-                |entry| entry.bus_json.clone(),
-            )
-            .ok_or_else(|| RegistryError::UnknownPlugin(id.to_string()))?;
-        let buffer = bus_json
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone();
-        Ok(buffer)
+        self.bus_service.bus_buffer(id)
     }
 
     /// `id` のプラグインの `name` ファイルアクセスルートの設定を検証・永続化
@@ -1023,81 +968,21 @@ impl Registry {
     }
 
     /// `id` のプラグインの現在のバス接続状態一覧(manifest の `[[bus]]`
-    /// 宣言順)を返す。`BusInfo::resolved` は `DriverRegistry` の現在の登録
-    /// 状況(ドライバの有無・トピックの有無)から都度計算する(承認と違い
-    /// ディスクに永続化しない -- ドライバの実体そのものが真実源)。
+    /// 宣言順)を返す。実体は `registry::bus::BusService::bus`。
     pub fn bus(&self, id: &str) -> Result<Vec<BusInfo>, RegistryError> {
-        let manifest = self.find_manifest(id)?;
-        Ok(self.build_bus_infos(&manifest))
-    }
-
-    /// バス承認変更のあとに必ず呼ぶ内部ヘルパー。ファイルアクセスと同じく
-    /// 「止めるべきプロセス」が無いので、`GrantsStore::bus_state` /
-    /// `DriverRegistry::manifest_of` の現在値から `bus_json` を作り直す
-    /// だけ。未承認の接続先は `publish`/`subscribe` を持たない
-    /// (`bus_runtime` のドキュメント参照)。
-    ///
-    /// ロックは `bus_runtime_lock_for(id)` -- サイドカー・ファイルアクセス
-    /// とは別のマップ(`bus_runtime_locks` のドキュメント参照)から引く。
-    fn refresh_bus_runtime(&self, id: &str) -> Result<Vec<BusInfo>, RegistryError> {
-        let (manifest, bus_json) = self
-            .entries
-            .find(
-                |entry| entry.manifest.id == id,
-                |entry| (entry.manifest.clone(), entry.bus_json.clone()),
-            )
-            .ok_or_else(|| RegistryError::UnknownPlugin(id.to_string()))?;
-
-        let runtime_lock = self.bus_runtime_lock_for(id);
-        let _runtime_guard = runtime_lock
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-
-        let infos = self.build_bus_infos(&manifest);
-        let runtime_entries: Vec<BusRuntimeEntry> = infos
-            .iter()
-            .map(|info| BusRuntimeEntry {
-                driver: info.request.driver.clone(),
-                granted: info.grant.granted,
-                publish: info.request.publish.clone(),
-                subscribe: info.request.subscribe.clone(),
-            })
-            .collect();
-        *bus_json
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = bus_json_string(&runtime_entries);
-
-        Ok(infos)
+        self.bus_service.bus(id)
     }
 
     /// `id` のプラグインの `driver` バス接続の承認/取消を `GrantsStore` に
-    /// 永続化し、稼働中プラグインが参照する `bus_json` を作り直す
-    /// (`set_filesystem_grant` と同じ形)。
-    ///
-    /// **配信は取消を即座に反映する**: `bus_json` の書き換えだけで済むのは、
-    /// `runner.rs` の配信転送タスク(`spawn_bus_subscriber`)が配信のたびに
-    /// この同じ `bus_json` を読み直して承認を再確認するため。ここでは
-    /// 購読の解除(`Bus::subscribe` の取り消し)自体は行わない -- 取り消して
-    /// も転送タスク側で捨てられるだけなので、購読表を触る必要が無い。
+    /// 永続化し、稼働中プラグインが参照する `bus_json` を作り直す。実体は
+    /// `registry::bus::BusService::set_bus_grant`。
     pub fn set_bus_grant(
         &self,
         id: &str,
         driver: &str,
         granted: bool,
     ) -> Result<GrantState, RegistryError> {
-        let manifest = self.find_manifest(id)?;
-        if manifest.bus_request(driver).is_none() {
-            return Err(RegistryError::UnknownBus(driver.to_string()));
-        }
-
-        let state = self
-            .grants_store
-            .set_bus(&manifest, driver, granted)
-            .map_err(RegistryError::Grants)?;
-
-        self.refresh_bus_runtime(id)?;
-
-        Ok(state)
+        self.bus_service.set_bus_grant(id, driver, granted)
     }
 
     /// サイドカーの設定変更・承認変更のあとに必ず呼ぶ内部ヘルパー。

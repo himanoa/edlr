@@ -5,6 +5,7 @@
 
 use edlr_driver_process::{InstanceStatus, ProcessError, ProcessSpec};
 
+pub(crate) mod bus;
 pub(crate) mod entries;
 pub(crate) mod filesystem;
 pub(crate) mod subject;
