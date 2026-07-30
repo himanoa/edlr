@@ -3,14 +3,15 @@
 //! interruption so a runaway guest traps instead of hanging the kernel.
 
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::thread;
 use std::time::Duration;
 
 use wasmtime::component::{Component, HasSelf, Linker, ResourceTable};
-use wasmtime::{Config, Engine, Store, StoreLimits, StoreLimitsBuilder, Trap};
+use wasmtime::{Store, StoreLimits, StoreLimitsBuilder, Trap};
 use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
+
+use super::drivers::SharedDrivers;
+use super::engine::{deadline_ticks, EpochEngine};
 
 mod bindings {
     wasmtime::component::bindgen!({
@@ -68,9 +69,6 @@ pub use bindings::edlr::plugin::driver_http::{
 pub use bindings::edlr::plugin::driver_fs::{
     DriverError as WitDriverFsError, Entry as WitFsDriverEntry, Host as WitDriverFsHost,
 };
-
-/// Interval between epoch ticks driven by the background ticker thread.
-const EPOCH_TICK_INTERVAL: Duration = Duration::from_millis(100);
 
 /// Per-call timeout applied to every `driver-http.send` request (covers
 /// connect through to the full response). Fixed for now; could become
@@ -718,101 +716,56 @@ impl DriverFsHost for HostCtx {
     }
 }
 
-/// Owns the wasmtime `Engine` and a background thread that periodically
-/// increments the engine's epoch counter, driving epoch-interruption-based
-/// call deadlines for every plugin instance loaded from this host.
+/// Owns the wasmtime `Engine`/epoch ticker (`EpochEngine`) and the shared
+/// http/process/fs drivers (`SharedDrivers`) for every plugin instance
+/// loaded from this host.
 pub struct PluginHost {
-    engine: Engine,
-    ticker_stop: Arc<AtomicBool>,
-    /// The single `HttpDriver` shared by every plugin instance this host
-    /// loads. Built once here (not per plugin, not per call) since
-    /// constructing a `reqwest::blocking::Client` sets up TLS/connection
-    /// pool state that's meant to be reused.
-    http_driver: Arc<edlr_driver_http::HttpDriver>,
-    /// The single `ProcessDriver` shared by every plugin instance this host
-    /// loads, mirroring `http_driver` above. Sidecar processes are keyed by
-    /// `<plugin-id>/<sidecar-name>` (see `HostCtx::sidecar_key`), so sharing
-    /// this one driver across all plugins does not let one plugin observe or
-    /// touch another's sidecars.
-    process_driver: Arc<edlr_driver_process::ProcessDriver>,
-    /// The single `FsDriver` shared by every plugin instance this host
-    /// loads, mirroring `http_driver`/`process_driver` above. Root paths
-    /// are resolved per call from each plugin's own `filesystem_json`, so
-    /// sharing this one driver across all plugins does not let one plugin
-    /// reach another's roots.
-    fs_driver: Arc<edlr_driver_fs::FsDriver>,
+    engine: EpochEngine,
+    drivers: SharedDrivers,
 }
 
 impl PluginHost {
     pub fn new() -> anyhow::Result<PluginHost> {
-        let mut config = Config::new();
-        config.wasm_component_model(true);
-        config.epoch_interruption(true);
-        let engine = Engine::new(&config)
-            .map_err(|e| anyhow::anyhow!("failed to create wasmtime engine: {e}"))?;
+        let engine = EpochEngine::new()?;
+        let drivers = SharedDrivers::new(HTTP_TIMEOUT)?;
 
-        let ticker_stop = Arc::new(AtomicBool::new(false));
-        let ticker_engine = engine.clone();
-        let ticker_stop_flag = ticker_stop.clone();
-        thread::spawn(move || {
-            while !ticker_stop_flag.load(Ordering::Relaxed) {
-                thread::sleep(EPOCH_TICK_INTERVAL);
-                ticker_engine.increment_epoch();
-            }
-        });
-
-        let http_driver = Arc::new(
-            edlr_driver_http::HttpDriver::new(HTTP_TIMEOUT, HTTP_MAX_BODY)
-                .map_err(|e| anyhow::anyhow!("failed to build http driver: {e}"))?,
-        );
-        let process_driver = Arc::new(edlr_driver_process::ProcessDriver::new(
-            SIDECAR_SHUTDOWN_GRACE,
-            SIDECAR_SPAWN_MIN_INTERVAL,
-        ));
-        let fs_driver = Arc::new(edlr_driver_fs::FsDriver::new(FS_READ_LIMIT, FS_LIST_LIMIT));
-
-        Ok(PluginHost {
-            engine,
-            ticker_stop,
-            http_driver,
-            process_driver,
-            fs_driver,
-        })
+        Ok(PluginHost { engine, drivers })
     }
 
     /// Returns a clone of the shared `HttpDriver` `Arc` for wiring into a
     /// new plugin's `HostCtx`. Cloning an `Arc` is cheap; this does not
     /// build a new HTTP client.
     pub fn http_driver(&self) -> Arc<edlr_driver_http::HttpDriver> {
-        self.http_driver.clone()
+        self.drivers.http()
     }
 
     /// Returns a clone of the shared `ProcessDriver` `Arc` for wiring into a
     /// new plugin's `HostCtx`. Cloning an `Arc` is cheap; this does not spawn
     /// or otherwise touch any sidecar process.
     pub fn process_driver(&self) -> Arc<edlr_driver_process::ProcessDriver> {
-        self.process_driver.clone()
+        self.drivers.process()
     }
 
     /// Returns a clone of the shared `FsDriver` `Arc` for wiring into a new
     /// plugin's `HostCtx`. Cloning an `Arc` is cheap; this does not touch
     /// any file.
     pub fn fs_driver(&self) -> Arc<edlr_driver_fs::FsDriver> {
-        self.fs_driver.clone()
+        self.drivers.fs()
     }
 
     pub fn load(&self, wasm_path: &Path, ctx: HostCtx) -> anyhow::Result<PluginInstance> {
-        let component = Component::from_file(&self.engine, wasm_path).map_err(|e| {
+        let engine = self.engine.engine();
+        let component = Component::from_file(engine, wasm_path).map_err(|e| {
             anyhow::anyhow!("failed to load component at {}: {e}", wasm_path.display())
         })?;
 
-        let mut linker = Linker::new(&self.engine);
+        let mut linker = Linker::new(engine);
         wasmtime_wasi::p2::add_to_linker_sync(&mut linker)
             .map_err(|e| anyhow::anyhow!("failed to wire WASI imports into linker: {e}"))?;
         PluginBindings::add_to_linker::<_, HasSelf<_>>(&mut linker, |ctx| ctx)
             .map_err(|e| anyhow::anyhow!("failed to wire host imports into linker: {e}"))?;
 
-        let mut store = Store::new(&self.engine, ctx);
+        let mut store = Store::new(engine, ctx);
         store.limiter(|ctx| &mut ctx.limits);
         // Ticks-beyond-current is set fresh before every call in
         // `PluginInstance::call`; this initial deadline just prevents
@@ -829,19 +782,12 @@ impl PluginHost {
 
 impl Drop for PluginHost {
     fn drop(&mut self) {
-        self.ticker_stop.store(true, Ordering::Relaxed);
+        self.engine.stop_ticker();
         // 明示 shutdown 経路(daemon 終了時の一括停止など)は Task 6 で配線
         // する。ここでは「`PluginHost` が消えるときにサイドカーの孤児を
         // 残さない」という最後の砦として、無条件に全サイドカーを止める。
-        self.process_driver.stop_all();
+        self.drivers.process().stop_all();
     }
-}
-
-/// Number of epoch ticks corresponding to `duration`, rounded up, with a
-/// minimum of one tick so a zero-length deadline still traps promptly.
-fn deadline_ticks(duration: Duration) -> u64 {
-    let ticks = duration.as_nanos().div_ceil(EPOCH_TICK_INTERVAL.as_nanos());
-    u64::try_from(ticks).unwrap_or(u64::MAX).max(1)
 }
 
 /// なぜ guest 呼び出しが失敗したか。
