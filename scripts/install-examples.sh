@@ -27,6 +27,7 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # 種別:
 #   rust-plugin / rust-driver -- cargo で wasm32-wasip2 向けにビルドする
 #   go-plugin / go-driver     -- 同梱の build.sh(TinyGo)を使う
+#   mbt-plugin / mbt-driver   -- 同梱の build.sh(MoonBit + wasm-tools)を使う
 #
 # ここに載っていない `examples/plugins/*`(busy-loop / init-trap / memory-hog /
 # http-caller / hello-logger)は manifest.toml を持たないテスト用フィクスチャで、
@@ -39,6 +40,8 @@ COMPONENTS=(
   "tutorial-tracker-rs|rust-driver|examples/drivers/tutorial-tracker-rs|tutorial_tracker.wasm|driver.wasm"
   "tutorial-jump-log-go|go-plugin|examples/plugins/tutorial-jump-log-go|plugin.wasm|plugin.wasm"
   "tutorial-tracker-go|go-driver|examples/drivers/tutorial-tracker-go|driver.wasm|driver.wasm"
+  "tutorial-jump-log-mbt|mbt-plugin|examples/plugins/tutorial-jump-log-mbt|plugin.wasm|plugin.wasm"
+  "tutorial-tracker-mbt|mbt-driver|examples/drivers/tutorial-tracker-mbt|driver.wasm|driver.wasm"
 )
 
 config_home="${XDG_CONFIG_HOME:-$HOME/.config}"
@@ -115,6 +118,15 @@ build_go() {
   echo "$repo_root/$dir/$artifact"
 }
 
+# 同梱の build.sh(MoonBit)でビルドし、成果物のパスを stdout へ返す。
+build_mbt() {
+  local dir="$1" artifact="$2"
+  require_cmd moon "https://www.moonbitlang.com/download"
+  require_cmd wasm-tools "cargo install wasm-tools"
+  ( cd "$repo_root/$dir" && ./build.sh >&2 )
+  echo "$repo_root/$dir/$artifact"
+}
+
 install_component() {
   local entry="$1"
   local name kind dir artifact installed_as
@@ -142,6 +154,14 @@ install_component() {
         built="$(build_go "$dir" "$artifact")"
       fi
       ;;
+    mbt-plugin|mbt-driver)
+      if [[ $dry_run -eq 1 ]]; then
+        echo "    (dry-run) ./build.sh (in $dir)"
+        built="$src/$artifact"
+      else
+        built="$(build_mbt "$dir" "$artifact")"
+      fi
+      ;;
     *)
       die "未知の種別: $kind"
       ;;
@@ -154,7 +174,7 @@ install_component() {
   # ドライバは drivers/、プラグインは plugins/ 配下。
   local dest_parent
   case "$kind" in
-    rust-driver|go-driver) dest_parent="$prefix/drivers" ;;
+    rust-driver|go-driver|mbt-driver) dest_parent="$prefix/drivers" ;;
     *)                     dest_parent="$prefix/plugins" ;;
   esac
   local dest="$dest_parent/$name"
@@ -166,7 +186,7 @@ install_component() {
   # マニフェスト(プラグインは manifest.toml、ドライバは driver.toml)。
   local descriptor
   case "$kind" in
-    rust-driver|go-driver) descriptor="driver.toml" ;;
+    rust-driver|go-driver|mbt-driver) descriptor="driver.toml" ;;
     *)                     descriptor="manifest.toml" ;;
   esac
   [[ -f "$src/$descriptor" || $dry_run -eq 1 ]] || die "$dir/$descriptor が無い"
