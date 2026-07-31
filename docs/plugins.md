@@ -2,7 +2,8 @@
 
 **初めてプラグインを書くなら、先に手順を追う形の入門を読むとよい**:
 [plugin-tutorial-rust.md](plugin-tutorial-rust.md)(Rust)/
-[plugin-tutorial-tinygo.md](plugin-tutorial-tinygo.md)(TinyGo)。
+[plugin-tutorial-tinygo.md](plugin-tutorial-tinygo.md)(TinyGo)/
+[plugin-tutorial-moonbit.md](plugin-tutorial-moonbit.md)(MoonBit)。
 この文書は書き上げた後に仕様を引くためのリファレンスである。
 
 `edlr` は起動時に `--plugins-dir` 配下を走査し、見つかった各プラグイン(WASM

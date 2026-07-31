@@ -4,8 +4,9 @@ edlr のプラグインを、何も無いところから 1 つ育てていく。
 FSDJump を拾って設定でふるいに掛け、外部 API を叩き、定期実行で後処理をし、
 自分で書いたドライバと会話するプラグインができる。
 
-TinyGo で書きたい場合は [plugin-tutorial-tinygo.md](plugin-tutorial-tinygo.md)
-を参照(内容は同じで、コードだけが違う)。書き上げた後に仕様を引くための
+TinyGo で書きたい場合は [plugin-tutorial-tinygo.md](plugin-tutorial-tinygo.md)、
+MoonBit なら [plugin-tutorial-moonbit.md](plugin-tutorial-moonbit.md) を参照
+(内容は同じで、コードだけが違う)。書き上げた後に仕様を引くための
 リファレンスは [plugins.md](plugins.md) にある。
 
 完成形は `examples/plugins/tutorial-jump-log-rs`(プラグイン)と

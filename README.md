@@ -69,8 +69,9 @@ See [docs/ui.md](docs/ui.md) for details.
 Step-by-step tutorials take you from an empty directory to a plugin that
 filters on settings, calls an HTTP API, runs on a schedule, and talks to a
 driver you wrote yourself: [docs/plugin-tutorial-rust.md](docs/plugin-tutorial-rust.md)
-(Rust) and [docs/plugin-tutorial-tinygo.md](docs/plugin-tutorial-tinygo.md)
-(TinyGo). Elite Dangerous is not needed — the Journal is a text file you can
+(Rust), [docs/plugin-tutorial-tinygo.md](docs/plugin-tutorial-tinygo.md)
+(TinyGo), and [docs/plugin-tutorial-moonbit.md](docs/plugin-tutorial-moonbit.md)
+(MoonBit). Elite Dangerous is not needed — the Journal is a text file you can
 write yourself.
 
 For a smaller taste, `examples/plugins/hello-logger` is a minimal plugin that
@@ -84,6 +85,7 @@ logs the events it subscribes to; build it, drop it into
 | --- | --- |
 | [docs/plugin-tutorial-rust.md](docs/plugin-tutorial-rust.md) | Tutorial: writing a plugin in Rust, from scratch to bus integration |
 | [docs/plugin-tutorial-tinygo.md](docs/plugin-tutorial-tinygo.md) | The same tutorial in TinyGo |
+| [docs/plugin-tutorial-moonbit.md](docs/plugin-tutorial-moonbit.md) | The same tutorial in MoonBit |
 | [docs/cli.md](docs/cli.md) | CLI flags, journal read-position persistence, the `replay` flag |
 | [docs/plugins.md](docs/plugins.md) | Plugin system: WIT interface, `manifest.toml`, plugin layout, settings RPC |
 | [docs/capabilities.md](docs/capabilities.md) | Capabilities and approval flow: HTTP (`driver-http`), sidecar processes (`driver-process`), filesystem access (`driver-fs`) |
