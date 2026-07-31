@@ -1,7 +1,7 @@
 //! `plugins/*` / `dashboard/*` RPC のメソッド別ハンドラ(params 解釈 →
 //! Registry 呼び出し → JSON 整形)。dispatch は `super::handle_rpc_with_drivers`。
 
-use crate::plugin::registry::Registry;
+use crate::registry::plugin::Registry;
 use crate::rpc::params::{param_bool, param_object, param_str};
 use crate::rpc::render::*;
 
@@ -9,7 +9,7 @@ use crate::rpc::render::*;
 /// `list` 本体から分離)。
 fn plugin_entry_json(
     registry: &Registry,
-    info: crate::plugin::registry::PluginInfo,
+    info: crate::registry::plugin::PluginInfo,
 ) -> serde_json::Value {
     let mut value = serde_json::json!({
         "id": info.manifest.id,
@@ -34,10 +34,10 @@ fn plugin_entry_json(
     // 「設定済みかどうか」だけを UI に伝える。
     value["secretsSet"] = serde_json::json!(info.secrets_set);
     match info.state {
-        crate::plugin::PluginState::Running => {
+        crate::registry::plugin::PluginState::Running => {
             value["state"] = serde_json::json!("running");
         }
-        crate::plugin::PluginState::Disabled { reason } => {
+        crate::registry::plugin::PluginState::Disabled { reason } => {
             value["state"] = serde_json::json!("disabled");
             value["reason"] = serde_json::json!(reason);
         }
@@ -111,8 +111,8 @@ pub(super) fn dashboard_list(
                 .unwrap_or("index.html");
             let events = registry.events_of(&plugin_id).unwrap_or_default();
             let state_str = match state {
-                crate::plugin::PluginState::Running => "running",
-                crate::plugin::PluginState::Disabled { .. } => "disabled",
+                crate::registry::plugin::PluginState::Running => "running",
+                crate::registry::plugin::PluginState::Disabled { .. } => "disabled",
             };
             serde_json::json!({
                 "plugin": plugin_id,
@@ -188,7 +188,7 @@ pub(super) fn set_sidecar_config(
 ) -> Result<serde_json::Value, String> {
     let plugin = param_str(params, "plugin")?;
     let name = param_str(params, "name")?;
-    let config: crate::plugin::SidecarConfig = serde_json::from_value(
+    let config: crate::settings::sidecar::SidecarConfig = serde_json::from_value(
         params
             .get("config")
             .cloned()
@@ -221,9 +221,9 @@ pub(super) fn sidecar_control(
     let plugin = param_str(params, "plugin")?;
     let name = param_str(params, "name")?;
     let action = match param_str(params, "action")? {
-        "start" => crate::plugin::SidecarAction::Start,
-        "stop" => crate::plugin::SidecarAction::Stop,
-        "restart" => crate::plugin::SidecarAction::Restart,
+        "start" => crate::registry::plugin::SidecarAction::Start,
+        "stop" => crate::registry::plugin::SidecarAction::Stop,
+        "restart" => crate::registry::plugin::SidecarAction::Restart,
         other => return Err(format!("unknown action: {other}")),
     };
     let sidecars = registry
@@ -247,7 +247,7 @@ pub(super) fn set_filesystem_config(
 ) -> Result<serde_json::Value, String> {
     let plugin = param_str(params, "plugin")?;
     let name = param_str(params, "name")?;
-    let config: crate::plugin::FilesystemConfig = serde_json::from_value(
+    let config: crate::settings::filesystem::FilesystemConfig = serde_json::from_value(
         params
             .get("config")
             .cloned()

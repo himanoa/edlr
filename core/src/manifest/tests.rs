@@ -1,4 +1,5 @@
 use super::*;
+use crate::capability::request::{FilesystemMode, WidgetSize};
 use crate::event::Event;
 use std::fs;
 

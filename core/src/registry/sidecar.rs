@@ -28,14 +28,15 @@ use std::sync::{Arc, Mutex};
 use edlr_driver_process::ProcessSpec;
 
 use crate::capability::GrantStorage;
-use crate::plugin::grants::{GrantState, GrantsStore};
-use crate::plugin::host::capabilities_json_string;
-use crate::plugin::registry::{PluginEntry, RegistryError, SidecarAction, SidecarInfo};
-use crate::plugin::sidecar::{assign_ports, SidecarConfig, SidecarConfigStore};
-use crate::plugin::sidecar_runtime::{
+use crate::capability::grants::{GrantState, GrantsStore};
+use crate::host::plugin::capabilities_json_string;
+use crate::registry::plugin::{PluginEntry, RegistryError, SidecarAction, SidecarInfo};
+use crate::settings::sidecar::{assign_ports, SidecarConfig, SidecarConfigStore};
+use crate::runtime::sidecar::{
     implicit_http_hosts, sidecars_json_string, SidecarRuntimeEntry,
 };
-use crate::plugin::{Manifest, SidecarRequest};
+use crate::manifest::Manifest;
+use crate::capability::request::SidecarRequest;
 use crate::registry::entries::{EntryTable, IdLocks};
 use crate::registry::subject::RegistrySubject;
 use crate::registry::ProcessControl;
@@ -147,9 +148,9 @@ pub(crate) trait SidecarEntry {
 }
 
 impl SidecarEntry for PluginEntry {
-    type Subject = crate::plugin::Manifest;
+    type Subject = crate::manifest::Manifest;
 
-    fn manifest(&self) -> &crate::plugin::Manifest {
+    fn manifest(&self) -> &crate::manifest::Manifest {
         &self.manifest
     }
 
@@ -164,15 +165,15 @@ impl SidecarEntry for PluginEntry {
     fn is_disabled(&self) -> bool {
         matches!(
             self.state,
-            crate::plugin::registry::PluginState::Disabled { .. }
+            crate::registry::plugin::PluginState::Disabled { .. }
         )
     }
 }
 
-impl SidecarEntry for crate::driver::registry::DriverEntry {
-    type Subject = crate::driver::manifest::DriverManifest;
+impl SidecarEntry for crate::registry::driver::DriverEntry {
+    type Subject = crate::manifest::driver::DriverManifest;
 
-    fn manifest(&self) -> &crate::driver::manifest::DriverManifest {
+    fn manifest(&self) -> &crate::manifest::driver::DriverManifest {
         &self.manifest
     }
 
@@ -187,7 +188,7 @@ impl SidecarEntry for crate::driver::registry::DriverEntry {
     fn is_disabled(&self) -> bool {
         matches!(
             self.state,
-            crate::driver::registry::DriverState::Disabled { .. }
+            crate::registry::driver::DriverState::Disabled { .. }
         )
     }
 }
@@ -666,7 +667,7 @@ impl<G: GrantStorage, P: ProcessControl, E: SidecarEntry> SidecarService<G, P, E
 #[cfg(test)]
 pub(crate) mod test_support {
     use super::*;
-    use crate::plugin::grants::GrantsError;
+    use crate::capability::grants::GrantsError;
     use edlr_driver_process::{InstanceStatus, ProcessError};
     use std::collections::HashMap;
     use std::sync::Mutex as StdMutex;
@@ -848,7 +849,7 @@ pub(crate) mod test_support {
 mod tests {
     use super::test_support::{FakeProcessControl, InMemoryGrantStorage};
     use super::*;
-    use crate::plugin::manifest::SidecarRequest as ManifestSidecarRequest;
+    use crate::capability::request::SidecarRequest as ManifestSidecarRequest;
     use crate::registry::plugin::{PluginEntry, PluginState};
     use edlr_driver_process::InstanceStatus;
     use std::sync::{Arc, Mutex};

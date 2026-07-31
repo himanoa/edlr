@@ -3,7 +3,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
-use crate::plugin::Manifest;
+use crate::manifest::Manifest;
 
 /// プラグインの capability 承認状態。
 #[derive(Debug, Clone, PartialEq)]
@@ -461,7 +461,7 @@ mod resolve_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::plugin::manifest::CapabilityRequest;
+    use crate::capability::request::CapabilityRequest;
 
     fn manifest_with_hosts(hosts: Vec<&str>) -> Manifest {
         Manifest {
@@ -713,7 +713,7 @@ mod tests {
             events: vec![],
             settings: vec![],
             capabilities: vec![],
-            sidecars: vec![crate::plugin::manifest::SidecarRequest {
+            sidecars: vec![crate::capability::request::SidecarRequest {
                 name: "tts".into(),
                 reason: "reason".into(),
                 args: vec!["--port".into(), "{port}".into()],
@@ -874,7 +874,7 @@ mod tests {
         );
     }
 
-    fn manifest_with_fs(mode: crate::plugin::manifest::FilesystemMode) -> Manifest {
+    fn manifest_with_fs(mode: crate::capability::request::FilesystemMode) -> Manifest {
         Manifest {
             id: "fs-plugin".into(),
             name: "FS".into(),
@@ -885,7 +885,7 @@ mod tests {
             settings: vec![],
             capabilities: vec![],
             sidecars: vec![],
-            filesystem: vec![crate::plugin::manifest::FilesystemRequest {
+            filesystem: vec![crate::capability::request::FilesystemRequest {
                 name: "exports".into(),
                 reason: "reason".into(),
                 mode,
@@ -898,7 +898,7 @@ mod tests {
 
     #[test]
     fn filesystem_grant_defaults_to_ungranted_and_persists() {
-        use crate::plugin::manifest::FilesystemMode;
+        use crate::capability::request::FilesystemMode;
         let tmp = tempfile::tempdir().unwrap();
         let store = GrantsStore::new(tmp.path().join("grants"));
         let manifest = manifest_with_fs(FilesystemMode::ReadWrite);
@@ -922,7 +922,7 @@ mod tests {
 
     #[test]
     fn changing_the_mode_makes_the_filesystem_grant_stale() {
-        use crate::plugin::manifest::FilesystemMode;
+        use crate::capability::request::FilesystemMode;
         let tmp = tempfile::tempdir().unwrap();
         let store = GrantsStore::new(tmp.path().join("grants"));
         store
@@ -940,7 +940,7 @@ mod tests {
 
     #[test]
     fn filesystem_http_and_sidecar_grants_are_independent() {
-        use crate::plugin::manifest::FilesystemMode;
+        use crate::capability::request::FilesystemMode;
         let tmp = tempfile::tempdir().unwrap();
         let store = GrantsStore::new(tmp.path().join("grants"));
         let mut manifest = manifest_with_fs(FilesystemMode::ReadWrite);
@@ -961,7 +961,7 @@ mod tests {
 
     #[test]
     fn unknown_filesystem_root_is_never_granted() {
-        use crate::plugin::manifest::FilesystemMode;
+        use crate::capability::request::FilesystemMode;
         let tmp = tempfile::tempdir().unwrap();
         let store = GrantsStore::new(tmp.path().join("grants"));
         let manifest = manifest_with_fs(FilesystemMode::Read);
@@ -994,7 +994,7 @@ mod tests {
             capabilities: vec![],
             sidecars: vec![],
             filesystem: vec![],
-            bus: vec![crate::plugin::manifest::BusRequest {
+            bus: vec![crate::capability::request::BusRequest {
                 driver: "ed-state".into(),
                 publish: vec!["ship-status".into()],
                 subscribe: vec!["current-system".into()],
@@ -1037,7 +1037,7 @@ mod tests {
     /// grant ファイルが持つはずのサイドカー要求も 1 件持つマニフェスト。
     fn manifest_with_bus_and_sidecar() -> Manifest {
         let mut manifest = manifest_with_bus();
-        manifest.sidecars = vec![crate::plugin::manifest::SidecarRequest {
+        manifest.sidecars = vec![crate::capability::request::SidecarRequest {
             name: "tts".into(),
             reason: "reason".into(),
             args: vec!["--port".into(), "{port}".into()],
@@ -1115,7 +1115,7 @@ mod tests {
     }
 
     fn manifest_with_dashboard() -> Manifest {
-        use crate::plugin::manifest::{DashboardWidget, WidgetSize};
+        use crate::capability::request::{DashboardWidget, WidgetSize};
         Manifest {
             id: "widgety".into(),
             name: "Widgety".into(),

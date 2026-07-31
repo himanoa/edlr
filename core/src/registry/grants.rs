@@ -33,11 +33,12 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use crate::capability::GrantStorage;
-use crate::plugin::grants::GrantState;
-use crate::plugin::host::{capabilities_json_string, parse_capability_hosts};
-use crate::plugin::registry::{DashboardInfo, PluginEntry, PluginState, RegistryError};
-use crate::plugin::sidecar_runtime::{parse_sidecars, SidecarRuntimeEntry};
-use crate::plugin::{CapabilityRequest, Manifest};
+use crate::capability::grants::GrantState;
+use crate::host::plugin::{capabilities_json_string, parse_capability_hosts};
+use crate::registry::plugin::{DashboardInfo, PluginEntry, PluginState, RegistryError};
+use crate::runtime::sidecar::{parse_sidecars, SidecarRuntimeEntry};
+use crate::manifest::Manifest;
+use crate::capability::request::CapabilityRequest;
 use crate::registry::entries::EntryTable;
 use crate::registry::sidecar::{merged_effective_hosts, SidecarEntry};
 use crate::registry::subject::RegistrySubject;
@@ -81,7 +82,7 @@ impl<G: GrantStorage, E: SidecarEntry> Clone for GrantService<G, E> {
 
 /// ディスク実装(`GrantsStore`)を挿した公開面。plugin/driver どちらの
 /// `EntryTable` 要素かは呼び出し側が `E` で指定する。
-pub(crate) type DiskGrantService<E> = GrantService<crate::plugin::grants::GrantsStore, E>;
+pub(crate) type DiskGrantService<E> = GrantService<crate::capability::grants::GrantsStore, E>;
 
 impl<G: GrantStorage, E: SidecarEntry> GrantService<G, E> {
     pub(crate) fn new(

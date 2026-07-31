@@ -4,7 +4,7 @@
 //! `Registry::set_filesystem_grant` の往復を実際のディスク I/O を通して
 //! 検証する。
 
-use edlr_core::plugin::FilesystemConfig;
+use edlr_core::settings::filesystem::FilesystemConfig;
 
 mod support;
 

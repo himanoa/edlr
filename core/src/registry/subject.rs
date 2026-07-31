@@ -16,8 +16,9 @@
 //! "plugin {id} is disabled" / "driver {id} is disabled" 分岐で使う
 //! (Phase 4 タスク6)。
 
-use crate::plugin::registry::RegistryError;
-use crate::plugin::{FilesystemRequest, Manifest, SidecarRequest};
+use crate::registry::plugin::RegistryError;
+use crate::manifest::Manifest;
+use crate::capability::request::{FilesystemRequest, SidecarRequest};
 
 /// ジェネリックな `registry` 系サービスが manifest 型に要求する最小限の面。
 pub(crate) trait RegistrySubject: Clone {
@@ -71,7 +72,7 @@ impl RegistrySubject for Manifest {
     }
 }
 
-impl RegistrySubject for crate::driver::manifest::DriverManifest {
+impl RegistrySubject for crate::manifest::driver::DriverManifest {
     fn id(&self) -> &str {
         &self.id
     }
@@ -85,7 +86,7 @@ impl RegistrySubject for crate::driver::manifest::DriverManifest {
     }
 
     fn as_settings_manifest(&self) -> Manifest {
-        crate::driver::manifest::DriverManifest::as_settings_manifest(self)
+        crate::manifest::driver::DriverManifest::as_settings_manifest(self)
     }
 
     fn unknown_error(id: &str) -> RegistryError {
@@ -100,7 +101,7 @@ impl RegistrySubject for crate::driver::manifest::DriverManifest {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::driver::manifest::DriverManifest;
+    use crate::manifest::driver::DriverManifest;
 
     fn plain_manifest(id: &str) -> Manifest {
         Manifest {

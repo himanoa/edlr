@@ -19,12 +19,16 @@ use std::process::Command;
 #[allow(unused_imports)]
 use std::sync::Arc;
 
-use edlr_core::driver::host::DriverHost;
-use edlr_core::driver::{start_drivers, DriverRegistry};
-use edlr_core::plugin::filesystem::FilesystemConfigStore;
-use edlr_core::plugin::{
-    GrantsStore, PluginHost, Registry, ScheduleStore, SettingsStore, SidecarConfigStore,
-};
+use edlr_core::host::driver::DriverHost;
+use edlr_core::runner::driver::start_drivers;
+use edlr_core::registry::driver::DriverRegistry;
+use edlr_core::settings::filesystem::FilesystemConfigStore;
+use edlr_core::capability::grants::GrantsStore;
+use edlr_core::host::plugin::PluginHost;
+use edlr_core::registry::plugin::Registry;
+use edlr_core::schedule::store::ScheduleStore;
+use edlr_core::settings::store::SettingsStore;
+use edlr_core::settings::sidecar::SidecarConfigStore;
 use edlr_core::router::Router;
 
 /// ドライバを 1 件もロードしていない `DriverRegistry`(存在しないディレクトリ
@@ -93,7 +97,7 @@ pub fn sidecar_env(name: &str, port: u16, scalable: bool) -> Env {
     .unwrap();
 
     let router = Router::new(16);
-    let registry = edlr_core::plugin::start_plugins(
+    let registry = edlr_core::runner::plugin::start_plugins(
         &plugins_dir,
         SettingsStore::new(tmp.path().join("settings")),
         SidecarConfigStore::new(tmp.path().join("settings")),
@@ -133,7 +137,7 @@ pub fn two_plugin_sidecar_env(sidecar_name: &str, port_a: u16, port_b: u16) -> E
     write_sidecar_plugin(&plugins_dir, "sc-plugin-b", sidecar_name, port_b);
 
     let router = Router::new(16);
-    let registry = edlr_core::plugin::start_plugins(
+    let registry = edlr_core::runner::plugin::start_plugins(
         &plugins_dir,
         SettingsStore::new(tmp.path().join("settings")),
         SidecarConfigStore::new(tmp.path().join("settings")),
@@ -185,7 +189,7 @@ pub fn filesystem_env(name: &str, mode: &str) -> Env {
     .unwrap();
 
     let router = Router::new(16);
-    let registry = edlr_core::plugin::start_plugins(
+    let registry = edlr_core::runner::plugin::start_plugins(
         &plugins_dir,
         SettingsStore::new(tmp.path().join("settings")),
         SidecarConfigStore::new(tmp.path().join("settings")),

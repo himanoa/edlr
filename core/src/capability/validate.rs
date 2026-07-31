@@ -2,7 +2,7 @@ use std::collections::HashSet;
 use std::path::Path;
 
 use crate::capability::request::BusRequest;
-use crate::plugin::manifest::{is_valid_id, ManifestError};
+use crate::manifest::{is_valid_id, ManifestError};
 
 /// capability の host エントリを検証する。
 ///

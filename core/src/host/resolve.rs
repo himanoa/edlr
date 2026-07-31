@@ -12,9 +12,9 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use crate::plugin::bus_runtime::BusRuntimeEntry;
-use crate::plugin::fs_runtime::FsRuntimeEntry;
-use crate::plugin::sidecar_runtime::SidecarRuntimeEntry;
+use crate::runtime::bus::BusRuntimeEntry;
+use crate::runtime::fs::FsRuntimeEntry;
+use crate::runtime::sidecar::SidecarRuntimeEntry;
 
 /// `resolve_sidecar` の失敗理由。variant ごとにエラー文字列を持つ
 /// (WIT の `driver-process.driver-error` へ 1:1 で写像される)。
@@ -104,7 +104,7 @@ pub(crate) fn check_http_permission(hosts: &[String], url: &str) -> Result<(), S
     if hosts.is_empty() {
         return Err("capability not granted".to_string());
     }
-    crate::plugin::allowlist::check_url(hosts, url)
+    crate::host::allowlist::check_url(hosts, url)
 }
 
 /// バス操作の向き。`publish`(送信)と `subscribe`(受信/`get`)で参照する

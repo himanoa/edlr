@@ -1,8 +1,8 @@
 /// `get-capabilities`/`set-capabilities` の result と `plugins/list` の各要素の
 /// `capabilities` フィールドに使う共通の JSON 形: `{ requests, granted, staleGrant }`。
 pub fn capabilities_result_json(
-    requests: &[crate::plugin::CapabilityRequest],
-    grant_state: &crate::plugin::GrantState,
+    requests: &[crate::capability::request::CapabilityRequest],
+    grant_state: &crate::capability::grants::GrantState,
 ) -> serde_json::Value {
     serde_json::json!({
         "requests": requests,
@@ -24,7 +24,7 @@ pub fn capabilities_result_json(
 /// サイレントに食い違ってしまう(コードレビュー指摘)。
 /// `plugins/set-dashboard-grant`・`plugins/list` が共有する応答形。
 pub fn dashboard_result_json(
-    dashboard: &[crate::plugin::registry::DashboardInfo],
+    dashboard: &[crate::registry::plugin::DashboardInfo],
 ) -> serde_json::Value {
     let items: Vec<serde_json::Value> = dashboard
         .iter()
@@ -43,7 +43,7 @@ pub fn dashboard_result_json(
     serde_json::json!({ "dashboard": items })
 }
 
-pub fn bus_result_json(bus: &[crate::plugin::registry::BusInfo]) -> serde_json::Value {
+pub fn bus_result_json(bus: &[crate::registry::plugin::BusInfo]) -> serde_json::Value {
     let items: Vec<serde_json::Value> = bus
         .iter()
         .map(|info| {
@@ -76,7 +76,7 @@ pub fn bus_result_json(bus: &[crate::plugin::registry::BusInfo]) -> serde_json::
 /// journal イベントは読み取り位置が配送と独立に進むため replay でも戻らず、
 /// バス配信も再送されない -- つまりこの数はそのまま**失われたイベント数**で
 /// ある(`plugin::dropped` のモジュールドキュメント参照)。
-pub fn dropped_result_json(dropped: &crate::plugin::dropped::DroppedCounts) -> serde_json::Value {
+pub fn dropped_result_json(dropped: &crate::runtime::dropped::DroppedCounts) -> serde_json::Value {
     serde_json::json!({
         "events": dropped.events,
         "busDeliveries": dropped.bus_deliveries,
@@ -84,7 +84,7 @@ pub fn dropped_result_json(dropped: &crate::plugin::dropped::DroppedCounts) -> s
 }
 
 pub fn schedules_result_json(
-    schedules: &[crate::plugin::registry::ScheduleInfo],
+    schedules: &[crate::registry::plugin::ScheduleInfo],
 ) -> serde_json::Value {
     let items: Vec<serde_json::Value> = schedules
         .iter()
@@ -101,7 +101,7 @@ pub fn schedules_result_json(
 
 /// `get-sidecars` / `set-sidecar-*` / `sidecar-control` の共通 result 形と、
 /// `plugins/list` の各要素の `sidecars` フィールドに使う JSON。
-pub fn sidecars_result_json(sidecars: &[crate::plugin::SidecarInfo]) -> serde_json::Value {
+pub fn sidecars_result_json(sidecars: &[crate::registry::plugin::SidecarInfo]) -> serde_json::Value {
     let items: Vec<serde_json::Value> = sidecars
         .iter()
         .map(|info| {
@@ -128,7 +128,7 @@ pub fn sidecars_result_json(sidecars: &[crate::plugin::SidecarInfo]) -> serde_js
 
 /// `get-filesystem` / `set-filesystem-*` の共通 result 形と、`plugins/list`
 /// の各要素の `filesystem` フィールドに使う JSON: `{ "roots": [...] }`。
-pub fn filesystem_result_json(roots: &[crate::plugin::FilesystemInfo]) -> serde_json::Value {
+pub fn filesystem_result_json(roots: &[crate::registry::plugin::FilesystemInfo]) -> serde_json::Value {
     let items: Vec<serde_json::Value> = roots
         .iter()
         .map(|info| {
@@ -148,12 +148,15 @@ pub fn filesystem_result_json(roots: &[crate::plugin::FilesystemInfo]) -> serde_
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::plugin::grants::GrantState;
-    use crate::plugin::registry::{BusInfo, DashboardInfo, FilesystemInfo, ScheduleInfo, SidecarInfo};
-    use crate::plugin::{
-        BusRequest, CapabilityRequest, DashboardWidget, FilesystemConfig, FilesystemMode,
-        FilesystemRequest, ScheduleSpec, SidecarConfig, SidecarRequest, WidgetSize,
+    use crate::capability::grants::GrantState;
+    use crate::registry::plugin::{BusInfo, DashboardInfo, FilesystemInfo, ScheduleInfo, SidecarInfo};
+    use crate::manifest::ScheduleSpec;
+    use crate::capability::request::{
+        BusRequest, CapabilityRequest, DashboardWidget, FilesystemMode, FilesystemRequest,
+        SidecarRequest, WidgetSize,
     };
+    use crate::settings::filesystem::FilesystemConfig;
+    use crate::settings::sidecar::SidecarConfig;
     use edlr_driver_process::InstanceStatus;
 
     #[test]
@@ -274,7 +277,7 @@ mod tests {
 
     #[test]
     fn dropped_json_reports_event_and_bus_delivery_counts() {
-        let dropped = crate::plugin::dropped::DroppedCounts {
+        let dropped = crate::runtime::dropped::DroppedCounts {
             events: 3,
             bus_deliveries: 7,
         };

@@ -12,8 +12,8 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
-use crate::plugin::manifest::SidecarRequest;
-use crate::plugin::Manifest;
+use crate::capability::request::SidecarRequest;
+use crate::manifest::Manifest;
 
 /// サイドカー 1 件のユーザー設定。
 #[derive(Debug, Clone, PartialEq, serde::Deserialize, serde::Serialize)]
@@ -235,7 +235,7 @@ fn validate_no_overlap(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::plugin::manifest::SidecarRequest;
+    use crate::capability::request::SidecarRequest;
 
     fn manifest_with(sidecars: Vec<SidecarRequest>) -> Manifest {
         Manifest {

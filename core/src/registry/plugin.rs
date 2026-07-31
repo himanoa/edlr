@@ -11,18 +11,18 @@ use std::thread;
 use edlr_driver_channel::Bus;
 use edlr_driver_process::{InstanceStatus, ProcessDriver};
 
-use crate::driver::registry::DriverRegistry;
-use crate::plugin::dropped::{DropCounters, DroppedCounts};
-use crate::plugin::filesystem::{FilesystemConfig, FilesystemConfigError, FilesystemConfigStore};
-use crate::plugin::grants::{GrantState, GrantsError, GrantsStore};
-use crate::plugin::host::PluginHost;
-use crate::plugin::runner::PluginWork;
-use crate::plugin::schedule::{Clock, ScheduleState, ScheduleView};
-use crate::plugin::settings::{split_secrets, SettingsStore};
-use crate::plugin::sidecar::{SidecarConfig, SidecarConfigError, SidecarConfigStore};
-use crate::plugin::{
-    BusRequest, CapabilityRequest, DashboardWidget, FilesystemRequest, Manifest, ScheduleSpec,
-    SettingsError, SidecarRequest,
+use crate::registry::driver::DriverRegistry;
+use crate::runtime::dropped::{DropCounters, DroppedCounts};
+use crate::settings::filesystem::{FilesystemConfig, FilesystemConfigError, FilesystemConfigStore};
+use crate::capability::grants::{GrantState, GrantsError, GrantsStore};
+use crate::host::plugin::PluginHost;
+use crate::runner::plugin::PluginWork;
+use crate::schedule::{Clock, ScheduleState, ScheduleView};
+use crate::settings::store::{split_secrets, SettingsError, SettingsStore};
+use crate::settings::sidecar::{SidecarConfig, SidecarConfigError, SidecarConfigStore};
+use crate::manifest::{Manifest, ScheduleSpec};
+use crate::capability::request::{
+    BusRequest, CapabilityRequest, DashboardWidget, FilesystemRequest, SidecarRequest,
 };
 use crate::registry::bus::DiskBusService;
 use crate::registry::entries::{EntryTable, IdLocks};
@@ -443,7 +443,7 @@ impl Registry {
             .map(|(mut manifest, state)| {
                 // `options-from` の select の候補を、いま retain されている値から
                 // 解決して埋める(未解決なら `options` は None のまま)。
-                crate::plugin::select_options::resolve(&mut manifest.settings, &self.bus);
+                crate::registry::select_options::resolve(&mut manifest.settings, &self.bus);
                 // 秘密情報は RPC 応答から落とす(設定済みかどうかだけ返す)。
                 let (values, secrets_set) =
                     split_secrets(&manifest, self.settings_store.effective(&manifest));
@@ -825,7 +825,7 @@ impl Registry {
 pub(crate) mod tests {
     use super::*;
     use crate::event::Event;
-    use crate::plugin::SettingField;
+    use crate::manifest::SettingField;
     use edlr_driver_process::ProcessSpec;
     use std::sync::atomic::Ordering;
     use std::thread;
@@ -835,14 +835,14 @@ pub(crate) mod tests {
     /// ディレクトリを走査させることで空のまま作る -- `driver::runner` の
     /// 自テストにある `start_drivers_for_test` と同じ流儀)。
     fn empty_driver_registry(tmp: &std::path::Path) -> DriverRegistry {
-        crate::driver::start_drivers(
+        crate::runner::driver::start_drivers(
             &tmp.join("drivers"),
             SettingsStore::new(tmp.join("driver-settings")),
             SidecarConfigStore::new(tmp.join("driver-settings")),
             FilesystemConfigStore::new(tmp.join("driver-settings"), Vec::new()),
             GrantsStore::new_for_drivers(tmp.join("driver-grants")),
             edlr_driver_channel::Bus::new(),
-            crate::driver::host::DriverHost::new().expect("driver host should build"),
+            crate::host::driver::DriverHost::new().expect("driver host should build"),
         )
     }
 
@@ -920,10 +920,10 @@ pub(crate) mod tests {
             settings: vec![],
             capabilities: vec![],
             sidecars: vec![],
-            filesystem: vec![crate::plugin::manifest::FilesystemRequest {
+            filesystem: vec![crate::capability::request::FilesystemRequest {
                 name: "exports".into(),
                 reason: "reason".into(),
-                mode: crate::plugin::manifest::FilesystemMode::ReadWrite,
+                mode: crate::capability::request::FilesystemMode::ReadWrite,
             }],
             bus: vec![],
             dashboard: vec![],
@@ -988,7 +988,7 @@ pub(crate) mod tests {
             label: "話者".into(),
             default: String::new(),
             options: None,
-            options_from: Some(crate::plugin::OptionsFrom {
+            options_from: Some(crate::manifest::OptionsFrom {
                 driver: "coeiroink".into(),
                 topic: "speakers".into(),
             }),
@@ -997,7 +997,7 @@ pub(crate) mod tests {
             manifest,
             state: PluginState::Running,
             settings_json: Arc::new(Mutex::new("{}".to_string())),
-            capabilities_json: Arc::new(Mutex::new(crate::plugin::host::capabilities_json_string(
+            capabilities_json: Arc::new(Mutex::new(crate::host::plugin::capabilities_json_string(
                 &[],
             ))),
             sidecars_json: Arc::new(Mutex::new("[]".to_string())),
@@ -1007,7 +1007,7 @@ pub(crate) mod tests {
         registry
     }
 
-    fn listed_options(registry: &Registry) -> Option<Vec<crate::plugin::SelectOption>> {
+    fn listed_options(registry: &Registry) -> Option<Vec<crate::manifest::SelectOption>> {
         let infos = registry.list();
         let SettingField::Select { options, .. } = &infos[0].manifest.settings[0] else {
             panic!("expected a select field");
@@ -1099,7 +1099,7 @@ pub(crate) mod tests {
             manifest: manifest_with_bus("translator"),
             state: PluginState::Running,
             settings_json: Arc::new(Mutex::new("{}".to_string())),
-            capabilities_json: Arc::new(Mutex::new(crate::plugin::host::capabilities_json_string(
+            capabilities_json: Arc::new(Mutex::new(crate::host::plugin::capabilities_json_string(
                 &[],
             ))),
             sidecars_json: Arc::new(Mutex::new("[]".to_string())),
@@ -1144,7 +1144,7 @@ pub(crate) mod tests {
             manifest: manifest_with_dashboard("widgety"),
             state: PluginState::Running,
             settings_json: Arc::new(Mutex::new("{}".to_string())),
-            capabilities_json: Arc::new(Mutex::new(crate::plugin::host::capabilities_json_string(
+            capabilities_json: Arc::new(Mutex::new(crate::host::plugin::capabilities_json_string(
                 &[],
             ))),
             sidecars_json: Arc::new(Mutex::new("[]".to_string())),
@@ -1155,7 +1155,7 @@ pub(crate) mod tests {
     }
 
     fn manifest_with_dashboard(id: &str) -> Manifest {
-        use crate::plugin::manifest::{DashboardWidget, WidgetSize};
+        use crate::capability::request::{DashboardWidget, WidgetSize};
         Manifest {
             id: id.to_string(),
             name: id.to_string(),
@@ -1180,7 +1180,7 @@ pub(crate) mod tests {
 
     /// `[[schedule]]` を 2 件(interval・cron)持つプラグイン `scheduler-plugin`。
     fn manifest_with_schedule(id: &str) -> Manifest {
-        use crate::plugin::manifest::ScheduleRequest;
+        use crate::manifest::ScheduleRequest;
         Manifest {
             id: id.to_string(),
             name: id.to_string(),
@@ -1216,7 +1216,7 @@ pub(crate) mod tests {
             manifest: manifest_with_schedule("scheduler-plugin"),
             state: PluginState::Running,
             settings_json: Arc::new(Mutex::new("{}".to_string())),
-            capabilities_json: Arc::new(Mutex::new(crate::plugin::host::capabilities_json_string(
+            capabilities_json: Arc::new(Mutex::new(crate::host::plugin::capabilities_json_string(
                 &[],
             ))),
             sidecars_json: Arc::new(Mutex::new("[]".to_string())),
@@ -1268,7 +1268,7 @@ pub(crate) mod tests {
             manifest,
             state: PluginState::Running,
             settings_json: Arc::new(Mutex::new("{}".to_string())),
-            capabilities_json: Arc::new(Mutex::new(crate::plugin::host::capabilities_json_string(
+            capabilities_json: Arc::new(Mutex::new(crate::host::plugin::capabilities_json_string(
                 &[],
             ))),
             sidecars_json: Arc::new(Mutex::new("[]".to_string())),
@@ -1368,7 +1368,7 @@ pub(crate) mod tests {
         // スレッドが「flush は 3 秒後に発火予定」と公開している状況を作る。
         // 推定値(now + 60s)とは明確に違う値にしておく。
         let published_flush = chrono::Local::now() + chrono::Duration::seconds(3);
-        let view = crate::plugin::schedule::ScheduleView::default();
+        let view = crate::schedule::ScheduleView::default();
         view.set_for_test(vec![("flush".to_string(), published_flush)]);
         registry.register_schedule_view("scheduler-plugin", view);
 
@@ -1393,7 +1393,7 @@ pub(crate) mod tests {
         let registry = test_registry_with_schedule();
         registry.register_schedule_view(
             "scheduler-plugin",
-            crate::plugin::schedule::ScheduleView::default(),
+            crate::schedule::ScheduleView::default(),
         );
 
         let infos = registry.list();
@@ -1408,7 +1408,7 @@ pub(crate) mod tests {
             manifest: manifest_with_dashboard("no-schedule-plugin"),
             state: PluginState::Running,
             settings_json: Arc::new(Mutex::new("{}".to_string())),
-            capabilities_json: Arc::new(Mutex::new(crate::plugin::host::capabilities_json_string(
+            capabilities_json: Arc::new(Mutex::new(crate::host::plugin::capabilities_json_string(
                 &[],
             ))),
             sidecars_json: Arc::new(Mutex::new("[]".to_string())),
@@ -1531,8 +1531,8 @@ pub(crate) mod tests {
     fn a_bus_request_whose_driver_and_topics_are_all_installed_is_resolved() {
         let tmp = tempfile::tempdir().unwrap();
         let driver_registry = empty_driver_registry(tmp.path());
-        driver_registry.push(crate::driver::registry::DriverEntry {
-            manifest: crate::driver::manifest::DriverManifest {
+        driver_registry.push(crate::registry::driver::DriverEntry {
+            manifest: crate::manifest::driver::DriverManifest {
                 id: "ed-state".into(),
                 name: "ED State".into(),
                 version: "0.1.0".into(),
@@ -1555,9 +1555,9 @@ pub(crate) mod tests {
                 sidecars: vec![],
                 filesystem: vec![],
             },
-            state: crate::driver::registry::DriverState::Running,
+            state: crate::registry::driver::DriverState::Running,
             settings_json: Arc::new(Mutex::new("{}".to_string())),
-            capabilities_json: Arc::new(Mutex::new(crate::plugin::host::capabilities_json_string(
+            capabilities_json: Arc::new(Mutex::new(crate::host::plugin::capabilities_json_string(
                 &[],
             ))),
             sidecars_json: Arc::new(Mutex::new("[]".to_string())),
@@ -1588,7 +1588,7 @@ pub(crate) mod tests {
             .expect("granting a declared bus connection should succeed");
         assert!(granted.granted);
         let parsed =
-            crate::plugin::bus_runtime::parse_bus(&registry.bus_buffer("translator").unwrap());
+            crate::runtime::bus::parse_bus(&registry.bus_buffer("translator").unwrap());
         let entry = parsed.get("ed-state").expect("entry present after grant");
         assert!(entry.granted);
         assert_eq!(entry.subscribe, vec!["current-system".to_string()]);
@@ -1598,7 +1598,7 @@ pub(crate) mod tests {
             .expect("revoking should succeed");
         assert!(!revoked.granted);
         let parsed =
-            crate::plugin::bus_runtime::parse_bus(&registry.bus_buffer("translator").unwrap());
+            crate::runtime::bus::parse_bus(&registry.bus_buffer("translator").unwrap());
         let entry = parsed
             .get("ed-state")
             .expect("entry still present after revoke");
@@ -1660,7 +1660,7 @@ pub(crate) mod tests {
             manifest,
             state: PluginState::Running,
             settings_json: Arc::new(Mutex::new("{}".to_string())),
-            capabilities_json: Arc::new(Mutex::new(crate::plugin::host::capabilities_json_string(
+            capabilities_json: Arc::new(Mutex::new(crate::host::plugin::capabilities_json_string(
                 &[],
             ))),
             sidecars_json: Arc::new(Mutex::new("[]".to_string())),
@@ -1683,7 +1683,7 @@ pub(crate) mod tests {
             .set_filesystem_grant("fs-plugin", "exports", true)
             .expect("granting should succeed");
         let granted =
-            crate::plugin::fs_runtime::parse_filesystem(&filesystem_json.lock().unwrap().clone());
+            crate::runtime::fs::parse_filesystem(&filesystem_json.lock().unwrap().clone());
         assert!(granted["exports"].granted);
         assert!(!granted["exports"].path.is_empty());
 
@@ -1711,7 +1711,7 @@ pub(crate) mod tests {
         revoker.join().expect("revoker thread should not panic");
 
         let revoked =
-            crate::plugin::fs_runtime::parse_filesystem(&filesystem_json.lock().unwrap().clone());
+            crate::runtime::fs::parse_filesystem(&filesystem_json.lock().unwrap().clone());
         assert!(!revoked["exports"].granted);
         assert_eq!(
             revoked["exports"].path, "",
@@ -1731,7 +1731,7 @@ pub(crate) mod tests {
             events: vec![],
             settings: vec![],
             capabilities: vec![],
-            sidecars: vec![crate::plugin::manifest::SidecarRequest {
+            sidecars: vec![crate::capability::request::SidecarRequest {
                 name: "tts".into(),
                 reason: "reason".into(),
                 args: vec!["-c".into(), "sleep 30".into()],
@@ -1759,7 +1759,7 @@ pub(crate) mod tests {
             manifest: manifest.clone(),
             state: PluginState::Running,
             settings_json: Arc::new(Mutex::new("{}".to_string())),
-            capabilities_json: Arc::new(Mutex::new(crate::plugin::host::capabilities_json_string(
+            capabilities_json: Arc::new(Mutex::new(crate::host::plugin::capabilities_json_string(
                 &[],
             ))),
             sidecars_json: Arc::new(Mutex::new("[]".to_string())),
@@ -1824,7 +1824,7 @@ pub(crate) mod tests {
             manifest: manifest.clone(),
             state: PluginState::Running,
             settings_json: Arc::new(Mutex::new("{}".to_string())),
-            capabilities_json: Arc::new(Mutex::new(crate::plugin::host::capabilities_json_string(
+            capabilities_json: Arc::new(Mutex::new(crate::host::plugin::capabilities_json_string(
                 &[],
             ))),
             sidecars_json: Arc::new(Mutex::new("[]".to_string())),
@@ -1915,7 +1915,7 @@ pub(crate) mod tests {
             manifest: manifest.clone(),
             state: PluginState::Running,
             settings_json: Arc::new(Mutex::new("{}".to_string())),
-            capabilities_json: Arc::new(Mutex::new(crate::plugin::host::capabilities_json_string(
+            capabilities_json: Arc::new(Mutex::new(crate::host::plugin::capabilities_json_string(
                 &[],
             ))),
             sidecars_json: Arc::new(Mutex::new("[]".to_string())),
@@ -2021,7 +2021,7 @@ pub(crate) mod tests {
             manifest: manifest.clone(),
             state: PluginState::Running,
             settings_json: Arc::new(Mutex::new("{}".to_string())),
-            capabilities_json: Arc::new(Mutex::new(crate::plugin::host::capabilities_json_string(
+            capabilities_json: Arc::new(Mutex::new(crate::host::plugin::capabilities_json_string(
                 &[],
             ))),
             sidecars_json: Arc::new(Mutex::new("[]".to_string())),
@@ -2086,7 +2086,7 @@ pub(crate) mod tests {
             entry: "plugin.wasm".into(),
             events: vec![],
             settings: vec![],
-            capabilities: vec![crate::plugin::CapabilityRequest::Http {
+            capabilities: vec![crate::capability::request::CapabilityRequest::Http {
                 hosts: vec!["https://api.example.com".to_string()],
                 reason: "test".into(),
             }],
@@ -2103,7 +2103,7 @@ pub(crate) mod tests {
         let registry = empty_registry();
         let manifest = manifest_with_http_capability("cap-plugin");
         let capabilities_json = Arc::new(Mutex::new(
-            crate::plugin::host::capabilities_json_string(&[]),
+            crate::host::plugin::capabilities_json_string(&[]),
         ));
         registry.push(PluginEntry {
             manifest: manifest.clone(),
@@ -2188,7 +2188,7 @@ pub(crate) mod tests {
 
         let manifest = manifest_with_http_capability("cap-plugin");
         let capabilities_json = Arc::new(Mutex::new(
-            crate::plugin::host::capabilities_json_string(&[]),
+            crate::host::plugin::capabilities_json_string(&[]),
         ));
         registry.push(PluginEntry {
             manifest: manifest.clone(),
@@ -2272,7 +2272,7 @@ pub(crate) mod tests {
             manifest: plain_manifest(id),
             state: PluginState::Running,
             settings_json: Arc::new(Mutex::new("{}".to_string())),
-            capabilities_json: Arc::new(Mutex::new(crate::plugin::host::capabilities_json_string(
+            capabilities_json: Arc::new(Mutex::new(crate::host::plugin::capabilities_json_string(
                 &[],
             ))),
             sidecars_json: Arc::new(Mutex::new("[]".to_string())),
@@ -2379,7 +2379,7 @@ pub(crate) mod tests {
                 reason: "init failed".to_string(),
             },
             settings_json: Arc::new(Mutex::new("{}".to_string())),
-            capabilities_json: Arc::new(Mutex::new(crate::plugin::host::capabilities_json_string(
+            capabilities_json: Arc::new(Mutex::new(crate::host::plugin::capabilities_json_string(
                 &[],
             ))),
             sidecars_json: Arc::new(Mutex::new("[]".to_string())),

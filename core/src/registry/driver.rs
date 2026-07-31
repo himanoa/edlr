@@ -15,13 +15,13 @@ use std::sync::{Arc, Mutex};
 
 use edlr_driver_channel::Bus;
 
-use crate::driver::host::DriverHost;
-use crate::driver::manifest::DriverManifest;
-use crate::plugin::filesystem::{FilesystemConfig, FilesystemConfigStore};
-use crate::plugin::grants::{GrantState, GrantsError, GrantsStore};
-use crate::plugin::registry::{FilesystemInfo, RegistryError, SidecarAction, SidecarInfo};
-use crate::plugin::settings::{SettingsError, SettingsStore};
-use crate::plugin::sidecar::{SidecarConfig, SidecarConfigStore};
+use crate::host::driver::DriverHost;
+use crate::manifest::driver::DriverManifest;
+use crate::settings::filesystem::{FilesystemConfig, FilesystemConfigStore};
+use crate::capability::grants::{GrantState, GrantsError, GrantsStore};
+use crate::registry::plugin::{FilesystemInfo, RegistryError, SidecarAction, SidecarInfo};
+use crate::settings::store::{SettingsError, SettingsStore};
+use crate::settings::sidecar::{SidecarConfig, SidecarConfigStore};
 use crate::registry::entries::{EntryTable, IdLocks};
 use crate::registry::filesystem::DiskFilesystemService;
 use crate::registry::grants::DiskGrantService;
@@ -231,7 +231,7 @@ impl DriverRegistry {
                 // 候補源にする形(COEIROINK の話者一覧)を成立させるために、
                 // プラグイン側(`crate::plugin::registry::Registry::list`)と
                 // 同じ解決をここでも行う。
-                crate::plugin::select_options::resolve(&mut manifest.settings, &self.bus);
+                crate::registry::select_options::resolve(&mut manifest.settings, &self.bus);
                 let settings_manifest = manifest.as_settings_manifest();
                 let values = self.settings_store.effective(&settings_manifest);
                 let grant_state = self.grants_store.state(&settings_manifest);
@@ -491,8 +491,8 @@ impl DriverRegistry {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crate::driver::host::DriverHost;
-    use crate::plugin::SidecarRequest;
+    use crate::host::driver::DriverHost;
+    use crate::capability::request::SidecarRequest;
     use edlr_driver_process::ProcessSpec;
     use std::thread;
     use std::time::Duration;
@@ -542,7 +542,7 @@ pub(crate) mod tests {
         });
         manifest
             .capabilities
-            .push(crate::plugin::manifest::CapabilityRequest::Http {
+            .push(crate::capability::request::CapabilityRequest::Http {
                 hosts: vec!["https://example.com".into()],
                 reason: "test".into(),
             });
@@ -574,7 +574,7 @@ pub(crate) mod tests {
             topics: Vec::new(),
             settings: Vec::new(),
             capabilities: Vec::new(),
-            sidecars: vec![crate::plugin::manifest::SidecarRequest {
+            sidecars: vec![crate::capability::request::SidecarRequest {
                 name: "tts".into(),
                 reason: "reason".into(),
                 args: vec!["-c".into(), "sleep 30".into()],
@@ -1011,10 +1011,10 @@ pub(crate) mod tests {
                 port,
                 scalable: false,
             }],
-            filesystem: vec![crate::plugin::manifest::FilesystemRequest {
+            filesystem: vec![crate::capability::request::FilesystemRequest {
                 name: "cache".into(),
                 reason: "reason".into(),
-                mode: crate::plugin::manifest::FilesystemMode::ReadWrite,
+                mode: crate::capability::request::FilesystemMode::ReadWrite,
             }],
         }
     }
@@ -1050,7 +1050,7 @@ pub(crate) mod tests {
             manifest,
             state: DriverState::Running,
             settings_json: Arc::new(Mutex::new("{}".to_string())),
-            capabilities_json: Arc::new(Mutex::new(crate::plugin::host::capabilities_json_string(
+            capabilities_json: Arc::new(Mutex::new(crate::host::plugin::capabilities_json_string(
                 &[],
             ))),
             sidecars_json: Arc::new(Mutex::new("[]".to_string())),
@@ -1092,7 +1092,7 @@ pub(crate) mod tests {
             )
             .expect("voice entry must be present");
         let buffer = sidecars_json.lock().unwrap().clone();
-        let parsed = crate::plugin::sidecar_runtime::parse_sidecars(&buffer);
+        let parsed = crate::runtime::sidecar::parse_sidecars(&buffer);
         let entry = parsed
             .get("engine")
             .expect("engine sidecar must be present in the shared buffer");
@@ -1195,7 +1195,7 @@ pub(crate) mod tests {
             )
             .expect("voice entry must be present");
         let buffer = filesystem_json.lock().unwrap().clone();
-        let parsed = crate::plugin::fs_runtime::parse_filesystem(&buffer);
+        let parsed = crate::runtime::fs::parse_filesystem(&buffer);
         let entry = parsed
             .get("cache")
             .expect("cache root must be present in the shared buffer");

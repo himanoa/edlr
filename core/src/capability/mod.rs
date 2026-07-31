@@ -9,7 +9,7 @@ pub mod grants;
 pub mod request;
 pub mod validate;
 
-use crate::plugin::Manifest;
+use crate::manifest::Manifest;
 use grants::{GrantState, GrantsError, GrantsStore};
 
 /// capability 承認の永続化の口。ディスク実装は [`GrantsStore`]。

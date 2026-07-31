@@ -30,7 +30,7 @@ use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Local};
 
-use crate::plugin::manifest::{normalize_cron, ScheduleRequest, ScheduleSpec};
+use crate::manifest::{normalize_cron, ScheduleRequest, ScheduleSpec};
 
 /// 「いまが何時か」を壁時計と単調時計の両方で表したもの。
 ///

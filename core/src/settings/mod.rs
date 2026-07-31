@@ -8,7 +8,7 @@ pub mod sidecar;
 pub mod store;
 pub mod validate;
 
-use crate::plugin::Manifest;
+use crate::manifest::Manifest;
 use store::{SettingsError, SettingsStore};
 
 /// 設定永続化の口。ディスク実装は [`SettingsStore`]。

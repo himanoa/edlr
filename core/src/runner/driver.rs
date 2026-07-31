@@ -23,13 +23,13 @@ use std::thread;
 
 use edlr_driver_channel::{Bus, Message};
 
-use crate::driver::host::{DriverCtx, DriverHost};
-use crate::driver::manifest::{load_driver_manifest, DriverManifest};
-use crate::driver::registry::{DriverEntry, DriverRegistry, DriverState};
-use crate::plugin::filesystem::FilesystemConfigStore;
-use crate::plugin::grants::GrantsStore;
-use crate::plugin::settings::SettingsStore;
-use crate::plugin::sidecar::SidecarConfigStore;
+use crate::host::driver::{DriverCtx, DriverHost};
+use crate::manifest::driver::{load_driver_manifest, DriverManifest};
+use crate::registry::driver::{DriverEntry, DriverRegistry, DriverState};
+use crate::settings::filesystem::FilesystemConfigStore;
+use crate::capability::grants::GrantsStore;
+use crate::settings::store::SettingsStore;
+use crate::settings::sidecar::SidecarConfigStore;
 use crate::runner::bootstrap::{build_initial_buffers, InitialBuffers};
 
 /// ドライバ 1 件あたりのメッセージキュー容量。

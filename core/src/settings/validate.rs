@@ -3,7 +3,7 @@
 //! [`crate::settings::store::SettingsStore`] はここへ委譲する薄い手続きに
 //! 留め、判断そのものはここに集める(値イン値アウト)。
 
-use crate::plugin::SettingField;
+use crate::manifest::SettingField;
 use crate::settings::store::SettingsError;
 
 /// `value` が `field` の宣言型(および Select の `options`)に適合するか検証する。
@@ -156,11 +156,11 @@ mod tests {
             label: "Mode".into(),
             default: "a".into(),
             options: Some(vec![
-                crate::plugin::SelectOption {
+                crate::manifest::SelectOption {
                     value: "a".into(),
                     label: "A".into(),
                 },
-                crate::plugin::SelectOption {
+                crate::manifest::SelectOption {
                     value: "b".into(),
                     label: "B".into(),
                 },
@@ -175,7 +175,7 @@ mod tests {
             label: "Speaker".into(),
             default: String::new(),
             options: None,
-            options_from: Some(crate::plugin::OptionsFrom {
+            options_from: Some(crate::manifest::OptionsFrom {
                 driver: "coeiroink".into(),
                 topic: "speakers".into(),
             }),

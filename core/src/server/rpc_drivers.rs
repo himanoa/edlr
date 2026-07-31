@@ -1,7 +1,7 @@
 //! `drivers/*` RPC のメソッド別ハンドラ(params 解釈 → DriverRegistry 呼び出し →
 //! JSON 整形)。dispatch は `super::handle_drivers_rpc`。
 
-use crate::driver::{DriverInfo, DriverRegistry, DriverState};
+use crate::registry::driver::{DriverInfo, DriverRegistry, DriverState};
 use crate::rpc::params::{param_bool, param_object, param_str};
 use crate::rpc::render::*;
 
@@ -93,7 +93,7 @@ pub(super) fn set_sidecar_config(
 ) -> Result<serde_json::Value, String> {
     let driver = param_str(params, "driver")?;
     let name = param_str(params, "name")?;
-    let config: crate::plugin::SidecarConfig = serde_json::from_value(
+    let config: crate::settings::sidecar::SidecarConfig = serde_json::from_value(
         params
             .get("config")
             .cloned()
@@ -128,9 +128,9 @@ pub(super) fn sidecar_control(
     // plugins 側(rpc_plugins::sidecar_control)と同一の action パース。
     // Phase 2 では共通化しない(Phase 4 のジェネリック化の対象)。
     let action = match param_str(params, "action")? {
-        "start" => crate::plugin::SidecarAction::Start,
-        "stop" => crate::plugin::SidecarAction::Stop,
-        "restart" => crate::plugin::SidecarAction::Restart,
+        "start" => crate::registry::plugin::SidecarAction::Start,
+        "stop" => crate::registry::plugin::SidecarAction::Stop,
+        "restart" => crate::registry::plugin::SidecarAction::Restart,
         other => return Err(format!("unknown action: {other}")),
     };
     let sidecars = drivers
@@ -145,7 +145,7 @@ pub(super) fn set_filesystem_config(
 ) -> Result<serde_json::Value, String> {
     let driver = param_str(params, "driver")?;
     let name = param_str(params, "name")?;
-    let config: crate::plugin::FilesystemConfig = serde_json::from_value(
+    let config: crate::settings::filesystem::FilesystemConfig = serde_json::from_value(
         params
             .get("config")
             .cloned()

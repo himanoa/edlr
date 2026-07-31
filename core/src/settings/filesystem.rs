@@ -13,7 +13,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
-use crate::plugin::Manifest;
+use crate::manifest::Manifest;
 
 /// ファイルアクセス 1 件のユーザー設定。
 #[derive(Debug, Clone, PartialEq, serde::Deserialize, serde::Serialize)]
@@ -313,7 +313,7 @@ fn is_system_protected(canonical: &std::path::Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::plugin::manifest::{FilesystemMode, FilesystemRequest};
+    use crate::capability::request::{FilesystemMode, FilesystemRequest};
 
     fn manifest_with(requests: Vec<FilesystemRequest>) -> Manifest {
         Manifest {

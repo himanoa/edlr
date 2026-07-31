@@ -1,13 +1,11 @@
 pub use edlr_config as config;
 pub mod capability;
-pub mod driver;
 pub mod event;
 pub mod host;
 pub mod journal;
 pub mod logs;
 pub mod manifest;
 pub mod monitor;
-pub mod plugin;
 pub mod registry;
 pub mod router;
 pub mod rpc;

@@ -6,16 +6,17 @@
 //! `ws_rpc_integration.rs` のものをこのファイル内にコピーして使う(`core/tests/`
 //! の各ファイルは独立クレートなので、既存ファイルへの追記は凍結違反になる)。
 
-use edlr_core::driver::host::DriverHost;
-use edlr_core::driver::{start_drivers, DriverRegistry};
-use edlr_core::plugin::filesystem::FilesystemConfigStore;
-use edlr_core::plugin::grants::GrantsStore;
-use edlr_core::plugin::host::PluginHost;
-use edlr_core::plugin::runner::start_plugins;
-use edlr_core::plugin::schedule_store::ScheduleStore;
-use edlr_core::plugin::settings::SettingsStore;
-use edlr_core::plugin::sidecar::SidecarConfigStore;
-use edlr_core::plugin::Registry;
+use edlr_core::host::driver::DriverHost;
+use edlr_core::runner::driver::start_drivers;
+use edlr_core::registry::driver::DriverRegistry;
+use edlr_core::settings::filesystem::FilesystemConfigStore;
+use edlr_core::capability::grants::GrantsStore;
+use edlr_core::host::plugin::PluginHost;
+use edlr_core::runner::plugin::start_plugins;
+use edlr_core::schedule::store::ScheduleStore;
+use edlr_core::settings::store::SettingsStore;
+use edlr_core::settings::sidecar::SidecarConfigStore;
+use edlr_core::registry::plugin::Registry;
 use edlr_core::router::Router;
 use edlr_core::server::{self, ServerState};
 use futures_util::{SinkExt, StreamExt};

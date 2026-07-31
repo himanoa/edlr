@@ -13,11 +13,11 @@
 use std::sync::{Arc, Mutex};
 
 use crate::capability::GrantStorage;
-use crate::driver::registry::DriverRegistry;
-use crate::plugin::bus_runtime::{bus_json_string, BusRuntimeEntry};
-use crate::plugin::grants::{GrantState, GrantsStore};
-use crate::plugin::registry::{BusInfo, PluginEntry, RegistryError};
-use crate::plugin::Manifest;
+use crate::registry::driver::DriverRegistry;
+use crate::runtime::bus::{bus_json_string, BusRuntimeEntry};
+use crate::capability::grants::{GrantState, GrantsStore};
+use crate::registry::plugin::{BusInfo, PluginEntry, RegistryError};
+use crate::manifest::Manifest;
 use crate::registry::entries::{EntryTable, IdLocks};
 
 /// bus 群(`bus` / `bus_buffer` / `set_bus_grant` とその内部ヘルパー)を

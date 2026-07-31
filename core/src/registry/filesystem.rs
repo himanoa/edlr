@@ -12,10 +12,10 @@
 use std::sync::{Arc, Mutex};
 
 use crate::capability::GrantStorage;
-use crate::plugin::filesystem::{FilesystemConfig, FilesystemConfigStore};
-use crate::plugin::fs_runtime::{filesystem_json_string, FsRuntimeEntry};
-use crate::plugin::grants::GrantsStore;
-use crate::plugin::registry::{FilesystemInfo, PluginEntry, RegistryError};
+use crate::settings::filesystem::{FilesystemConfig, FilesystemConfigStore};
+use crate::runtime::fs::{filesystem_json_string, FsRuntimeEntry};
+use crate::capability::grants::GrantsStore;
+use crate::registry::plugin::{FilesystemInfo, PluginEntry, RegistryError};
 use crate::registry::entries::{EntryTable, IdLocks};
 use crate::registry::subject::RegistrySubject;
 
@@ -33,9 +33,9 @@ pub(crate) trait FilesystemEntry {
 }
 
 impl FilesystemEntry for PluginEntry {
-    type Subject = crate::plugin::Manifest;
+    type Subject = crate::manifest::Manifest;
 
-    fn manifest(&self) -> &crate::plugin::Manifest {
+    fn manifest(&self) -> &crate::manifest::Manifest {
         &self.manifest
     }
 
@@ -44,10 +44,10 @@ impl FilesystemEntry for PluginEntry {
     }
 }
 
-impl FilesystemEntry for crate::driver::registry::DriverEntry {
-    type Subject = crate::driver::manifest::DriverManifest;
+impl FilesystemEntry for crate::registry::driver::DriverEntry {
+    type Subject = crate::manifest::driver::DriverManifest;
 
-    fn manifest(&self) -> &crate::driver::manifest::DriverManifest {
+    fn manifest(&self) -> &crate::manifest::driver::DriverManifest {
         &self.manifest
     }
 

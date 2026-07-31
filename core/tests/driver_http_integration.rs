@@ -7,7 +7,7 @@
 //! are both made from `HostCtx` alone, so a direct call exercises exactly
 //! the same path a real guest call would.
 
-use edlr_core::plugin::host::{
+use edlr_core::host::plugin::{
     capabilities_json_string, HostCtx, WitDriverHttpHost as _, WitHttpError, WitHttpRequest,
     FS_LIST_LIMIT, FS_READ_LIMIT, HTTP_MAX_BODY, HTTP_TIMEOUT,
 };

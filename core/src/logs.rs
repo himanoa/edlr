@@ -135,7 +135,7 @@ mod tests {
     fn format_log_frame_produces_the_wire_shape() {
         let frame = format_log_frame(
             "info",
-            "edlr_core::plugin",
+            "edlr_core::registry::plugin",
             "2026-07-28T12:00:00.000Z",
             "hello",
         );
@@ -143,7 +143,7 @@ mod tests {
         assert_eq!(v["type"], "event");
         assert_eq!(v["kind"], "log");
         assert_eq!(v["level"], "info");
-        assert_eq!(v["target"], "edlr_core::plugin");
+        assert_eq!(v["target"], "edlr_core::registry::plugin");
         assert_eq!(v["timestamp"], "2026-07-28T12:00:00.000Z");
         assert_eq!(v["message"], "hello");
     }

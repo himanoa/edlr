@@ -49,9 +49,9 @@ fn drivers_list_returns_the_dir_and_the_topics() {
 #[test]
 fn drivers_list_carries_the_disabled_reason() {
     let bus = edlr_driver_channel::Bus::new();
-    let drivers = crate::driver::registry::tests::test_registry_without_ed_state(bus);
-    drivers.push(crate::driver::registry::DriverEntry {
-        manifest: crate::driver::manifest::DriverManifest {
+    let drivers = crate::registry::driver::tests::test_registry_without_ed_state(bus);
+    drivers.push(crate::registry::driver::DriverEntry {
+        manifest: crate::manifest::driver::DriverManifest {
             id: "broken-driver".into(),
             name: "Broken Driver".into(),
             version: "0.1.0".into(),
@@ -63,7 +63,7 @@ fn drivers_list_carries_the_disabled_reason() {
             sidecars: Vec::new(),
             filesystem: Vec::new(),
         },
-        state: crate::driver::DriverState::Disabled {
+        state: crate::registry::driver::DriverState::Disabled {
             reason: "init() failed: boom".to_string(),
         },
         settings_json: std::sync::Arc::new(std::sync::Mutex::new("{}".to_string())),
@@ -128,7 +128,7 @@ fn plugins_list_includes_bus_requests_with_their_resolution() {
 
 #[test]
 fn plugins_list_includes_schedules_with_spec_strings_and_next() {
-    let registry = crate::plugin::registry::tests::test_registry_with_schedule();
+    let registry = crate::registry::plugin::tests::test_registry_with_schedule();
     let result = handle_rpc_with_drivers(
         Some(&registry),
         None,
@@ -192,11 +192,11 @@ fn plugins_list_reports_empty_schedules_array_when_none_declared() {
 /// (常に `true` を返す実装でも通ってしまう単一ケースを避ける)。
 #[test]
 fn plugins_list_reports_unresolved_when_the_driver_is_not_installed() {
-    let empty_drivers = crate::driver::registry::tests::test_registry_without_ed_state(
+    let empty_drivers = crate::registry::driver::tests::test_registry_without_ed_state(
         edlr_driver_channel::Bus::new(),
     );
     let registry =
-        crate::plugin::registry::tests::test_registry_with_bus_request_using(empty_drivers);
+        crate::registry::plugin::tests::test_registry_with_bus_request_using(empty_drivers);
     let result = handle_rpc_with_drivers(
         Some(&registry),
         None,
@@ -222,9 +222,9 @@ fn plugins_list_reports_unresolved_when_the_driver_is_not_installed() {
 /// 組み立てる)。
 fn test_registries() -> (Registry, DriverRegistry) {
     let drivers =
-        crate::driver::registry::tests::test_registry(edlr_driver_channel::Bus::new());
+        crate::registry::driver::tests::test_registry(edlr_driver_channel::Bus::new());
     let registry =
-        crate::plugin::registry::tests::test_registry_with_bus_request_using(drivers.clone());
+        crate::registry::plugin::tests::test_registry_with_bus_request_using(drivers.clone());
     (registry, drivers)
 }
 
@@ -308,7 +308,7 @@ async fn attached_log_frames_reach_the_replay_buffer_and_broadcast() {
 #[tokio::test]
 async fn plugin_ui_serves_granted_assets_with_csp_and_404s_everything_else() {
     use tower::ServiceExt;
-    let (registry, tmp) = crate::plugin::registry::tests::test_registry_with_dashboard();
+    let (registry, tmp) = crate::registry::plugin::tests::test_registry_with_dashboard();
     let ui_dir = tmp.path().join("plugins").join("widgety").join("ui");
     std::fs::create_dir_all(&ui_dir).unwrap();
     std::fs::write(ui_dir.join("index.html"), "<html>w</html>").unwrap();
@@ -394,7 +394,7 @@ async fn plugin_ui_serves_granted_assets_with_csp_and_404s_everything_else() {
 
 #[test]
 fn set_dashboard_grant_rpc_returns_full_dashboard_list() {
-    let (registry, tmp) = crate::plugin::registry::tests::test_registry_with_dashboard();
+    let (registry, tmp) = crate::registry::plugin::tests::test_registry_with_dashboard();
     let ui_dir = tmp.path().join("plugins").join("widgety").join("ui");
     std::fs::create_dir_all(&ui_dir).unwrap();
     std::fs::write(ui_dir.join("index.html"), "<html></html>").unwrap();
@@ -444,7 +444,7 @@ fn set_dashboard_grant_rpc_returns_full_dashboard_list() {
 
 #[test]
 fn dashboard_list_excludes_ungranted_widgets() {
-    let (registry, _tmp) = crate::plugin::registry::tests::test_registry_with_dashboard();
+    let (registry, _tmp) = crate::registry::plugin::tests::test_registry_with_dashboard();
     let widgets = handle_rpc_with_drivers(
         Some(&registry),
         None,
@@ -457,7 +457,7 @@ fn dashboard_list_excludes_ungranted_widgets() {
 
 #[test]
 fn set_dashboard_grant_requires_plugin_widget_and_granted() {
-    let (registry, _tmp) = crate::plugin::registry::tests::test_registry_with_dashboard();
+    let (registry, _tmp) = crate::registry::plugin::tests::test_registry_with_dashboard();
     assert!(handle_rpc_with_drivers(
         Some(&registry),
         None,
@@ -548,7 +548,7 @@ fn drivers_set_capabilities_persists_the_grant() {
 #[test]
 fn drivers_set_sidecar_config_requires_driver_name_and_config() {
     let (drivers, _tmp) =
-        crate::driver::registry::tests::test_registry_with_sidecar_and_filesystem();
+        crate::registry::driver::tests::test_registry_with_sidecar_and_filesystem();
 
     let err = handle_rpc_with_drivers(
         None,
@@ -581,7 +581,7 @@ fn drivers_set_sidecar_config_requires_driver_name_and_config() {
 #[test]
 fn drivers_set_sidecar_grant_requires_driver_name_and_granted() {
     let (drivers, _tmp) =
-        crate::driver::registry::tests::test_registry_with_sidecar_and_filesystem();
+        crate::registry::driver::tests::test_registry_with_sidecar_and_filesystem();
 
     let err = handle_rpc_with_drivers(
         None,
@@ -614,7 +614,7 @@ fn drivers_set_sidecar_grant_requires_driver_name_and_granted() {
 #[test]
 fn drivers_sidecar_control_requires_driver_name_and_action() {
     let (drivers, _tmp) =
-        crate::driver::registry::tests::test_registry_with_sidecar_and_filesystem();
+        crate::registry::driver::tests::test_registry_with_sidecar_and_filesystem();
 
     let err = handle_rpc_with_drivers(
         None,
@@ -656,7 +656,7 @@ fn drivers_sidecar_control_requires_driver_name_and_action() {
 #[test]
 fn drivers_set_filesystem_config_requires_driver_name_and_config() {
     let (drivers, _tmp) =
-        crate::driver::registry::tests::test_registry_with_sidecar_and_filesystem();
+        crate::registry::driver::tests::test_registry_with_sidecar_and_filesystem();
 
     let err = handle_rpc_with_drivers(
         None,
@@ -689,7 +689,7 @@ fn drivers_set_filesystem_config_requires_driver_name_and_config() {
 #[test]
 fn drivers_set_filesystem_grant_requires_driver_name_and_granted() {
     let (drivers, _tmp) =
-        crate::driver::registry::tests::test_registry_with_sidecar_and_filesystem();
+        crate::registry::driver::tests::test_registry_with_sidecar_and_filesystem();
 
     let err = handle_rpc_with_drivers(
         None,
@@ -729,7 +729,7 @@ fn drivers_set_filesystem_grant_requires_driver_name_and_granted() {
 #[test]
 fn drivers_set_sidecar_grant_persists_and_returns_the_full_sidecar_array() {
     let (drivers, _tmp) =
-        crate::driver::registry::tests::test_registry_with_sidecar_and_filesystem();
+        crate::registry::driver::tests::test_registry_with_sidecar_and_filesystem();
 
     handle_rpc_with_drivers(
         None,
@@ -764,7 +764,7 @@ fn drivers_set_sidecar_grant_persists_and_returns_the_full_sidecar_array() {
 #[test]
 fn drivers_set_filesystem_grant_rejects_granting_without_a_configured_path() {
     let (drivers, _tmp) =
-        crate::driver::registry::tests::test_registry_with_sidecar_and_filesystem();
+        crate::registry::driver::tests::test_registry_with_sidecar_and_filesystem();
 
     let err = handle_rpc_with_drivers(
         None,
@@ -784,7 +784,7 @@ fn drivers_set_filesystem_grant_rejects_granting_without_a_configured_path() {
 #[test]
 fn drivers_sidecar_control_rejects_starting_an_ungranted_sidecar() {
     let (drivers, _tmp) =
-        crate::driver::registry::tests::test_registry_with_sidecar_and_filesystem();
+        crate::registry::driver::tests::test_registry_with_sidecar_and_filesystem();
 
     handle_rpc_with_drivers(
         None,
@@ -822,7 +822,7 @@ fn drivers_sidecar_control_rejects_starting_an_ungranted_sidecar() {
 #[test]
 fn drivers_set_sidecar_config_reports_unknown_driver() {
     let (drivers, _tmp) =
-        crate::driver::registry::tests::test_registry_with_sidecar_and_filesystem();
+        crate::registry::driver::tests::test_registry_with_sidecar_and_filesystem();
     let err = handle_rpc_with_drivers(
         None,
         Some(&drivers),
@@ -840,7 +840,7 @@ fn drivers_set_sidecar_config_reports_unknown_driver() {
 #[test]
 fn drivers_set_sidecar_grant_reports_unknown_driver() {
     let (drivers, _tmp) =
-        crate::driver::registry::tests::test_registry_with_sidecar_and_filesystem();
+        crate::registry::driver::tests::test_registry_with_sidecar_and_filesystem();
     let err = handle_rpc_with_drivers(
         None,
         Some(&drivers),
@@ -854,7 +854,7 @@ fn drivers_set_sidecar_grant_reports_unknown_driver() {
 #[test]
 fn drivers_sidecar_control_reports_unknown_driver() {
     let (drivers, _tmp) =
-        crate::driver::registry::tests::test_registry_with_sidecar_and_filesystem();
+        crate::registry::driver::tests::test_registry_with_sidecar_and_filesystem();
     let err = handle_rpc_with_drivers(
         None,
         Some(&drivers),
@@ -868,7 +868,7 @@ fn drivers_sidecar_control_reports_unknown_driver() {
 #[test]
 fn drivers_set_filesystem_config_reports_unknown_driver() {
     let (drivers, _tmp) =
-        crate::driver::registry::tests::test_registry_with_sidecar_and_filesystem();
+        crate::registry::driver::tests::test_registry_with_sidecar_and_filesystem();
     let err = handle_rpc_with_drivers(
         None,
         Some(&drivers),
@@ -886,7 +886,7 @@ fn drivers_set_filesystem_config_reports_unknown_driver() {
 #[test]
 fn drivers_set_filesystem_grant_reports_unknown_driver() {
     let (drivers, _tmp) =
-        crate::driver::registry::tests::test_registry_with_sidecar_and_filesystem();
+        crate::registry::driver::tests::test_registry_with_sidecar_and_filesystem();
     let err = handle_rpc_with_drivers(
         None,
         Some(&drivers),

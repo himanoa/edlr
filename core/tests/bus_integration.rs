@@ -27,7 +27,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use edlr_core::event::Event;
-use edlr_core::plugin::{PluginState, Registry};
+use edlr_core::registry::plugin::{PluginState, Registry};
 
 /// スコープを抜けるとき(正常終了・パニックのどちらでも)
 /// `Registry::shutdown_bus_subscribers` を呼ぶ。`Registry` は `Clone`
@@ -66,7 +66,7 @@ async fn a_publish_round_trips_through_the_driver_to_a_subscriber() {
     assert!(
         matches!(
             driver_infos[0].state,
-            edlr_core::driver::DriverState::Running
+            edlr_core::registry::driver::DriverState::Running
         ),
         "ed-state driver should init successfully, got {:?}",
         driver_infos[0].state
@@ -197,16 +197,19 @@ fn start_drivers_for_test(
     drivers_dir: &Path,
     tmp: &Path,
     bus: edlr_driver_channel::Bus,
-) -> edlr_core::driver::DriverRegistry {
-    use edlr_core::plugin::*;
-    edlr_core::driver::start_drivers(
+) -> edlr_core::registry::driver::DriverRegistry {
+    use edlr_core::capability::grants::GrantsStore;
+    use edlr_core::settings::filesystem::FilesystemConfigStore;
+    use edlr_core::settings::sidecar::SidecarConfigStore;
+    use edlr_core::settings::store::SettingsStore;
+    edlr_core::runner::driver::start_drivers(
         drivers_dir,
         SettingsStore::new(tmp.join("driver-settings")),
         SidecarConfigStore::new(tmp.join("driver-settings")),
         FilesystemConfigStore::new(tmp.join("driver-settings"), Vec::new()),
         GrantsStore::new_for_drivers(tmp.join("driver-grants")),
         bus,
-        edlr_core::driver::host::DriverHost::new().expect("driver host should build"),
+        edlr_core::host::driver::DriverHost::new().expect("driver host should build"),
     )
 }
 
@@ -216,9 +219,15 @@ fn start_plugins_for_test(
     tmp: &Path,
     router: &edlr_core::router::Router,
     bus: edlr_driver_channel::Bus,
-    drivers: edlr_core::driver::DriverRegistry,
-) -> edlr_core::plugin::Registry {
-    use edlr_core::plugin::*;
+    drivers: edlr_core::registry::driver::DriverRegistry,
+) -> edlr_core::registry::plugin::Registry {
+    use edlr_core::capability::grants::GrantsStore;
+    use edlr_core::host::plugin::PluginHost;
+    use edlr_core::runner::plugin::start_plugins;
+    use edlr_core::schedule::store::ScheduleStore;
+    use edlr_core::settings::filesystem::FilesystemConfigStore;
+    use edlr_core::settings::sidecar::SidecarConfigStore;
+    use edlr_core::settings::store::SettingsStore;
     start_plugins(
         plugins_dir,
         SettingsStore::new(tmp.join("settings")),

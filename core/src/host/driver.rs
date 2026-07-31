@@ -215,7 +215,7 @@ impl DriverHttpHost for DriverCtx {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone();
-        let hosts = crate::plugin::host::parse_capability_hosts(&raw);
+        let hosts = crate::host::plugin::parse_capability_hosts(&raw);
         check_http_permission(&hosts, &req.url).map_err(WitDriverError::PermissionDenied)?;
 
         let driver_request = edlr_driver_http::HttpRequest {
@@ -289,7 +289,7 @@ impl DriverCtx {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone();
-        let entries = crate::plugin::sidecar_runtime::parse_sidecars(&raw);
+        let entries = crate::runtime::sidecar::parse_sidecars(&raw);
 
         resolve_sidecar(&entries, name).map_err(|e| match e {
             SidecarResolveError::Unknown(m) => WitProcessError::UnknownSidecar(m),
@@ -347,7 +347,7 @@ impl DriverProcessHost for DriverCtx {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone();
-        if !crate::plugin::sidecar_runtime::parse_sidecars(&raw).contains_key(&name) {
+        if !crate::runtime::sidecar::parse_sidecars(&raw).contains_key(&name) {
             return Err(WitProcessError::UnknownSidecar(format!(
                 "no such sidecar: {name}"
             )));
@@ -373,7 +373,7 @@ impl DriverCtx {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone();
-        let entries = crate::plugin::fs_runtime::parse_filesystem(&raw);
+        let entries = crate::runtime::fs::parse_filesystem(&raw);
 
         resolve_root(&entries, root, need_write).map_err(|e| match e {
             RootResolveError::Unknown(m) => WitFsError::UnknownRoot(m),
@@ -675,8 +675,8 @@ mod tests {
     fn sidecar_entry(
         granted: bool,
         command: &str,
-    ) -> crate::plugin::sidecar_runtime::SidecarRuntimeEntry {
-        crate::plugin::sidecar_runtime::SidecarRuntimeEntry {
+    ) -> crate::runtime::sidecar::SidecarRuntimeEntry {
+        crate::runtime::sidecar::SidecarRuntimeEntry {
             name: "tts".to_string(),
             granted,
             command: command.to_string(),
@@ -689,8 +689,8 @@ mod tests {
         granted: bool,
         mode: &str,
         path: &str,
-    ) -> crate::plugin::fs_runtime::FsRuntimeEntry {
-        crate::plugin::fs_runtime::FsRuntimeEntry {
+    ) -> crate::runtime::fs::FsRuntimeEntry {
+        crate::runtime::fs::FsRuntimeEntry {
             name: "exports".to_string(),
             granted,
             mode: mode.to_string(),
@@ -700,7 +700,7 @@ mod tests {
 
     #[test]
     fn ensure_started_without_grant_is_permission_denied() {
-        use crate::plugin::sidecar_runtime::sidecars_json_string;
+        use crate::runtime::sidecar::sidecars_json_string;
         let mut ctx = test_driver_ctx_with(
             &sidecars_json_string(&[sidecar_entry(false, "/bin/sh")]),
             "[]",
@@ -717,7 +717,7 @@ mod tests {
 
     #[test]
     fn ensure_started_unknown_sidecar_is_reported_as_such() {
-        use crate::plugin::sidecar_runtime::sidecars_json_string;
+        use crate::runtime::sidecar::sidecars_json_string;
         let mut ctx = test_driver_ctx_with(
             &sidecars_json_string(&[sidecar_entry(true, "/bin/sh")]),
             "[]",
@@ -734,7 +734,7 @@ mod tests {
 
     #[test]
     fn ensure_started_granted_but_unconfigured_command_is_not_configured() {
-        use crate::plugin::sidecar_runtime::sidecars_json_string;
+        use crate::runtime::sidecar::sidecars_json_string;
         let mut ctx = test_driver_ctx_with(&sidecars_json_string(&[sidecar_entry(true, "")]), "[]");
 
         let err = ctx
@@ -748,7 +748,7 @@ mod tests {
 
     #[test]
     fn read_unknown_root_is_reported_as_such() {
-        use crate::plugin::fs_runtime::filesystem_json_string;
+        use crate::runtime::fs::filesystem_json_string;
         let dir = tempfile::tempdir().unwrap();
         let mut ctx = test_driver_ctx_with(
             "[]",
@@ -766,7 +766,7 @@ mod tests {
 
     #[test]
     fn write_under_read_mode_root_is_permission_denied() {
-        use crate::plugin::fs_runtime::filesystem_json_string;
+        use crate::runtime::fs::filesystem_json_string;
         let dir = tempfile::tempdir().unwrap();
         let mut ctx = test_driver_ctx_with(
             "[]",

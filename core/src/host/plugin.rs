@@ -427,7 +427,7 @@ impl HostCtx {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone();
-        let entries = crate::plugin::bus_runtime::parse_bus(&raw);
+        let entries = crate::runtime::bus::parse_bus(&raw);
         check_bus_permission(&entries, driver, topic, direction)
             .map_err(WitBusError::PermissionDenied)
     }
@@ -463,7 +463,7 @@ impl HostCtx {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone();
-        let entries = crate::plugin::sidecar_runtime::parse_sidecars(&raw);
+        let entries = crate::runtime::sidecar::parse_sidecars(&raw);
 
         resolve_sidecar(&entries, name).map_err(|e| match e {
             SidecarResolveError::Unknown(m) => WitProcessError::UnknownSidecar(m),
@@ -538,7 +538,7 @@ impl DriverProcessHost for HostCtx {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone();
-        if !crate::plugin::sidecar_runtime::parse_sidecars(&raw).contains_key(&name) {
+        if !crate::runtime::sidecar::parse_sidecars(&raw).contains_key(&name) {
             return Err(WitProcessError::UnknownSidecar(format!(
                 "no such sidecar: {name}"
             )));
@@ -581,7 +581,7 @@ impl HostCtx {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone();
-        let entries = crate::plugin::fs_runtime::parse_filesystem(&raw);
+        let entries = crate::runtime::fs::parse_filesystem(&raw);
 
         resolve_root(&entries, root, need_write).map_err(|e| match e {
             RootResolveError::Unknown(m) => WitFsError::UnknownRoot(m),
@@ -1032,8 +1032,8 @@ mod tests {
         granted: bool,
         mode: &str,
         path: &str,
-    ) -> crate::plugin::fs_runtime::FsRuntimeEntry {
-        crate::plugin::fs_runtime::FsRuntimeEntry {
+    ) -> crate::runtime::fs::FsRuntimeEntry {
+        crate::runtime::fs::FsRuntimeEntry {
             name: "exports".to_string(),
             granted,
             mode: mode.to_string(),
@@ -1043,7 +1043,7 @@ mod tests {
 
     #[test]
     fn fs_calls_without_grant_are_permission_denied() {
-        use crate::plugin::fs_runtime::filesystem_json_string;
+        use crate::runtime::fs::filesystem_json_string;
         let dir = tempfile::tempdir().unwrap();
         let mut ctx = fs_ctx(&filesystem_json_string(&[fs_entry(
             false,
@@ -1059,7 +1059,7 @@ mod tests {
 
     #[test]
     fn unknown_root_is_reported_as_such() {
-        use crate::plugin::fs_runtime::filesystem_json_string;
+        use crate::runtime::fs::filesystem_json_string;
         let dir = tempfile::tempdir().unwrap();
         let mut ctx = fs_ctx(&filesystem_json_string(&[fs_entry(
             true,
@@ -1075,7 +1075,7 @@ mod tests {
 
     #[test]
     fn granted_but_unconfigured_root_is_not_configured() {
-        use crate::plugin::fs_runtime::filesystem_json_string;
+        use crate::runtime::fs::filesystem_json_string;
         let mut ctx = fs_ctx(&filesystem_json_string(&[fs_entry(true, "read-write", "")]));
 
         let err = ctx
@@ -1086,7 +1086,7 @@ mod tests {
 
     #[test]
     fn read_mode_rejects_every_mutating_call() {
-        use crate::plugin::fs_runtime::filesystem_json_string;
+        use crate::runtime::fs::filesystem_json_string;
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("a.txt"), b"x").unwrap();
         let mut ctx = fs_ctx(&filesystem_json_string(&[fs_entry(
@@ -1115,7 +1115,7 @@ mod tests {
 
     #[test]
     fn granted_read_write_root_round_trips_and_still_refuses_escapes() {
-        use crate::plugin::fs_runtime::filesystem_json_string;
+        use crate::runtime::fs::filesystem_json_string;
         let dir = tempfile::tempdir().unwrap();
         let mut ctx = fs_ctx(&filesystem_json_string(&[fs_entry(
             true,
@@ -1140,8 +1140,8 @@ mod tests {
     fn runtime_entry(
         granted: bool,
         command: &str,
-    ) -> crate::plugin::sidecar_runtime::SidecarRuntimeEntry {
-        crate::plugin::sidecar_runtime::SidecarRuntimeEntry {
+    ) -> crate::runtime::sidecar::SidecarRuntimeEntry {
+        crate::runtime::sidecar::SidecarRuntimeEntry {
             name: "tts".to_string(),
             granted,
             command: command.to_string(),
@@ -1152,7 +1152,7 @@ mod tests {
 
     #[test]
     fn ensure_started_without_grant_is_permission_denied() {
-        use crate::plugin::sidecar_runtime::sidecars_json_string;
+        use crate::runtime::sidecar::sidecars_json_string;
         let mut ctx = sidecar_ctx(&sidecars_json_string(&[runtime_entry(false, "/bin/sh")]));
 
         let err = ctx
@@ -1163,7 +1163,7 @@ mod tests {
 
     #[test]
     fn unknown_sidecar_name_is_reported_as_such() {
-        use crate::plugin::sidecar_runtime::sidecars_json_string;
+        use crate::runtime::sidecar::sidecars_json_string;
         let mut ctx = sidecar_ctx(&sidecars_json_string(&[runtime_entry(true, "/bin/sh")]));
 
         let err = ctx
@@ -1174,7 +1174,7 @@ mod tests {
 
     #[test]
     fn granted_but_unconfigured_command_is_not_configured() {
-        use crate::plugin::sidecar_runtime::sidecars_json_string;
+        use crate::runtime::sidecar::sidecars_json_string;
         let mut ctx = sidecar_ctx(&sidecars_json_string(&[runtime_entry(true, "")]));
 
         let err = ctx
@@ -1185,7 +1185,7 @@ mod tests {
 
     #[test]
     fn granted_and_configured_sidecar_starts_and_stops() {
-        use crate::plugin::sidecar_runtime::sidecars_json_string;
+        use crate::runtime::sidecar::sidecars_json_string;
         let mut ctx = sidecar_ctx(&sidecars_json_string(&[runtime_entry(true, "/bin/sh")]));
 
         let instances = ctx.ensure_started("tts".to_string()).expect("start");
@@ -1210,7 +1210,7 @@ mod tests {
     /// `ProcessDriver::stop_detached`).
     #[test]
     fn stop_returns_promptly_even_when_the_sidecar_ignores_sigterm() {
-        use crate::plugin::sidecar_runtime::{sidecars_json_string, SidecarRuntimeEntry};
+        use crate::runtime::sidecar::{sidecars_json_string, SidecarRuntimeEntry};
 
         let sidecars_json = sidecars_json_string(&[SidecarRuntimeEntry {
             name: "tts".to_string(),
@@ -1251,8 +1251,8 @@ mod tests {
         );
     }
 
-    fn entry_granted() -> crate::plugin::bus_runtime::BusRuntimeEntry {
-        crate::plugin::bus_runtime::BusRuntimeEntry {
+    fn entry_granted() -> crate::runtime::bus::BusRuntimeEntry {
+        crate::runtime::bus::BusRuntimeEntry {
             driver: "ed-state".into(),
             granted: true,
             publish: vec!["ship-status".into()],
@@ -1260,7 +1260,7 @@ mod tests {
         }
     }
 
-    fn entry_ungranted() -> crate::plugin::bus_runtime::BusRuntimeEntry {
+    fn entry_ungranted() -> crate::runtime::bus::BusRuntimeEntry {
         let mut e = entry_granted();
         e.granted = false;
         e
@@ -1268,9 +1268,9 @@ mod tests {
 
     fn test_ctx_with_bus(
         bus: edlr_driver_channel::Bus,
-        entries: &[crate::plugin::bus_runtime::BusRuntimeEntry],
+        entries: &[crate::runtime::bus::BusRuntimeEntry],
     ) -> HostCtx {
-        use crate::plugin::bus_runtime::bus_json_string;
+        use crate::runtime::bus::bus_json_string;
         HostCtx::new(
             "translator".to_string(),
             Arc::new(Mutex::new("{}".to_string())),

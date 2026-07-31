@@ -1,4 +1,4 @@
-use edlr_core::plugin::host::{
+use edlr_core::host::plugin::{
     HostCtx, PluginHost, PluginInstance, FS_LIST_LIMIT, FS_READ_LIMIT, HTTP_MAX_BODY, HTTP_TIMEOUT,
 };
 use edlr_driver_http::HttpDriver;

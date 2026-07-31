@@ -21,7 +21,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use crate::plugin::registry::RegistryError;
+use crate::registry::plugin::RegistryError;
 use crate::registry::entries::EntryTable;
 use crate::registry::subject::RegistrySubject;
 use crate::settings;
@@ -37,10 +37,10 @@ pub(crate) trait SettingsEntry {
     fn settings_json(&self) -> &Arc<Mutex<String>>;
 }
 
-impl SettingsEntry for crate::plugin::registry::PluginEntry {
-    type Subject = crate::plugin::Manifest;
+impl SettingsEntry for crate::registry::plugin::PluginEntry {
+    type Subject = crate::manifest::Manifest;
 
-    fn manifest(&self) -> &crate::plugin::Manifest {
+    fn manifest(&self) -> &crate::manifest::Manifest {
         &self.manifest
     }
 
@@ -49,10 +49,10 @@ impl SettingsEntry for crate::plugin::registry::PluginEntry {
     }
 }
 
-impl SettingsEntry for crate::driver::registry::DriverEntry {
-    type Subject = crate::driver::manifest::DriverManifest;
+impl SettingsEntry for crate::registry::driver::DriverEntry {
+    type Subject = crate::manifest::driver::DriverManifest;
 
-    fn manifest(&self) -> &crate::driver::manifest::DriverManifest {
+    fn manifest(&self) -> &crate::manifest::driver::DriverManifest {
         &self.manifest
     }
 

@@ -3,6 +3,10 @@ use std::fmt;
 use std::fs;
 use std::path::Path;
 
+use crate::capability::request::{
+    BusRequest, CapabilityRequest, DashboardWidget, FilesystemRequest, SidecarRequest,
+};
+
 pub mod driver;
 
 /// `select` の候補 1 件。
@@ -180,12 +184,6 @@ impl SettingField {
         matches!(self, SettingField::Secret { .. })
     }
 }
-
-// Phase 1 で capability/request.rs へ移動した型の旧パス互換(削除は Phase 6)。
-pub use crate::capability::request::{
-    BusRequest, CapabilityRequest, DashboardWidget, FilesystemMode, FilesystemRequest,
-    SidecarRequest, WidgetSize,
-};
 
 /// `[[schedule]]` 1 件の実行タイミング。`cron::Schedule` は `PartialEq` を
 /// 持たず `Manifest` の derive を壊すため、検証済みの元の cron 式文字列を

@@ -3,7 +3,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
-use crate::plugin::Manifest;
+use crate::manifest::Manifest;
 
 /// RPC 応答用に、秘密情報を取り除いた設定値と「設定済みの秘密情報キー」の
 /// 一覧に分ける。
@@ -196,7 +196,7 @@ impl SettingsStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::plugin::SettingField;
+    use crate::manifest::SettingField;
     use std::fs;
 
     fn sample_manifest() -> Manifest {
@@ -685,7 +685,7 @@ mod tests {
             label: "話者".into(),
             default: String::new(),
             options: None,
-            options_from: Some(crate::plugin::OptionsFrom {
+            options_from: Some(crate::manifest::OptionsFrom {
                 driver: "coeiroink".into(),
                 topic: "speakers".into(),
             }),
@@ -713,7 +713,7 @@ mod tests {
             label: "話者".into(),
             default: String::new(),
             options: None,
-            options_from: Some(crate::plugin::OptionsFrom {
+            options_from: Some(crate::manifest::OptionsFrom {
                 driver: "coeiroink".into(),
                 topic: "speakers".into(),
             }),

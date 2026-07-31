@@ -12,7 +12,7 @@
 
 use edlr_driver_channel::Bus;
 
-use crate::plugin::manifest::{SelectOption, SettingField};
+use crate::manifest::{SelectOption, SettingField};
 
 /// `settings` 内の `options-from` を持つ select について、retained 値から候補を
 /// 解決して `options` に埋める。
@@ -59,7 +59,7 @@ mod tests {
             label: "話者".into(),
             default: String::new(),
             options: None,
-            options_from: Some(crate::plugin::manifest::OptionsFrom {
+            options_from: Some(crate::manifest::OptionsFrom {
                 driver: "coeiroink".into(),
                 topic: "speakers".into(),
             }),

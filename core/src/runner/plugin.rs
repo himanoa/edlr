@@ -113,20 +113,20 @@ use tokio::sync::broadcast;
 
 use edlr_driver_channel::{Bus, Delivery};
 
-use crate::driver::registry::DriverRegistry;
+use crate::registry::driver::DriverRegistry;
 use crate::event::Event;
-use crate::plugin::bus_runtime::{bus_json_string, parse_bus, BusRuntimeEntry};
-use crate::plugin::dropped::DropCounters;
-use crate::plugin::filesystem::FilesystemConfigStore;
-use crate::plugin::grants::GrantsStore;
-use crate::plugin::host::{HostCtx, PluginCallError, PluginHost, PluginInstance};
-use crate::plugin::manifest::{load_manifest, matches_event};
-use crate::plugin::registry::{PluginEntry, PluginState, Registry};
-use crate::plugin::schedule::{Clock, ScheduleState, ScheduleView};
-use crate::plugin::schedule_store::ScheduleStore;
-use crate::plugin::settings::SettingsStore;
-use crate::plugin::sidecar::SidecarConfigStore;
-use crate::plugin::Manifest;
+use crate::runtime::bus::{bus_json_string, parse_bus, BusRuntimeEntry};
+use crate::runtime::dropped::DropCounters;
+use crate::settings::filesystem::FilesystemConfigStore;
+use crate::capability::grants::GrantsStore;
+use crate::host::plugin::{HostCtx, PluginCallError, PluginHost, PluginInstance};
+use crate::manifest::{load_manifest, matches_event};
+use crate::registry::plugin::{PluginEntry, PluginState, Registry};
+use crate::schedule::{Clock, ScheduleState, ScheduleView};
+use crate::schedule::store::ScheduleStore;
+use crate::settings::store::SettingsStore;
+use crate::settings::sidecar::SidecarConfigStore;
+use crate::manifest::Manifest;
 use crate::router::Router;
 use crate::runner::bootstrap::{build_initial_buffers, InitialBuffers};
 
@@ -1172,7 +1172,7 @@ mod tests {
     /// (「何も送っていないから届かない」で偽陽性になるのを避けるため)。
     #[tokio::test]
     async fn bus_subscriber_forwards_only_while_still_granted() {
-        use crate::plugin::bus_runtime::{bus_json_string, BusRuntimeEntry};
+        use crate::runtime::bus::{bus_json_string, BusRuntimeEntry};
 
         let bus = edlr_driver_channel::Bus::new();
         let (dtx, _drx) = std_mpsc::sync_channel(4);

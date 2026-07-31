@@ -1,6 +1,6 @@
-use crate::driver::DriverRegistry;
+use crate::registry::driver::DriverRegistry;
 use crate::event::Event;
-use crate::plugin::Registry;
+use crate::registry::plugin::Registry;
 use crate::router::Router;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
@@ -251,7 +251,7 @@ async fn plugin_ui_handler(
         let file = registry.dashboard_asset_path(&plugin, &widget, &path)?;
         std::fs::read(&file)
             .map(|bytes| (bytes, content_type_for(&file)))
-            .map_err(|_| crate::plugin::registry::RegistryError::UnknownDashboard(widget))
+            .map_err(|_| crate::registry::plugin::RegistryError::UnknownDashboard(widget))
     })
     .await;
     match result {

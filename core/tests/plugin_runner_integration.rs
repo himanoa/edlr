@@ -1,14 +1,15 @@
-use edlr_core::driver::host::DriverHost;
-use edlr_core::driver::{start_drivers, DriverRegistry};
+use edlr_core::host::driver::DriverHost;
+use edlr_core::runner::driver::start_drivers;
+use edlr_core::registry::driver::DriverRegistry;
 use edlr_core::event::Event;
-use edlr_core::plugin::filesystem::FilesystemConfigStore;
-use edlr_core::plugin::grants::GrantsStore;
-use edlr_core::plugin::host::PluginHost;
-use edlr_core::plugin::registry::PluginState;
-use edlr_core::plugin::runner::start_plugins;
-use edlr_core::plugin::schedule_store::ScheduleStore;
-use edlr_core::plugin::settings::SettingsStore;
-use edlr_core::plugin::sidecar::SidecarConfigStore;
+use edlr_core::settings::filesystem::FilesystemConfigStore;
+use edlr_core::capability::grants::GrantsStore;
+use edlr_core::host::plugin::PluginHost;
+use edlr_core::registry::plugin::PluginState;
+use edlr_core::runner::plugin::start_plugins;
+use edlr_core::schedule::store::ScheduleStore;
+use edlr_core::settings::store::SettingsStore;
+use edlr_core::settings::sidecar::SidecarConfigStore;
 use edlr_core::router::Router;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -111,7 +112,7 @@ default = true
 "#;
 
 fn state_of<'a>(
-    snapshot: &'a [(edlr_core::plugin::Manifest, PluginState)],
+    snapshot: &'a [(edlr_core::manifest::Manifest, PluginState)],
     id: &str,
 ) -> Option<&'a PluginState> {
     snapshot.iter().find(|(m, _)| m.id == id).map(|(_, s)| s)
@@ -540,7 +541,7 @@ async fn set_values_with_unknown_key_returns_err_and_leaves_values_unchanged() {
     let err = registry
         .set_values("hello-logger", &bad_values)
         .expect_err("unknown settings key should be rejected");
-    assert!(matches!(err, edlr_core::plugin::RegistryError::Settings(_)));
+    assert!(matches!(err, edlr_core::registry::plugin::RegistryError::Settings(_)));
 
     let after = registry
         .values("hello-logger")
