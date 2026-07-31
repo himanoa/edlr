@@ -249,7 +249,7 @@ async fn main() {
 
     // `DriverRegistry` は `Clone`(内部は `Arc` 共有)で安価に持ち回れるため、
     // プラグイン側に配線したのと同じインスタンスをそのまま `ServerState` にも
-    // 渡す(`server::bus_result_json` のドキュメント参照: 本番ではこの 2 つが
+    // 渡す(`rpc::render::bus_result_json` のドキュメント参照: 本番ではこの 2 つが
     // 同じ `DriverRegistry` を指すことを前提にしている)。
     let (registry, drivers) = match registry_and_drivers {
         Some((registry, drivers)) => (Some(registry), Some(drivers)),

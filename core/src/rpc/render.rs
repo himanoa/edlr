@@ -11,17 +11,6 @@ pub fn capabilities_result_json(
     })
 }
 
-/// `plugins/set-bus-grant` の result と `plugins/list` の各要素の `bus`
-/// フィールドに使う共通の JSON 形: `{ "bus": [...] }`(`sidecars_result_json`/
-/// `filesystem_result_json` と同じ流儀 -- 1 件だけの grant state ではなく、
-/// その plugin の bus 接続一覧全体を返す)。
-///
-/// `resolved` は渡された `bus: &[BusInfo]` の `BusInfo::resolved`
-/// (`Registry::build_bus_infos` が `Registry` 自身の保持する
-/// `DriverRegistry` から計算したもの)をそのまま使う -- 以前はここで
-/// `ServerState` の `DriverRegistry` から独立に再計算していたが、それは
-/// 同じ判定ロジックの二重管理になり、将来どちらか片方だけ直した変更が
-/// サイレントに食い違ってしまう(コードレビュー指摘)。
 /// `plugins/set-dashboard-grant`・`plugins/list` が共有する応答形。
 pub fn dashboard_result_json(
     dashboard: &[crate::registry::plugin::DashboardInfo],
@@ -43,6 +32,17 @@ pub fn dashboard_result_json(
     serde_json::json!({ "dashboard": items })
 }
 
+/// `plugins/set-bus-grant` の result と `plugins/list` の各要素の `bus`
+/// フィールドに使う共通の JSON 形: `{ "bus": [...] }`(`sidecars_result_json`/
+/// `filesystem_result_json` と同じ流儀 -- 1 件だけの grant state ではなく、
+/// その plugin の bus 接続一覧全体を返す)。
+///
+/// `resolved` は渡された `bus: &[BusInfo]` の `BusInfo::resolved`
+/// (`Registry::build_bus_infos` が `Registry` 自身の保持する
+/// `DriverRegistry` から計算したもの)をそのまま使う -- 以前はここで
+/// `ServerState` の `DriverRegistry` から独立に再計算していたが、それは
+/// 同じ判定ロジックの二重管理になり、将来どちらか片方だけ直した変更が
+/// サイレントに食い違ってしまう(コードレビュー指摘)。
 pub fn bus_result_json(bus: &[crate::registry::plugin::BusInfo]) -> serde_json::Value {
     let items: Vec<serde_json::Value> = bus
         .iter()
@@ -61,14 +61,6 @@ pub fn bus_result_json(bus: &[crate::registry::plugin::BusInfo]) -> serde_json::
     serde_json::json!({ "bus": items })
 }
 
-/// `plugins/list` の各要素の `schedules` フィールドに使う JSON:
-/// `{ "schedules": [...] }`(他の `*_result_json` と同じ流儀)。
-///
-/// `spec` は `ScheduleSpec::display_string()`(`"every {n}s"` /
-/// `"cron: {expr}"`)、`next` は ISO8601(ローカル時刻・オフセット付き)。
-/// `next` は `Registry::ScheduleInfo` のドキュメントコメントが説明する
-/// とおり、プラグインスレッドが `ScheduleView` へ公開した実際の発火予定時刻
-/// (未公開・Disabled のときだけその場の推定値へフォールバックする)。
 /// `plugins/list` の各要素の `dropped` フィールドに使う JSON:
 /// `{ "events": n, "busDeliveries": n }`。
 ///
@@ -83,6 +75,14 @@ pub fn dropped_result_json(dropped: &crate::runtime::dropped::DroppedCounts) -> 
     })
 }
 
+/// `plugins/list` の各要素の `schedules` フィールドに使う JSON:
+/// `{ "schedules": [...] }`(他の `*_result_json` と同じ流儀)。
+///
+/// `spec` は `ScheduleSpec::display_string()`(`"every {n}s"` /
+/// `"cron: {expr}"`)、`next` は ISO8601(ローカル時刻・オフセット付き)。
+/// `next` は `Registry::ScheduleInfo` のドキュメントコメントが説明する
+/// とおり、プラグインスレッドが `ScheduleView` へ公開した実際の発火予定時刻
+/// (未公開・Disabled のときだけその場の推定値へフォールバックする)。
 pub fn schedules_result_json(
     schedules: &[crate::registry::plugin::ScheduleInfo],
 ) -> serde_json::Value {
