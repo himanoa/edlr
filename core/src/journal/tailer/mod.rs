@@ -78,7 +78,11 @@ impl JournalTailer {
         if let Some(cur) = self.current.clone() {
             if !cur.is_file() {
                 let next = next_journal_after(&self.dir, &cur)?;
-                let latest = latest_journal(&self.dir)?;
+                let latest = if next.is_none() {
+                    latest_journal(&self.dir)?
+                } else {
+                    None
+                };
                 if let Some(next) = rotation_fallback(&cur, next, latest) {
                     self.current = Some(next);
                     self.pos = 0;
