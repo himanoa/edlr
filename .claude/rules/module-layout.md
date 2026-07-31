@@ -13,8 +13,8 @@ core は**機能名モジュール**で構成する。レイヤーディレク�
 | モジュール | 種別 | 責務 |
 |---|---|---|
 | `manifest/` | 純粋 | TOML → Manifest のパースと全体整合の検証(I/O は `load_manifest` だけ端に) |
-| `capability/` | 純粋 | capability の要求と承認(Request 型・fingerprint・GrantState + Storage trait) |
-| `settings/` | 純粋 | 設定の検証・マージ + Storage trait |
+| `capability/` | 純粋 | capability の要求と承認(Request 型・fingerprint・GrantState + Storage trait。`grants.rs` のディスク実装は公認の例外、→ pure-imperative-boundary.md) |
+| `settings/` | 純粋 | 設定の検証・マージ + Storage trait(`store.rs`/`filesystem.rs`/`sidecar.rs` のディスク実装は公認の例外、→ pure-imperative-boundary.md) |
 | `schedule/` | 純粋 | 発火計算 + 永続化 |
 | `rpc/` | 純粋 | RPC 解釈・JSON 整形(純粋関数群) |
 | `journal/` | 純粋 | discovery/parser/position/tailer |

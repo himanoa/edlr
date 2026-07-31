@@ -43,3 +43,20 @@ pub fn render_status(plugins: &[PluginStatus]) -> serde_json::Value { /* ... */ 
 
 1. 判断部分を純関数(値イン値アウト)に抽出する
 2. 副作用は trait(`capability::GrantStorage` など)越しにするか、命令的モジュール側に移す
+
+## 公認の例外: Storage trait のディスク実装ファイル
+
+純粋モジュール内で `Storage` 系 trait を定義し、その隣にディスク実装を
+置く構成(`capability::GrantStorage` + `settings::Storage` の実装)は例外。
+以下のファイルは `manifest::load_manifest` と同格の「I/O は端に」の例外として
+`std::fs` / `Mutex` の使用を認める:
+
+- `core/src/capability/grants.rs`
+- `core/src/settings/store.rs`
+- `core/src/settings/filesystem.rs`
+- `core/src/settings/sidecar.rs`
+
+trait 定義とモックは同じモジュール内の純粋なままに保ち、ディスクに触れる
+実装だけをこれらのファイルに閉じ込める。**ここ以外**の純粋モジュール内で
+`std::fs` / `Mutex` 等が見えたらレビューで弾く(新しい Storage 実装ファイルを
+足す場合はこのリストに追記すること)。

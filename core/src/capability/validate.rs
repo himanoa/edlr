@@ -2,7 +2,16 @@ use std::collections::HashSet;
 use std::path::Path;
 
 use crate::capability::request::BusRequest;
-use crate::manifest::{is_valid_id, ManifestError};
+
+/// id フィールド(driver / sidecar / filesystem / dashboard / schedule の
+/// name、`options-from` の driver・topic)に共通の字種検証。`[a-z0-9-]+` に
+/// マッチし、空でないこと。
+pub(crate) fn is_valid_id(id: &str) -> bool {
+    !id.is_empty()
+        && id
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+}
 
 /// capability の host エントリを検証する。
 ///
@@ -75,30 +84,27 @@ pub fn reject_invisible_chars(field: &str, s: &str) -> Result<(), String> {
 /// `[[bus]]` を検証・正規化する。`reason` は `capabilities` と同じく trim
 /// して不可視文字を拒否する(承認画面に出る文字列とフィンガープリントの
 /// 元になる文字列を byte 単位で一致させるため)。
-pub fn validate_bus(requests: &mut [BusRequest]) -> Result<(), ManifestError> {
+pub fn validate_bus(requests: &mut [BusRequest]) -> Result<(), String> {
     let mut seen = HashSet::new();
     for request in requests.iter_mut() {
         if !is_valid_id(&request.driver) {
-            return Err(ManifestError::BadBus(format!(
+            return Err(format!(
                 "bus driver must match [a-z0-9-]+: {}",
                 request.driver
-            )));
+            ));
         }
         if !seen.insert(request.driver.clone()) {
-            return Err(ManifestError::BadBus(format!(
-                "duplicate bus driver: {}",
-                request.driver
-            )));
+            return Err(format!("duplicate bus driver: {}", request.driver));
         }
         if request.publish.is_empty() && request.subscribe.is_empty() {
-            return Err(ManifestError::BadBus(format!(
+            return Err(format!(
                 "bus request must declare at least one publish or subscribe topic: {}",
                 request.driver
-            )));
+            ));
         }
 
         for topic in request.publish.iter().chain(request.subscribe.iter()) {
-            edlr_driver_channel::topic::validate_name(topic).map_err(ManifestError::BadBus)?;
+            edlr_driver_channel::topic::validate_name(topic)?;
         }
         // `[[topics]]`(`crate::manifest::driver::validate_topics`)と同じ
         // 規律: `publish`/`subscribe` それぞれの中で同じトピック名が重複して
@@ -113,21 +119,19 @@ pub fn validate_bus(requests: &mut [BusRequest]) -> Result<(), ManifestError> {
             let mut seen_topics = HashSet::new();
             for topic in topics {
                 if !seen_topics.insert(topic.as_str()) {
-                    return Err(ManifestError::BadBus(format!(
+                    return Err(format!(
                         "duplicate {field} topic for driver {}: {topic}",
                         request.driver
-                    )));
+                    ));
                 }
             }
         }
 
         let trimmed = request.reason.trim().to_string();
         if trimmed.is_empty() {
-            return Err(ManifestError::BadBus(
-                "bus request requires a non-empty reason".to_string(),
-            ));
+            return Err("bus request requires a non-empty reason".to_string());
         }
-        reject_invisible_chars("reason", &trimmed).map_err(ManifestError::BadBus)?;
+        reject_invisible_chars("reason", &trimmed)?;
         request.reason = trimmed;
     }
     Ok(())
@@ -136,7 +140,7 @@ pub fn validate_bus(requests: &mut [BusRequest]) -> Result<(), ManifestError> {
 /// `entry` がプラグインディレクトリ内に収まる相対パスであることの検証。
 /// 絶対パス・`..`・空・ルート/プレフィックス成分を拒否する(配信ハンドラの
 /// トラバーサル防御の一段目。二段目は `Registry::dashboard_asset_path`)。
-pub fn validate_widget_entry(entry: &str) -> Result<(), ManifestError> {
+pub fn validate_widget_entry(entry: &str) -> Result<(), String> {
     use std::path::Component;
     let path = Path::new(entry);
     if entry.is_empty()
@@ -144,9 +148,9 @@ pub fn validate_widget_entry(entry: &str) -> Result<(), ManifestError> {
             .components()
             .any(|c| !matches!(c, Component::Normal(_)))
     {
-        return Err(ManifestError::BadDashboard(format!(
+        return Err(format!(
             "dashboard entry must be a relative path inside the plugin directory: {entry}"
-        )));
+        ));
     }
     Ok(())
 }

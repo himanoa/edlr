@@ -8,8 +8,54 @@ pub mod sidecar;
 pub mod store;
 pub mod validate;
 
+use std::fmt;
+
 use crate::manifest::Manifest;
-use store::{SettingsError, SettingsStore};
+use store::SettingsStore;
+
+/// `SettingsStore::update` が返しうるエラー。
+#[derive(Debug)]
+pub enum SettingsError {
+    /// マニフェストに存在しない key が指定された。
+    UnknownKey(String),
+    /// 値の JSON 型がフィールドの宣言型と一致しない(例: Boolean フィールドに文字列)。
+    TypeMismatch { key: String, expected: &'static str },
+    /// Select フィールドの値が `options` に含まれていない。
+    NotAnOption { key: String, value: String },
+    /// Map フィールドのエントリに空文字列のキーが含まれている。
+    /// `TypeMismatch` と分けているのは、UI で「行を足したが名前を入力して
+    /// いない」という具体的な状況を、型違いと同じ文言で報せると直しようが
+    /// ないため(キー名にそれ以外の制約は課さない)。
+    EmptyMapKey { key: String },
+    /// ディレクトリ作成やファイル書き込みに失敗した。
+    Io(std::io::Error),
+    /// 保存直前の JSON シリアライズに失敗した。
+    Serialize(serde_json::Error),
+}
+
+impl fmt::Display for SettingsError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            SettingsError::UnknownKey(key) => write!(f, "unknown settings key: {key}"),
+            SettingsError::TypeMismatch { key, expected } => {
+                write!(f, "settings key {key} expected a {expected} value")
+            }
+            SettingsError::NotAnOption { key, value } => {
+                write!(
+                    f,
+                    "settings key {key} value {value:?} is not one of the allowed options"
+                )
+            }
+            SettingsError::EmptyMapKey { key } => {
+                write!(f, "settings key {key} must not contain an empty entry key")
+            }
+            SettingsError::Io(e) => write!(f, "failed to write settings: {e}"),
+            SettingsError::Serialize(e) => write!(f, "failed to serialize settings: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for SettingsError {}
 
 /// 設定永続化の口。ディスク実装は [`SettingsStore`]。
 pub trait Storage {

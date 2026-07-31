@@ -1,9 +1,10 @@
-use std::fmt;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
 use crate::manifest::Manifest;
+
+pub use super::SettingsError;
 
 /// RPC 応答用に、秘密情報を取り除いた設定値と「設定済みの秘密情報キー」の
 /// 一覧に分ける。
@@ -52,50 +53,6 @@ pub struct SettingsStore {
     dir: PathBuf,
     lock: Mutex<()>,
 }
-
-/// `SettingsStore::update` が返しうるエラー。
-#[derive(Debug)]
-pub enum SettingsError {
-    /// マニフェストに存在しない key が指定された。
-    UnknownKey(String),
-    /// 値の JSON 型がフィールドの宣言型と一致しない(例: Boolean フィールドに文字列)。
-    TypeMismatch { key: String, expected: &'static str },
-    /// Select フィールドの値が `options` に含まれていない。
-    NotAnOption { key: String, value: String },
-    /// Map フィールドのエントリに空文字列のキーが含まれている。
-    /// `TypeMismatch` と分けているのは、UI で「行を足したが名前を入力して
-    /// いない」という具体的な状況を、型違いと同じ文言で報せると直しようが
-    /// ないため(キー名にそれ以外の制約は課さない)。
-    EmptyMapKey { key: String },
-    /// ディレクトリ作成やファイル書き込みに失敗した。
-    Io(std::io::Error),
-    /// 保存直前の JSON シリアライズに失敗した。
-    Serialize(serde_json::Error),
-}
-
-impl fmt::Display for SettingsError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            SettingsError::UnknownKey(key) => write!(f, "unknown settings key: {key}"),
-            SettingsError::TypeMismatch { key, expected } => {
-                write!(f, "settings key {key} expected a {expected} value")
-            }
-            SettingsError::NotAnOption { key, value } => {
-                write!(
-                    f,
-                    "settings key {key} value {value:?} is not one of the allowed options"
-                )
-            }
-            SettingsError::EmptyMapKey { key } => {
-                write!(f, "settings key {key} must not contain an empty entry key")
-            }
-            SettingsError::Io(e) => write!(f, "failed to write settings: {e}"),
-            SettingsError::Serialize(e) => write!(f, "failed to serialize settings: {e}"),
-        }
-    }
-}
-
-impl std::error::Error for SettingsError {}
 
 impl SettingsStore {
     pub fn new(dir: PathBuf) -> Self {

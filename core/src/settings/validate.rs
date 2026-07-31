@@ -4,7 +4,7 @@
 //! 留め、判断そのものはここに集める(値イン値アウト)。
 
 use crate::manifest::SettingField;
-use crate::settings::store::SettingsError;
+use crate::settings::SettingsError;
 
 /// `value` が `field` の宣言型(および Select の `options`)に適合するか検証する。
 pub fn validate_value(

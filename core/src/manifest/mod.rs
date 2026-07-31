@@ -507,12 +507,7 @@ impl fmt::Display for ManifestError {
 
 impl std::error::Error for ManifestError {}
 
-pub(crate) fn is_valid_id(id: &str) -> bool {
-    !id.is_empty()
-        && id
-            .chars()
-            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
-}
+pub(crate) use crate::capability::validate::is_valid_id;
 
 /// `[[settings]]` を検証する。`key` の一意性と、`select` の候補指定を見る。
 ///
@@ -703,7 +698,8 @@ pub(crate) fn validate_dashboard(widgets: &mut [DashboardWidget]) -> Result<(), 
         crate::capability::validate::reject_invisible_chars("title", &title)
             .map_err(ManifestError::BadDashboard)?;
         widget.title = title;
-        crate::capability::validate::validate_widget_entry(&widget.entry)?;
+        crate::capability::validate::validate_widget_entry(&widget.entry)
+            .map_err(ManifestError::BadDashboard)?;
     }
     Ok(())
 }
@@ -825,7 +821,7 @@ pub fn load_manifest(dir: &Path) -> Result<Manifest, ManifestError> {
     validate_capabilities(&mut manifest.capabilities)?;
     validate_sidecars(&mut manifest.sidecars)?;
     validate_filesystem(&mut manifest.filesystem)?;
-    crate::capability::validate::validate_bus(&mut manifest.bus)?;
+    crate::capability::validate::validate_bus(&mut manifest.bus).map_err(ManifestError::BadBus)?;
     validate_dashboard(&mut manifest.dashboard)?;
     validate_schedules(&manifest.schedules)?;
 
