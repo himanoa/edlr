@@ -12,6 +12,7 @@ pub mod registry;
 pub mod router;
 pub mod rpc;
 pub mod runner;
+pub mod runtime;
 pub mod schedule;
 pub mod server;
 pub mod settings;
