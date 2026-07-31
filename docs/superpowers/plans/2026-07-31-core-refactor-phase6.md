@@ -40,9 +40,9 @@ fn rotation_fallback(current: &Path, next: Option<PathBuf>, latest: Option<PathB
 fn split_complete_lines(buf: String, caught_up: bool) -> (Vec<JournalLine>, String);
 ```
 
-- [ ] **Step 1(move-only コミット)**: `git mv` で `journal/tailer/mod.rs` 化し、`#[cfg(test)] mod tests`(202–605行)を丸ごと `journal/tailer/tests.rs` へ分離(`#[cfg(test)] mod tests;` 宣言 + `use super::*` 追従のみ。manifest/ の前例と同じ形)。コミット: `refactor(core): journal/tailer のテストを tests.rs へ分離(移動のみ)`
-- [ ] **Step 2(logic コミット)**: 上記2つの判定を純関数に抽出し、`poll`/`read_new` は結果に従うだけにする。I/O・`self.pos`/`self.partial` 更新の順序は不変。tests.rs に純粋テストを追加(rotation_fallback 3本: 次あり/次なし+新しい latest/次なし+古い latest、split_complete_lines 3本: 完全行のみ/未完残り/空行スキップ+replay フラグ)。既存テストは無変更。コミット: `refactor(core): tailer のローテーション先と行切り出しの判定を純関数へ抽出`
-- [ ] **Step 3**: 各コミットで `cargo test --workspace` / clippy、move-only 検証(Step 1)
+- [x] **Step 1(move-only コミット)**: `git mv` で `journal/tailer/mod.rs` 化し、`#[cfg(test)] mod tests`(202–605行)を丸ごと `journal/tailer/tests.rs` へ分離(`#[cfg(test)] mod tests;` 宣言 + `use super::*` 追従のみ。manifest/ の前例と同じ形)。コミット: `refactor(core): journal/tailer のテストを tests.rs へ分離(移動のみ)`
+- [x] **Step 2(logic コミット)**: 上記2つの判定を純関数に抽出し、`poll`/`read_new` は結果に従うだけにする。I/O・`self.pos`/`self.partial` 更新の順序は不変。tests.rs に純粋テストを追加(rotation_fallback 3本: 次あり/次なし+新しい latest/次なし+古い latest、split_complete_lines 3本: 完全行のみ/未完残り/空行スキップ+replay フラグ)。既存テストは無変更。コミット: `refactor(core): tailer のローテーション先と行切り出しの判定を純関数へ抽出`
+- [x] **Step 3**: 各コミットで `cargo test --workspace` / clippy、move-only 検証(Step 1)
 
 ---
 
@@ -64,9 +64,9 @@ pub use crate::manifest;
 pub use crate::manifest::driver as manifest;
 ```
 
-- [ ] **Step 1**: `git mv` + 配線。`manifest/mod.rs` に `pub mod driver;` を追加(旧 `driver::manifest` の中身は無変更)。`plugin/manifest/mod.rs` 182 の capability 旧パス互換 pub use はファイルごと移動(削除は Task 5)。既存の `pub use manifest::{...}` 便宜再輸出(plugin/mod.rs 27–31)は張り替えのみ
-- [ ] **Step 2**: `cargo test --workspace` / clippy、move-only 検証(rename 100%)、テスト凍結チェック(core/tests/ diff 空)
-- [ ] **Step 3**: コミット `refactor(core): manifest を manifest/ へトップレベル化(移動のみ、旧パスは pub use 温存)`
+- [x] **Step 1**: `git mv` + 配線。`manifest/mod.rs` に `pub mod driver;` を追加(旧 `driver::manifest` の中身は無変更)。`plugin/manifest/mod.rs` 182 の capability 旧パス互換 pub use はファイルごと移動(削除は Task 5)。既存の `pub use manifest::{...}` 便宜再輸出(plugin/mod.rs 27–31)は張り替えのみ
+- [x] **Step 2**: `cargo test --workspace` / clippy、move-only 検証(rename 100%)、テスト凍結チェック(core/tests/ diff 空)
+- [x] **Step 3**: コミット `refactor(core): manifest を manifest/ へトップレベル化(移動のみ、旧パスは pub use 温存)`
 
 ---
 
@@ -89,9 +89,9 @@ pub use crate::runtime::fs as fs_runtime;
 pub use crate::runtime::sidecar as sidecar_runtime;
 ```
 
-- [ ] **Step 1**: `git mv` + 配線。既存の便宜再輸出(plugin/mod.rs 22/24/40 の `pub use bus_runtime::{...}` 等)は張り替えのみ
-- [ ] **Step 2**: `cargo test --workspace` / clippy、move-only 検証、テスト凍結チェック。`rpc/render.rs` の import が純粋→純粋のままであることを確認(分析 §4 リスク3)
-- [ ] **Step 3**: コミット `refactor(core): 共有ランタイムバッファ群と DropCounters を runtime/ へ移設(移動のみ、旧パスは pub use 温存)`
+- [x] **Step 1**: `git mv` + 配線。既存の便宜再輸出(plugin/mod.rs 22/24/40 の `pub use bus_runtime::{...}` 等)は張り替えのみ
+- [x] **Step 2**: `cargo test --workspace` / clippy、move-only 検証、テスト凍結チェック。`rpc/render.rs` の import が純粋→純粋のままであることを確認(分析 §4 リスク3)
+- [x] **Step 3**: コミット `refactor(core): 共有ランタイムバッファ群と DropCounters を runtime/ へ移設(移動のみ、旧パスは pub use 温存)`
 
 ---
 
@@ -107,9 +107,9 @@ pub use crate::runtime::sidecar as sidecar_runtime;
 - Consumes: なし
 - Produces: `crate::settings::{filesystem, sidecar}` / `crate::host::allowlist` / `crate::registry::select_options`(pub(crate) のまま)。旧パス温存(plugin/mod.rs に `pub use crate::settings::filesystem;` 等 — select_options は pub(crate) use)
 
-- [ ] **Step 1**: `git mv` + 配線。`host/resolve.rs` の `use crate::plugin::allowlist::check_url` は旧パス pub use で通るため無変更(置換は Task 5)
-- [ ] **Step 2**: `cargo test --workspace` / clippy、move-only 検証、テスト凍結チェック
-- [ ] **Step 3**: コミット `refactor(core): config store を settings/、allowlist を host/、select_options を registry/ へ移設(移動のみ、旧パスは pub use 温存)`
+- [x] **Step 1**: `git mv` + 配線。`host/resolve.rs` の `use crate::plugin::allowlist::check_url` は旧パス pub use で通るため無変更(置換は Task 5)
+- [x] **Step 2**: `cargo test --workspace` / clippy、move-only 検証、テスト凍結チェック
+- [x] **Step 3**: コミット `refactor(core): config store を settings/、allowlist を host/、select_options を registry/ へ移設(移動のみ、旧パスは pub use 温存)`
 
 ---
 
@@ -141,9 +141,9 @@ pub use crate::runtime::sidecar as sidecar_runtime;
 | `::plugin::runner::*` / `::driver::runner::*` | `::runner::plugin::*` / `::runner::driver::*` |
 | 便宜再輸出経由(`::plugin::Manifest` 等 plugin/mod.rs の pub use 郡) | 各実体の新パスへ |
 
-- [ ] **Step 1**: 上記対応表で core/src + core/tests の use 文を機械的に置換し、plugin/mod.rs・driver/mod.rs と lib.rs の mod 宣言を削除。**use 文(と mod 宣言の削除)以外の diff を出さない**
-- [ ] **Step 2**: 検証: `grep -rn "crate::plugin::\|crate::driver::\|edlr_core::plugin\|edlr_core::driver" core/src core/tests --include="*.rs" | grep -v "^\s*//"` が **0 件**(ドキュメントコメント内の表記は Task 6 で扱うため `//` 行は除外してよいが、コード行は 0 必須)。`cargo test --workspace` 全パス + clippy 0。diff が use/mod 行のみであることを目視 + `git diff --stat`
-- [ ] **Step 3**: コミット `refactor(core): 旧パス pub use を一括削除し use 文を新パスへ置換(Phase 1–5 の互換層を撤去)`
+- [x] **Step 1**: 上記対応表で core/src + core/tests の use 文を機械的に置換し、plugin/mod.rs・driver/mod.rs と lib.rs の mod 宣言を削除。**use 文(と mod 宣言の削除)以外の diff を出さない**
+- [x] **Step 2**: 検証: `grep -rn "crate::plugin::\|crate::driver::\|edlr_core::plugin\|edlr_core::driver" core/src core/tests --include="*.rs" | grep -v "^\s*//"` が **0 件**(ドキュメントコメント内の表記は Task 6 で扱うため `//` 行は除外してよいが、コード行は 0 必須)。`cargo test --workspace` 全パス + clippy 0。diff が use/mod 行のみであることを目視 + `git diff --stat`
+- [x] **Step 3**: コミット `refactor(core): 旧パス pub use を一括削除し use 文を新パスへ置換(Phase 1–5 の互換層を撤去)`
 
 ---
 
@@ -158,19 +158,19 @@ pub use crate::runtime::sidecar as sidecar_runtime;
 - Consumes: Task 5 完了後の最終構成
 - Produces: ドキュメントと実態の一致
 
-- [ ] **Step 1**: `grep -rn "crate::plugin::\|crate::driver::" core/src --include="*.rs"`(この時点で全てコメント内)を対応表で新パス表記に更新。コメントの内容自体(設計説明)は変えない
-- [ ] **Step 2**: 各 mod.rs のモジュールドキュメントを点検し、無い/古いものへ1〜数行の責務説明を追加。module-layout.md と CLAUDE.md の表を更新
-- [ ] **Step 3**: `cargo test --workspace` / clippy(ドキュメントのみだが機械的確認)。コミット `docs(core): モジュールドキュメントと旧パス表記を Phase 6 後の構成に更新`
+- [x] **Step 1**: `grep -rn "crate::plugin::\|crate::driver::" core/src --include="*.rs"`(この時点で全てコメント内)を対応表で新パス表記に更新。コメントの内容自体(設計説明)は変えない
+- [x] **Step 2**: 各 mod.rs のモジュールドキュメントを点検し、無い/古いものへ1〜数行の責務説明を追加。module-layout.md と CLAUDE.md の表を更新
+- [x] **Step 3**: `cargo test --workspace` / clippy(ドキュメントのみだが機械的確認)。コミット `docs(core): モジュールドキュメントと旧パス表記を Phase 6 後の構成に更新`
 
 ---
 
 ### Task 7: Phase 6 完了ゲート(リファクタリング全体の完了確認)
 
-- [ ] **Step 1**: `cargo test --workspace`(全パス・pin 含む)+ clippy 0 + `cargo fmt --check`(既知の main 由来 drift は issue so6b — 増やしていないことだけ確認)
-- [ ] **Step 2**: 構成確認: `ls core/src` が分析 §1 末尾の一覧(plugin/・driver/ が無い)と一致。`find core/src -name "*.rs" | xargs wc -l | sort -rn | head` を記録
-- [ ] **Step 3**: 旧パス 0 件の再確認(Task 5 Step 2 の grep がコメント含め 0 件になっていること — Task 6 でコメントも更新済みのため)
-- [ ] **Step 4**: テスト凍結の総括: `git diff 1a5d0eb..HEAD -- core/tests/ --stat` の diff が use 行のみ(Task 5)+ テスト本数が減っていないこと(`git grep -c -E '#\[(tokio::)?test' | 集計` を base と比較)
-- [ ] **Step 5**: spec(2026-07-30-core-refactoring-design.md)の状態を「レビュー待ち」から「完了」に更新し、Phase 0–6 の全フェーズ完了をユーザーへ報告する
+- [x] **Step 1**: `cargo test --workspace`(全パス・pin 含む)+ clippy 0 + `cargo fmt --check`(既知の main 由来 drift は issue so6b — 増やしていないことだけ確認)
+- [x] **Step 2**: 構成確認: `ls core/src` が分析 §1 末尾の一覧(plugin/・driver/ が無い)と一致。`find core/src -name "*.rs" | xargs wc -l | sort -rn | head` を記録
+- [x] **Step 3**: 旧パス 0 件の再確認(Task 5 Step 2 の grep がコメント含め 0 件になっていること — Task 6 でコメントも更新済みのため)
+- [x] **Step 4**: テスト凍結の総括: `git diff 1a5d0eb..HEAD -- core/tests/ --stat` の diff が use 行のみ(Task 5)+ テスト本数が減っていないこと(`git grep -c -E '#\[(tokio::)?test' | 集計` を base と比較)
+- [x] **Step 5**: spec(2026-07-30-core-refactoring-design.md)の状態を「レビュー待ち」から「完了」に更新し、Phase 0–6 の全フェーズ完了をユーザーへ報告する
 
 ---
 
