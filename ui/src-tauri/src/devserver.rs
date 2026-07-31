@@ -173,10 +173,12 @@ mod tests {
         // 負のケースは「bind して閉じた直後のポート」を使ってはいけない:
         // 並行して走る他のテストの `bind("127.0.0.1:0")` が同じポートを
         // 再取得した瞬間に接続が成功してしまう(実際に flaky として踏んだ)。
-        // 他の統合テストのポート帯(5030x/5040x/5850x)とも被らない
-        // 固定ポートを、bind せずにそのまま使う。
+        // ephemeral port range(Linux 既定 32768-60999)の外にある固定ポート
+        // なら `bind(0)` に割り当てられることもないので、bind せずにそのまま
+        // 使う。他の統合テストの固定ポート帯(285xx/286xx/5030x/5040x)とも
+        // 被らない値。
         assert!(!wait_until_listening(
-            "127.0.0.1:59993",
+            "127.0.0.1:29993",
             2,
             Duration::from_millis(10)
         ));
@@ -188,21 +190,24 @@ mod tests {
     /// 孫プロセスで再現して検証する。
     #[test]
     fn stop_dev_server_kills_the_whole_process_group() {
-        use std::os::unix::fs::PermissionsExt;
         let tmp = tempfile::tempdir().unwrap();
         let pidfile = tmp.path().join("grandchild.pid");
         let script = tmp.path().join("parent.sh");
         std::fs::write(
             &script,
-            format!(
-                "#!/bin/sh\n(sleep 60 & echo $! > {}); wait\n",
-                pidfile.display()
-            ),
+            format!("(sleep 60 & echo $! > {}); wait\n", pidfile.display()),
         )
         .unwrap();
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
 
-        let mut child = spawn_in_own_process_group(script.as_os_str(), &[]).unwrap();
+        // 書いたばかりのファイルを直接 exec すると、並列に走る他テストの
+        // fork が書き込み fd を一瞬引き継いだ場合に ETXTBSY で落ちる
+        // (issue aenf)。`/bin/sh <script>` の形なら exec するのは既存の
+        // sh バイナリだけなので、この競合自体が起きない。
+        let mut child = spawn_in_own_process_group(
+            std::ffi::OsStr::new("/bin/sh"),
+            &[script.as_os_str().to_os_string()],
+        )
+        .unwrap();
 
         let deadline = Instant::now() + Duration::from_secs(2);
         while !pidfile.exists() && Instant::now() < deadline {
