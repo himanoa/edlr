@@ -45,7 +45,10 @@ impl EpochEngine {
             }
         });
 
-        Ok(EpochEngine { engine, ticker_stop })
+        Ok(EpochEngine {
+            engine,
+            ticker_stop,
+        })
     }
 
     pub(crate) fn engine(&self) -> &Engine {

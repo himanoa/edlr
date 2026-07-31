@@ -526,7 +526,9 @@ fn watch_ready(
 ) {
     std::thread::spawn(move || loop {
         {
-            let mut groups = groups.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            let mut groups = groups
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             let alive = groups
                 .get_mut(&key)
                 .map(|group| {
@@ -853,7 +855,8 @@ mod tests {
         driver
             .ensure_started("d/re", &sleep_spec(vec![port]))
             .expect("first start");
-        rx.recv_timeout(Duration::from_secs(2)).expect("first ready");
+        rx.recv_timeout(Duration::from_secs(2))
+            .expect("first ready");
 
         driver.stop("d/re");
         driver

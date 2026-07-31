@@ -21,8 +21,8 @@
 
 use std::sync::{Arc, Mutex};
 
-use crate::registry::plugin::RegistryError;
 use crate::registry::entries::EntryTable;
+use crate::registry::plugin::RegistryError;
 use crate::registry::subject::RegistrySubject;
 use crate::settings;
 use crate::settings::store::SettingsStore;
@@ -116,7 +116,9 @@ impl<St: settings::Storage, E: SettingsEntry> SettingsService<St, E> {
         id: &str,
     ) -> Result<(E::Subject, serde_json::Map<String, serde_json::Value>), RegistryError> {
         let subject = self.find_manifest(id)?;
-        let values = self.settings_store.effective(&subject.as_settings_manifest());
+        let values = self
+            .settings_store
+            .effective(&subject.as_settings_manifest());
         Ok((subject, values))
     }
 

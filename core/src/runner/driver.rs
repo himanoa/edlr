@@ -23,14 +23,14 @@ use std::thread;
 
 use edlr_driver_channel::{Bus, Message};
 
+use crate::capability::grants::GrantsStore;
 use crate::host::driver::{DriverCtx, DriverHost};
 use crate::manifest::driver::{load_driver_manifest, DriverManifest};
 use crate::registry::driver::{DriverEntry, DriverRegistry, DriverState};
-use crate::settings::filesystem::FilesystemConfigStore;
-use crate::capability::grants::GrantsStore;
-use crate::settings::store::SettingsStore;
-use crate::settings::sidecar::SidecarConfigStore;
 use crate::runner::bootstrap::{build_initial_buffers, InitialBuffers};
+use crate::settings::filesystem::FilesystemConfigStore;
+use crate::settings::sidecar::SidecarConfigStore;
+use crate::settings::store::SettingsStore;
 
 /// ドライバ 1 件あたりのメッセージキュー容量。
 ///
@@ -154,7 +154,11 @@ fn forward_sidecar_ready(bus: &Bus, event: edlr_driver_process::ReadyEvent) {
     if let Err(e) =
         bus.notify_from_host(driver_id, "sidecar-ready", payload.to_string().into_bytes())
     {
-        tracing::warn!(driver_id, sidecar = name, "failed to deliver sidecar-ready: {e}");
+        tracing::warn!(
+            driver_id,
+            sidecar = name,
+            "failed to deliver sidecar-ready: {e}"
+        );
     }
 }
 

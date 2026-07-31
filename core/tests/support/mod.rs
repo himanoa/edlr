@@ -19,17 +19,17 @@ use std::process::Command;
 #[allow(unused_imports)]
 use std::sync::Arc;
 
-use edlr_core::host::driver::DriverHost;
-use edlr_core::runner::driver::start_drivers;
-use edlr_core::registry::driver::DriverRegistry;
-use edlr_core::settings::filesystem::FilesystemConfigStore;
 use edlr_core::capability::grants::GrantsStore;
+use edlr_core::host::driver::DriverHost;
 use edlr_core::host::plugin::PluginHost;
+use edlr_core::registry::driver::DriverRegistry;
 use edlr_core::registry::plugin::Registry;
-use edlr_core::schedule::store::ScheduleStore;
-use edlr_core::settings::store::SettingsStore;
-use edlr_core::settings::sidecar::SidecarConfigStore;
 use edlr_core::router::Router;
+use edlr_core::runner::driver::start_drivers;
+use edlr_core::schedule::store::ScheduleStore;
+use edlr_core::settings::filesystem::FilesystemConfigStore;
+use edlr_core::settings::sidecar::SidecarConfigStore;
+use edlr_core::settings::store::SettingsStore;
 
 /// ドライバを 1 件もロードしていない `DriverRegistry`(存在しないディレクトリ
 /// を走査させることで空のまま作る)。バス機能を主眼にしないテストの

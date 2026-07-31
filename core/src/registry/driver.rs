@@ -15,18 +15,18 @@ use std::sync::{Arc, Mutex};
 
 use edlr_driver_channel::Bus;
 
+use crate::capability::grants::{GrantState, GrantsError, GrantsStore};
 use crate::host::driver::DriverHost;
 use crate::manifest::driver::DriverManifest;
-use crate::settings::filesystem::{FilesystemConfig, FilesystemConfigStore};
-use crate::capability::grants::{GrantState, GrantsError, GrantsStore};
-use crate::registry::plugin::{FilesystemInfo, RegistryError, SidecarAction, SidecarInfo};
-use crate::settings::store::{SettingsError, SettingsStore};
-use crate::settings::sidecar::{SidecarConfig, SidecarConfigStore};
 use crate::registry::entries::{EntryTable, IdLocks};
 use crate::registry::filesystem::DiskFilesystemService;
 use crate::registry::grants::DiskGrantService;
+use crate::registry::plugin::{FilesystemInfo, RegistryError, SidecarAction, SidecarInfo};
 use crate::registry::settings::DiskSettingsService;
 use crate::registry::sidecar::DiskSidecarService;
+use crate::settings::filesystem::{FilesystemConfig, FilesystemConfigStore};
+use crate::settings::sidecar::{SidecarConfig, SidecarConfigStore};
+use crate::settings::store::{SettingsError, SettingsStore};
 
 /// ドライバ 1 件の現在の駆動状態。`crate::registry::plugin::PluginState` と対称。
 #[derive(Debug, Clone, PartialEq)]
@@ -491,8 +491,8 @@ impl DriverRegistry {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crate::host::driver::DriverHost;
     use crate::capability::request::SidecarRequest;
+    use crate::host::driver::DriverHost;
     use edlr_driver_process::ProcessSpec;
     use std::thread;
     use std::time::Duration;

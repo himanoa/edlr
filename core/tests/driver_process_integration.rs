@@ -76,7 +76,11 @@ async fn revoking_a_grant_stops_running_instances() {
 
     let started = env
         .registry
-        .control_sidecar("sc-plugin", "tts", edlr_core::registry::plugin::SidecarAction::Start)
+        .control_sidecar(
+            "sc-plugin",
+            "tts",
+            edlr_core::registry::plugin::SidecarAction::Start,
+        )
         .expect("start");
     assert!(started[0].instances[0].running);
 
@@ -106,7 +110,11 @@ async fn changing_the_config_stops_the_running_sidecar() {
         .set_sidecar_grant("sc-plugin", "tts", true)
         .unwrap();
     env.registry
-        .control_sidecar("sc-plugin", "tts", edlr_core::registry::plugin::SidecarAction::Start)
+        .control_sidecar(
+            "sc-plugin",
+            "tts",
+            edlr_core::registry::plugin::SidecarAction::Start,
+        )
         .unwrap();
 
     let updated = env
@@ -145,7 +153,11 @@ async fn stop_all_sidecars_leaves_nothing_running() {
         .set_sidecar_grant("sc-plugin", "tts", true)
         .unwrap();
     env.registry
-        .control_sidecar("sc-plugin", "tts", edlr_core::registry::plugin::SidecarAction::Start)
+        .control_sidecar(
+            "sc-plugin",
+            "tts",
+            edlr_core::registry::plugin::SidecarAction::Start,
+        )
         .unwrap();
 
     env.registry.stop_all_sidecars();

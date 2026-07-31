@@ -11,13 +11,13 @@
 
 use std::sync::{Arc, Mutex};
 
-use crate::capability::GrantStorage;
-use crate::settings::filesystem::{FilesystemConfig, FilesystemConfigStore};
-use crate::runtime::fs::{filesystem_json_string, FsRuntimeEntry};
 use crate::capability::grants::GrantsStore;
-use crate::registry::plugin::{FilesystemInfo, PluginEntry, RegistryError};
+use crate::capability::GrantStorage;
 use crate::registry::entries::{EntryTable, IdLocks};
+use crate::registry::plugin::{FilesystemInfo, PluginEntry, RegistryError};
 use crate::registry::subject::RegistrySubject;
+use crate::runtime::fs::{filesystem_json_string, FsRuntimeEntry};
+use crate::settings::filesystem::{FilesystemConfig, FilesystemConfigStore};
 
 /// `EntryTable<E>` の要素 `E` が fs 群に対して持つべき最小限の面。
 ///

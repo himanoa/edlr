@@ -101,7 +101,9 @@ pub fn schedules_result_json(
 
 /// `get-sidecars` / `set-sidecar-*` / `sidecar-control` の共通 result 形と、
 /// `plugins/list` の各要素の `sidecars` フィールドに使う JSON。
-pub fn sidecars_result_json(sidecars: &[crate::registry::plugin::SidecarInfo]) -> serde_json::Value {
+pub fn sidecars_result_json(
+    sidecars: &[crate::registry::plugin::SidecarInfo],
+) -> serde_json::Value {
     let items: Vec<serde_json::Value> = sidecars
         .iter()
         .map(|info| {
@@ -128,7 +130,9 @@ pub fn sidecars_result_json(sidecars: &[crate::registry::plugin::SidecarInfo]) -
 
 /// `get-filesystem` / `set-filesystem-*` の共通 result 形と、`plugins/list`
 /// の各要素の `filesystem` フィールドに使う JSON: `{ "roots": [...] }`。
-pub fn filesystem_result_json(roots: &[crate::registry::plugin::FilesystemInfo]) -> serde_json::Value {
+pub fn filesystem_result_json(
+    roots: &[crate::registry::plugin::FilesystemInfo],
+) -> serde_json::Value {
     let items: Vec<serde_json::Value> = roots
         .iter()
         .map(|info| {
@@ -149,11 +153,13 @@ pub fn filesystem_result_json(roots: &[crate::registry::plugin::FilesystemInfo])
 mod tests {
     use super::*;
     use crate::capability::grants::GrantState;
-    use crate::registry::plugin::{BusInfo, DashboardInfo, FilesystemInfo, ScheduleInfo, SidecarInfo};
-    use crate::manifest::ScheduleSpec;
     use crate::capability::request::{
         BusRequest, CapabilityRequest, DashboardWidget, FilesystemMode, FilesystemRequest,
         SidecarRequest, WidgetSize,
+    };
+    use crate::manifest::ScheduleSpec;
+    use crate::registry::plugin::{
+        BusInfo, DashboardInfo, FilesystemInfo, ScheduleInfo, SidecarInfo,
     };
     use crate::settings::filesystem::FilesystemConfig;
     use crate::settings::sidecar::SidecarConfig;

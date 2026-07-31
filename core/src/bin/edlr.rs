@@ -1,12 +1,12 @@
 use clap::Parser;
-use edlr_core::host::driver::DriverHost;
-use edlr_core::runner::driver::start_drivers;
-use edlr_core::settings::filesystem::FilesystemConfigStore;
-use edlr_core::host::plugin::PluginHost;
-use edlr_core::settings::sidecar::SidecarConfigStore;
-use edlr_core::runner::plugin::start_plugins;
 use edlr_core::capability::grants::GrantsStore;
+use edlr_core::host::driver::DriverHost;
+use edlr_core::host::plugin::PluginHost;
+use edlr_core::runner::driver::start_drivers;
+use edlr_core::runner::plugin::start_plugins;
 use edlr_core::schedule::store::ScheduleStore;
+use edlr_core::settings::filesystem::FilesystemConfigStore;
+use edlr_core::settings::sidecar::SidecarConfigStore;
 use edlr_core::settings::store::SettingsStore;
 use edlr_core::{config, monitor, router::Router, server};
 use std::path::PathBuf;

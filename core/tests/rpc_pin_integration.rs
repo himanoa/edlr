@@ -6,19 +6,19 @@
 //! `ws_rpc_integration.rs` のものをこのファイル内にコピーして使う(`core/tests/`
 //! の各ファイルは独立クレートなので、既存ファイルへの追記は凍結違反になる)。
 
-use edlr_core::host::driver::DriverHost;
-use edlr_core::runner::driver::start_drivers;
-use edlr_core::registry::driver::DriverRegistry;
-use edlr_core::settings::filesystem::FilesystemConfigStore;
 use edlr_core::capability::grants::GrantsStore;
+use edlr_core::host::driver::DriverHost;
 use edlr_core::host::plugin::PluginHost;
-use edlr_core::runner::plugin::start_plugins;
-use edlr_core::schedule::store::ScheduleStore;
-use edlr_core::settings::store::SettingsStore;
-use edlr_core::settings::sidecar::SidecarConfigStore;
+use edlr_core::registry::driver::DriverRegistry;
 use edlr_core::registry::plugin::Registry;
 use edlr_core::router::Router;
+use edlr_core::runner::driver::start_drivers;
+use edlr_core::runner::plugin::start_plugins;
+use edlr_core::schedule::store::ScheduleStore;
 use edlr_core::server::{self, ServerState};
+use edlr_core::settings::filesystem::FilesystemConfigStore;
+use edlr_core::settings::sidecar::SidecarConfigStore;
+use edlr_core::settings::store::SettingsStore;
 use futures_util::{SinkExt, StreamExt};
 use std::fs;
 use std::net::SocketAddr;
@@ -32,7 +32,10 @@ mod support;
 type Ws =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
-async fn setup(registry: Option<Registry>, drivers: Option<DriverRegistry>) -> (Router, SocketAddr) {
+async fn setup(
+    registry: Option<Registry>,
+    drivers: Option<DriverRegistry>,
+) -> (Router, SocketAddr) {
     let router = Router::new(64);
     let state = ServerState::new(&router, registry, drivers);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

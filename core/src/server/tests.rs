@@ -102,9 +102,8 @@ fn plugins_rpc_without_a_registry_reports_unavailable_even_with_drivers_present(
     // あり、`drivers` が `Some` であることに引きずられて誤って通しては
     // ならない。
     let (_registry, drivers) = test_registries();
-    let err =
-        handle_rpc_with_drivers(None, Some(&drivers), "plugins/list", &serde_json::json!({}))
-            .unwrap_err();
+    let err = handle_rpc_with_drivers(None, Some(&drivers), "plugins/list", &serde_json::json!({}))
+        .unwrap_err();
     assert_eq!(err, "plugins unavailable");
 }
 
@@ -145,9 +144,7 @@ fn plugins_list_includes_schedules_with_spec_strings_and_next() {
     // 呼び出しごとの `Local::now()` に依存するのでここでは検証しない --
     // `plugin::schedule::tests` / `plugin::registry::tests` が発火計算
     // 自体をテスト済み)。
-    assert!(
-        chrono::DateTime::parse_from_rfc3339(schedules[0]["next"].as_str().unwrap()).is_ok()
-    );
+    assert!(chrono::DateTime::parse_from_rfc3339(schedules[0]["next"].as_str().unwrap()).is_ok());
 }
 
 /// 取りこぼしは黙って失われるのではなく `plugins/list` から見えること。
@@ -221,8 +218,7 @@ fn plugins_list_reports_unresolved_when_the_driver_is_not_installed() {
 /// `test_registry` を再利用する(どちらも wasm をロードせず `push` で
 /// 組み立てる)。
 fn test_registries() -> (Registry, DriverRegistry) {
-    let drivers =
-        crate::registry::driver::tests::test_registry(edlr_driver_channel::Bus::new());
+    let drivers = crate::registry::driver::tests::test_registry(edlr_driver_channel::Bus::new());
     let registry =
         crate::registry::plugin::tests::test_registry_with_bus_request_using(drivers.clone());
     (registry, drivers)

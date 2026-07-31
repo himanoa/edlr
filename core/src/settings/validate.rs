@@ -256,7 +256,9 @@ mod tests {
 
     #[test]
     fn select_backed_by_a_driver_topic_does_not_match_against_options() {
-        assert!(validate_value(&select_field_from_driver(), &serde_json::json!("anything")).is_ok());
+        assert!(
+            validate_value(&select_field_from_driver(), &serde_json::json!("anything")).is_ok()
+        );
     }
 
     #[test]
@@ -271,9 +273,7 @@ mod tests {
 
     #[test]
     fn map_accepts_string_to_string_entries() {
-        assert!(
-            validate_value(&map_field(), &serde_json::json!({"a": "b"})).is_ok()
-        );
+        assert!(validate_value(&map_field(), &serde_json::json!({"a": "b"})).is_ok());
     }
 
     #[test]

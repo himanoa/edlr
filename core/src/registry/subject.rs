@@ -16,9 +16,9 @@
 //! "plugin {id} is disabled" / "driver {id} is disabled" 分岐で使う
 //! (Phase 4 タスク6)。
 
-use crate::registry::plugin::RegistryError;
-use crate::manifest::Manifest;
 use crate::capability::request::{FilesystemRequest, SidecarRequest};
+use crate::manifest::Manifest;
+use crate::registry::plugin::RegistryError;
 
 /// ジェネリックな `registry` 系サービスが manifest 型に要求する最小限の面。
 pub(crate) trait RegistrySubject: Clone {

@@ -14,8 +14,8 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::runtime::dropped::{DropCounters, DroppedCounts};
 use crate::runner::plugin::PluginWork;
+use crate::runtime::dropped::{DropCounters, DroppedCounts};
 use crate::schedule::ScheduleView;
 
 /// `ThreadSupervisor::shutdown_all` が 1 プラグインの `JoinHandle` を待つ上限。

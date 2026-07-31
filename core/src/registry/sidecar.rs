@@ -27,19 +27,17 @@ use std::sync::{Arc, Mutex};
 
 use edlr_driver_process::ProcessSpec;
 
-use crate::capability::GrantStorage;
 use crate::capability::grants::{GrantState, GrantsStore};
-use crate::host::plugin::capabilities_json_string;
-use crate::registry::plugin::{PluginEntry, RegistryError, SidecarAction, SidecarInfo};
-use crate::settings::sidecar::{assign_ports, SidecarConfig, SidecarConfigStore};
-use crate::runtime::sidecar::{
-    implicit_http_hosts, sidecars_json_string, SidecarRuntimeEntry,
-};
-use crate::manifest::Manifest;
 use crate::capability::request::SidecarRequest;
+use crate::capability::GrantStorage;
+use crate::host::plugin::capabilities_json_string;
+use crate::manifest::Manifest;
 use crate::registry::entries::{EntryTable, IdLocks};
+use crate::registry::plugin::{PluginEntry, RegistryError, SidecarAction, SidecarInfo};
 use crate::registry::subject::RegistrySubject;
 use crate::registry::ProcessControl;
+use crate::runtime::sidecar::{implicit_http_hosts, sidecars_json_string, SidecarRuntimeEntry};
+use crate::settings::sidecar::{assign_ports, SidecarConfig, SidecarConfigStore};
 
 /// `<id>/<sidecar-name>` の形で `ProcessControl` のキーを組み立てる。
 /// `HostCtx::sidecar_key`(`core/src/host/plugin.rs`)と同じ規則。

@@ -145,8 +145,7 @@ default = 80
 "#,
     );
 
-    let manifest =
-        load_manifest(&plugin_dir).expect("manifest with integer default should parse");
+    let manifest = load_manifest(&plugin_dir).expect("manifest with integer default should parse");
 
     assert_eq!(manifest.settings.len(), 1);
     assert_eq!(
@@ -279,8 +278,8 @@ catch-up = true
 "#,
     );
 
-    let err = load_manifest(&plugin_dir)
-        .expect_err("catch-up with interval-seconds should be rejected");
+    let err =
+        load_manifest(&plugin_dir).expect_err("catch-up with interval-seconds should be rejected");
     assert!(
         err.to_string().contains("catch-up"),
         "the error should name catch-up, got: {err}"
@@ -918,8 +917,8 @@ fn reason_with_zero_width_character_is_rejected() {
         "id = \"zero-width-reason-plugin\"\nname = \"ZW\"\nversion = \"0.1.0\"\nentry = \"plugin.wasm\"\n\n[[capabilities]]\nkind = \"http\"\nhosts = [\"https://api.example.com\"]\nreason = \"fetch\u{200B}data\"\n",
     );
 
-    let err = load_manifest(&plugin_dir)
-        .expect_err("zero-width character in reason must be rejected");
+    let err =
+        load_manifest(&plugin_dir).expect_err("zero-width character in reason must be rejected");
     assert!(matches!(err, ManifestError::BadCapability(_)));
 }
 
@@ -934,8 +933,7 @@ fn reason_with_control_character_is_rejected() {
         "id = \"control-char-reason-plugin\"\nname = \"CC\"\nversion = \"0.1.0\"\nentry = \"plugin.wasm\"\n\n[[capabilities]]\nkind = \"http\"\nhosts = [\"https://api.example.com\"]\nreason = \"fetch\\ndata\"\n",
     );
 
-    let err =
-        load_manifest(&plugin_dir).expect_err("control character in reason must be rejected");
+    let err = load_manifest(&plugin_dir).expect_err("control character in reason must be rejected");
     assert!(matches!(err, ManifestError::BadCapability(_)));
 }
 
@@ -1056,8 +1054,7 @@ reason = "fetch data"
 "#,
     );
 
-    let manifest =
-        load_manifest(&plugin_dir).expect("bare trailing slash host should be accepted");
+    let manifest = load_manifest(&plugin_dir).expect("bare trailing slash host should be accepted");
     assert_eq!(
         manifest.capabilities[0],
         CapabilityRequest::Http {
@@ -1229,20 +1226,17 @@ fn unknown_mode_duplicate_name_and_blank_reason_are_rejected() {
         ManifestError::BadFilesystem(_)
     ));
     assert!(matches!(
-        parse_fs_manifest(
-            "[[filesystem]]\nname = \"Exports\"\nreason = \"r\"\nmode = \"read\"\n"
-        )
-        .expect_err("uppercase name"),
+        parse_fs_manifest("[[filesystem]]\nname = \"Exports\"\nreason = \"r\"\nmode = \"read\"\n")
+            .expect_err("uppercase name"),
         ManifestError::BadFilesystem(_)
     ));
 }
 
 #[test]
 fn filesystem_fingerprint_is_stable_and_changes_with_the_request() {
-    let manifest = parse_fs_manifest(
-        "[[filesystem]]\nname = \"exports\"\nreason = \"r\"\nmode = \"read\"\n",
-    )
-    .unwrap();
+    let manifest =
+        parse_fs_manifest("[[filesystem]]\nname = \"exports\"\nreason = \"r\"\nmode = \"read\"\n")
+            .unwrap();
     let first = manifest.filesystem_fingerprint("exports").unwrap();
     assert_eq!(first, manifest.filesystem_fingerprint("exports").unwrap());
     assert_eq!(manifest.filesystem_fingerprint("nope"), None);

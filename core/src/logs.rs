@@ -206,7 +206,7 @@ mod tests {
             .contains("checked 3 systems"));
     }
 
-    /// ターゲット指定(`edlr_core::plugin::host=debug`)も素直に効く。
+    /// ターゲット指定(`edlr_core::host::plugin=debug`)も素直に効く。
     #[test]
     fn filter_accepts_per_target_directives() {
         use tracing_subscriber::layer::SubscriberExt;

@@ -17,14 +17,14 @@
 
 use std::sync::{Arc, Mutex};
 
-use crate::settings::filesystem::FilesystemConfigStore;
-use crate::runtime::fs::{filesystem_json_string, FsRuntimeEntry};
 use crate::capability::grants::GrantsStore;
 use crate::host::plugin::capabilities_json_string;
-use crate::settings::store::SettingsStore;
-use crate::settings::sidecar::{assign_ports, SidecarConfig, SidecarConfigStore};
-use crate::runtime::sidecar::{implicit_http_hosts, sidecars_json_string, SidecarRuntimeEntry};
 use crate::registry::subject::RegistrySubject;
+use crate::runtime::fs::{filesystem_json_string, FsRuntimeEntry};
+use crate::runtime::sidecar::{implicit_http_hosts, sidecars_json_string, SidecarRuntimeEntry};
+use crate::settings::filesystem::FilesystemConfigStore;
+use crate::settings::sidecar::{assign_ports, SidecarConfig, SidecarConfigStore};
+use crate::settings::store::SettingsStore;
 
 /// 起動直後の共有 JSON バッファ初期値。plugin/driver 共通部
 /// (settings / sidecars / capabilities / filesystem)。bus は plugin 専用
@@ -127,7 +127,9 @@ pub(crate) fn build_initial_buffers<S: RegistrySubject>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::capability::request::{CapabilityRequest, FilesystemMode, FilesystemRequest, SidecarRequest};
+    use crate::capability::request::{
+        CapabilityRequest, FilesystemMode, FilesystemRequest, SidecarRequest,
+    };
     use crate::manifest::Manifest;
 
     fn plain_manifest(id: &str) -> Manifest {

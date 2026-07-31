@@ -3,8 +3,8 @@
 //! `rpc/` を呼んで JSON を組み立てるだけの薄い層に保つ -- RPC の解釈・整形
 //! ロジック自体は持たない。
 
-use crate::registry::driver::DriverRegistry;
 use crate::event::Event;
+use crate::registry::driver::DriverRegistry;
 use crate::registry::plugin::Registry;
 use crate::router::Router;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};

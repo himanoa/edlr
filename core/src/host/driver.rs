@@ -673,10 +673,7 @@ mod tests {
         )
     }
 
-    fn sidecar_entry(
-        granted: bool,
-        command: &str,
-    ) -> crate::runtime::sidecar::SidecarRuntimeEntry {
+    fn sidecar_entry(granted: bool, command: &str) -> crate::runtime::sidecar::SidecarRuntimeEntry {
         crate::runtime::sidecar::SidecarRuntimeEntry {
             name: "tts".to_string(),
             granted,
@@ -686,11 +683,7 @@ mod tests {
         }
     }
 
-    fn fs_entry(
-        granted: bool,
-        mode: &str,
-        path: &str,
-    ) -> crate::runtime::fs::FsRuntimeEntry {
+    fn fs_entry(granted: bool, mode: &str, path: &str) -> crate::runtime::fs::FsRuntimeEntry {
         crate::runtime::fs::FsRuntimeEntry {
             name: "exports".to_string(),
             granted,

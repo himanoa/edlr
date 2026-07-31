@@ -120,9 +120,7 @@ impl GrantsStore {
         let saved = self.read_saved(manifest);
         resolve_grant(
             current.as_deref(),
-            saved
-                .as_ref()
-                .map(|s| (s.fingerprint.as_str(), s.granted)),
+            saved.as_ref().map(|s| (s.fingerprint.as_str(), s.granted)),
         )
     }
 

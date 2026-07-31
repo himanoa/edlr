@@ -11,26 +11,26 @@ use std::thread;
 use edlr_driver_channel::Bus;
 use edlr_driver_process::{InstanceStatus, ProcessDriver};
 
-use crate::registry::driver::DriverRegistry;
-use crate::runtime::dropped::{DropCounters, DroppedCounts};
-use crate::settings::filesystem::{FilesystemConfig, FilesystemConfigError, FilesystemConfigStore};
 use crate::capability::grants::{GrantState, GrantsError, GrantsStore};
-use crate::host::plugin::PluginHost;
-use crate::runner::plugin::PluginWork;
-use crate::schedule::{Clock, ScheduleState, ScheduleView};
-use crate::settings::store::{split_secrets, SettingsError, SettingsStore};
-use crate::settings::sidecar::{SidecarConfig, SidecarConfigError, SidecarConfigStore};
-use crate::manifest::{Manifest, ScheduleSpec};
 use crate::capability::request::{
     BusRequest, CapabilityRequest, DashboardWidget, FilesystemRequest, SidecarRequest,
 };
+use crate::host::plugin::PluginHost;
+use crate::manifest::{Manifest, ScheduleSpec};
 use crate::registry::bus::DiskBusService;
+use crate::registry::driver::DriverRegistry;
 use crate::registry::entries::{EntryTable, IdLocks};
 use crate::registry::filesystem::DiskFilesystemService;
 use crate::registry::grants::DiskGrantService;
 use crate::registry::settings::DiskSettingsService;
 use crate::registry::sidecar::DiskSidecarService;
 use crate::registry::supervisor::ThreadSupervisor;
+use crate::runner::plugin::PluginWork;
+use crate::runtime::dropped::{DropCounters, DroppedCounts};
+use crate::schedule::{Clock, ScheduleState, ScheduleView};
+use crate::settings::filesystem::{FilesystemConfig, FilesystemConfigError, FilesystemConfigStore};
+use crate::settings::sidecar::{SidecarConfig, SidecarConfigError, SidecarConfigStore};
+use crate::settings::store::{split_secrets, SettingsError, SettingsStore};
 
 /// プラグイン 1 件の現在の駆動状態。
 #[derive(Debug, Clone, PartialEq)]
@@ -1391,10 +1391,8 @@ pub(crate) mod tests {
     #[test]
     fn list_falls_back_to_the_estimate_when_nothing_is_published() {
         let registry = test_registry_with_schedule();
-        registry.register_schedule_view(
-            "scheduler-plugin",
-            crate::schedule::ScheduleView::default(),
-        );
+        registry
+            .register_schedule_view("scheduler-plugin", crate::schedule::ScheduleView::default());
 
         let infos = registry.list();
         assert_eq!(infos[0].schedules.len(), 2);
@@ -1587,8 +1585,7 @@ pub(crate) mod tests {
             .set_bus_grant("translator", "ed-state", true)
             .expect("granting a declared bus connection should succeed");
         assert!(granted.granted);
-        let parsed =
-            crate::runtime::bus::parse_bus(&registry.bus_buffer("translator").unwrap());
+        let parsed = crate::runtime::bus::parse_bus(&registry.bus_buffer("translator").unwrap());
         let entry = parsed.get("ed-state").expect("entry present after grant");
         assert!(entry.granted);
         assert_eq!(entry.subscribe, vec!["current-system".to_string()]);
@@ -1597,8 +1594,7 @@ pub(crate) mod tests {
             .set_bus_grant("translator", "ed-state", false)
             .expect("revoking should succeed");
         assert!(!revoked.granted);
-        let parsed =
-            crate::runtime::bus::parse_bus(&registry.bus_buffer("translator").unwrap());
+        let parsed = crate::runtime::bus::parse_bus(&registry.bus_buffer("translator").unwrap());
         let entry = parsed
             .get("ed-state")
             .expect("entry still present after revoke");

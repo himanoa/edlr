@@ -32,16 +32,16 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use crate::capability::GrantStorage;
 use crate::capability::grants::GrantState;
-use crate::host::plugin::{capabilities_json_string, parse_capability_hosts};
-use crate::registry::plugin::{DashboardInfo, PluginEntry, PluginState, RegistryError};
-use crate::runtime::sidecar::{parse_sidecars, SidecarRuntimeEntry};
-use crate::manifest::Manifest;
 use crate::capability::request::CapabilityRequest;
+use crate::capability::GrantStorage;
+use crate::host::plugin::{capabilities_json_string, parse_capability_hosts};
+use crate::manifest::Manifest;
 use crate::registry::entries::EntryTable;
+use crate::registry::plugin::{DashboardInfo, PluginEntry, PluginState, RegistryError};
 use crate::registry::sidecar::{merged_effective_hosts, SidecarEntry};
 use crate::registry::subject::RegistrySubject;
+use crate::runtime::sidecar::{parse_sidecars, SidecarRuntimeEntry};
 
 /// capability 承認群(`capabilities` / `set_capabilities` / `effective_hosts`)
 /// と、ダッシュボードウィジェット群(`dashboard` / `set_dashboard_grant` /

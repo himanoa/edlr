@@ -113,22 +113,22 @@ use tokio::sync::broadcast;
 
 use edlr_driver_channel::{Bus, Delivery};
 
-use crate::registry::driver::DriverRegistry;
-use crate::event::Event;
-use crate::runtime::bus::{bus_json_string, parse_bus, BusRuntimeEntry};
-use crate::runtime::dropped::DropCounters;
-use crate::settings::filesystem::FilesystemConfigStore;
 use crate::capability::grants::GrantsStore;
+use crate::event::Event;
 use crate::host::plugin::{HostCtx, PluginCallError, PluginHost, PluginInstance};
-use crate::manifest::{load_manifest, matches_event};
-use crate::registry::plugin::{PluginEntry, PluginState, Registry};
-use crate::schedule::{Clock, ScheduleState, ScheduleView};
-use crate::schedule::store::ScheduleStore;
-use crate::settings::store::SettingsStore;
-use crate::settings::sidecar::SidecarConfigStore;
 use crate::manifest::Manifest;
+use crate::manifest::{load_manifest, matches_event};
+use crate::registry::driver::DriverRegistry;
+use crate::registry::plugin::{PluginEntry, PluginState, Registry};
 use crate::router::Router;
 use crate::runner::bootstrap::{build_initial_buffers, InitialBuffers};
+use crate::runtime::bus::{bus_json_string, parse_bus, BusRuntimeEntry};
+use crate::runtime::dropped::DropCounters;
+use crate::schedule::store::ScheduleStore;
+use crate::schedule::{Clock, ScheduleState, ScheduleView};
+use crate::settings::filesystem::FilesystemConfigStore;
+use crate::settings::sidecar::SidecarConfigStore;
+use crate::settings::store::SettingsStore;
 
 /// スケジュールが 1 件も無いプラグイン向けのフォールバックタイムアウト。
 ///
