@@ -12,9 +12,7 @@ pub fn capabilities_result_json(
 }
 
 /// `plugins/set-dashboard-grant`・`plugins/list` が共有する応答形。
-pub fn dashboard_result_json(
-    dashboard: &[crate::registry::plugin::DashboardInfo],
-) -> serde_json::Value {
+pub fn dashboard_result_json(dashboard: &[crate::rpc::info::DashboardInfo]) -> serde_json::Value {
     let items: Vec<serde_json::Value> = dashboard
         .iter()
         .map(|info| {
@@ -43,7 +41,7 @@ pub fn dashboard_result_json(
 /// `ServerState` の `DriverRegistry` から独立に再計算していたが、それは
 /// 同じ判定ロジックの二重管理になり、将来どちらか片方だけ直した変更が
 /// サイレントに食い違ってしまう(コードレビュー指摘)。
-pub fn bus_result_json(bus: &[crate::registry::plugin::BusInfo]) -> serde_json::Value {
+pub fn bus_result_json(bus: &[crate::rpc::info::BusInfo]) -> serde_json::Value {
     let items: Vec<serde_json::Value> = bus
         .iter()
         .map(|info| {
@@ -83,9 +81,7 @@ pub fn dropped_result_json(dropped: &crate::runtime::dropped::DroppedCounts) -> 
 /// `next` は `Registry::ScheduleInfo` のドキュメントコメントが説明する
 /// とおり、プラグインスレッドが `ScheduleView` へ公開した実際の発火予定時刻
 /// (未公開・Disabled のときだけその場の推定値へフォールバックする)。
-pub fn schedules_result_json(
-    schedules: &[crate::registry::plugin::ScheduleInfo],
-) -> serde_json::Value {
+pub fn schedules_result_json(schedules: &[crate::rpc::info::ScheduleInfo]) -> serde_json::Value {
     let items: Vec<serde_json::Value> = schedules
         .iter()
         .map(|info| {
@@ -101,9 +97,7 @@ pub fn schedules_result_json(
 
 /// `get-sidecars` / `set-sidecar-*` / `sidecar-control` の共通 result 形と、
 /// `plugins/list` の各要素の `sidecars` フィールドに使う JSON。
-pub fn sidecars_result_json(
-    sidecars: &[crate::registry::plugin::SidecarInfo],
-) -> serde_json::Value {
+pub fn sidecars_result_json(sidecars: &[crate::rpc::info::SidecarInfo]) -> serde_json::Value {
     let items: Vec<serde_json::Value> = sidecars
         .iter()
         .map(|info| {
@@ -130,9 +124,7 @@ pub fn sidecars_result_json(
 
 /// `get-filesystem` / `set-filesystem-*` の共通 result 形と、`plugins/list`
 /// の各要素の `filesystem` フィールドに使う JSON: `{ "roots": [...] }`。
-pub fn filesystem_result_json(
-    roots: &[crate::registry::plugin::FilesystemInfo],
-) -> serde_json::Value {
+pub fn filesystem_result_json(roots: &[crate::rpc::info::FilesystemInfo]) -> serde_json::Value {
     let items: Vec<serde_json::Value> = roots
         .iter()
         .map(|info| {
@@ -158,9 +150,7 @@ mod tests {
         SidecarRequest, WidgetSize,
     };
     use crate::manifest::ScheduleSpec;
-    use crate::registry::plugin::{
-        BusInfo, DashboardInfo, FilesystemInfo, ScheduleInfo, SidecarInfo,
-    };
+    use crate::rpc::info::{BusInfo, DashboardInfo, FilesystemInfo, ScheduleInfo, SidecarInfo};
     use crate::settings::filesystem::FilesystemConfig;
     use crate::settings::sidecar::SidecarConfig;
     use edlr_driver_process::InstanceStatus;
