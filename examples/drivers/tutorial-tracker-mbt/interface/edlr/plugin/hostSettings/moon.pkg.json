@@ -1,0 +1,1 @@
+{ "import": [{ "path" : "edlr/plugin/ffi", "alias" : "ffi" }] }

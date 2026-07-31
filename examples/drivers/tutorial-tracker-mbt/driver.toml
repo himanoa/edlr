@@ -1,0 +1,14 @@
+id = "tutorial-tracker-mbt"
+name = "Jump Tracker (MoonBit tutorial)"
+version = "0.1.0"
+entry = "driver.wasm"
+
+[[topics]]
+name = "visit"
+retain = false
+description = "プラグインからの訪問報告(星系名)"
+
+[[topics]]
+name = "last-system"
+retain = true
+description = "最後に訪問した星系と通算訪問回数の JSON"

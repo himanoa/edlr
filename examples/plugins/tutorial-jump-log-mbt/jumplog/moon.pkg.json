@@ -1,0 +1,7 @@
+{
+  "import": [
+    "moonbitlang/core/json",
+    "moonbitlang/core/double",
+    "moonbitlang/core/encoding/utf8"
+  ]
+}

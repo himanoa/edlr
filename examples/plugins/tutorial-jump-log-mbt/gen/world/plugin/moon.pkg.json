@@ -1,0 +1,28 @@
+{
+  "import": [
+    {
+      "path": "edlr/plugin/world/plugin",
+      "alias": "plugin"
+    },
+    {
+      "path": "edlr/plugin/interface/edlr/plugin/hostLog",
+      "alias": "hostLog"
+    },
+    {
+      "path": "edlr/plugin/interface/edlr/plugin/hostSettings",
+      "alias": "hostSettings"
+    },
+    {
+      "path": "edlr/plugin/interface/edlr/plugin/driverHttp",
+      "alias": "driverHttp"
+    },
+    {
+      "path": "edlr/plugin/interface/edlr/plugin/bus",
+      "alias": "bus"
+    },
+    {
+      "path": "edlr/plugin/jumplog",
+      "alias": "jumplog"
+    }
+  ]
+}

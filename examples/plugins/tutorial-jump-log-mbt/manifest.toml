@@ -1,0 +1,33 @@
+id = "tutorial-jump-log-mbt"
+name = "Jump Log (MoonBit tutorial)"
+version = "0.1.0"
+description = "docs/plugin-tutorial-moonbit.md で育てるプラグインの完成形"
+entry = "plugin.wasm"
+events = ["FSDJump"]
+
+[[settings]]
+key = "enabled"
+label = "有効にする"
+type = "boolean"
+default = true
+
+[[settings]]
+key = "minDistance"
+label = "記録する最小跳躍距離 (ly)"
+type = "number"
+default = 0
+
+[[capabilities]]
+kind = "http"
+hosts = ["https://www.edsm.net"]
+reason = "跳んだ先の星系が EDSM に登録済みかを問い合わせるため"
+
+[[schedule]]
+name = "flush"
+interval-seconds = 10
+
+[[bus]]
+driver = "tutorial-tracker-mbt"
+publish = ["visit"]
+subscribe = ["last-system"]
+reason = "訪問した星系を tracker ドライバへ渡し、集計された最新値を受け取るため"

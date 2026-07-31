@@ -1,0 +1,1 @@
+{ "import": [{ "path" : "edlr/plugin/ffi", "alias" : "ffi" }, { "path" : "edlr/plugin/interface/edlr/plugin/busTypes", "alias" : "busTypes" }] }

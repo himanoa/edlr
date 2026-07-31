@@ -1,0 +1,7 @@
+{
+  "import": [
+    { "path" : "edlr/plugin/interface/edlr/plugin/hostLog", "alias" : "hostLog" },
+    { "path" : "edlr/plugin/interface/edlr/plugin/busHost", "alias" : "busHost" },
+    "moonbitlang/core/encoding/utf8"
+  ]
+}
