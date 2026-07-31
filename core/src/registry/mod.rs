@@ -11,6 +11,7 @@ pub(crate) mod entries;
 pub(crate) mod filesystem;
 pub(crate) mod grants;
 pub mod plugin;
+pub(crate) mod select_options;
 pub(crate) mod settings;
 pub(crate) mod sidecar;
 pub(crate) mod subject;

@@ -1,5 +1,7 @@
-pub mod allowlist;
-pub mod filesystem;
+// Phase 6 タスク4で host/allowlist.rs へ移設(旧パス互換。削除は本 Phase の Task 5)。
+pub use crate::host::allowlist;
+// Phase 6 タスク4で settings/filesystem.rs へ移設(旧パス互換。削除は本 Phase の Task 5)。
+pub use crate::settings::filesystem;
 // Phase 1 で capability/grants.rs へ移動(旧パス互換。削除は Phase 6)。
 pub use crate::capability::grants;
 // Phase 5 タスク3で host/plugin.rs へ移動(旧パス互換。削除は Phase 6)。
@@ -18,10 +20,12 @@ pub use crate::runtime::sidecar as sidecar_runtime;
 // Phase 3 で schedule/ へ移動(旧パス互換。削除は Phase 6)。
 pub(crate) use crate::schedule;
 pub use crate::schedule::store as schedule_store;
-pub(crate) mod select_options;
+// Phase 6 タスク4で registry/select_options.rs へ移設(旧パス互換。削除は本 Phase の Task 5)。
+pub(crate) use crate::registry::select_options;
 // Phase 3 で settings/store.rs へ移動(旧パス互換。削除は Phase 6)。
 pub use crate::settings::store as settings;
-pub mod sidecar;
+// Phase 6 タスク4で settings/sidecar.rs へ移設(旧パス互換。削除は本 Phase の Task 5)。
+pub use crate::settings::sidecar;
 
 pub use bus_runtime::{bus_json_string, parse_bus, BusRuntimeEntry};
 pub use filesystem::{FilesystemConfig, FilesystemConfigError, FilesystemConfigStore};

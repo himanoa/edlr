@@ -3,6 +3,8 @@
 //! 検証・マージの純粋ロジックは [`validate`] にある。永続化(ディスク I/O)は
 //! [`store`] が担う。
 
+pub mod filesystem;
+pub mod sidecar;
 pub mod store;
 pub mod validate;
 
