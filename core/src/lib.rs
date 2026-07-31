@@ -5,6 +5,7 @@ pub mod event;
 pub mod host;
 pub mod journal;
 pub mod logs;
+pub mod manifest;
 pub mod monitor;
 pub mod plugin;
 pub mod registry;

@@ -3,6 +3,8 @@ use std::fmt;
 use std::fs;
 use std::path::Path;
 
+pub mod driver;
+
 /// `select` の候補 1 件。
 ///
 /// TOML でも JSON でも **`"foo"` と `{ value = "...", label = "..." }` の両方**を

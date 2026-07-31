@@ -1360,7 +1360,7 @@ reason = "two"
 /// duplicate `[[bus]]` blocks for the same driver, but not duplicate
 /// topic names *within* one block's `publish`/`subscribe` list.
 /// `subscribe = ["a", "a"]` used to be accepted and created two separate
-/// subscriptions (`crate::driver::manifest::validate_topics` already
+/// subscriptions (`crate::manifest::driver::validate_topics` already
 /// dedupes `[[topics]]` the same way; this brings `[[bus]]` in line).
 #[test]
 fn rejects_duplicate_topics_within_one_bus_blocks_publish_or_subscribe() {

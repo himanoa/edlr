@@ -4,7 +4,7 @@ use std::path::Path;
 
 use edlr_driver_channel::TopicSpec;
 
-use crate::plugin::manifest::{
+use crate::manifest::{
     is_valid_id, unknown_top_level_keys, validate_capabilities, validate_filesystem,
     validate_settings, validate_sidecars, warn_unknown_top_level_keys, CapabilityRequest,
     FilesystemRequest, ManifestError, SettingField, SidecarRequest,
@@ -26,7 +26,7 @@ pub(crate) const DRIVER_MANIFEST_TOP_LEVEL_KEYS: &[&str] = &[
 
 /// `driver.toml` のパース結果。
 ///
-/// `crate::plugin::manifest::Manifest` と対称の形だが、ドライバは
+/// `crate::manifest::Manifest` と対称の形だが、ドライバは
 /// プラグインと違い他のドライバとバス接続しない(`[[bus]]` は存在しない)
 /// 代わりに、自身が公開する `[[topics]]` を持つ。
 #[derive(Debug, Clone, PartialEq, serde::Deserialize)]
@@ -55,7 +55,7 @@ impl DriverManifest {
     }
 
     /// `SettingsStore`/`GrantsStore`/`SidecarConfigStore`/`FilesystemConfigStore`
-    /// はいずれも `crate::plugin::Manifest` を引数に取るよう作られている
+    /// はいずれも `crate::manifest::Manifest` を引数に取るよう作られている
     /// (`driver` モジュールのドキュメントコメントが言う「共有するのは
     /// grants / settings の下位ユーティリティ程度」の実体)。ドライバはこれら
     /// を書き換えずにそのまま再利用するため、それぞれのメソッドが実際に参照
@@ -63,8 +63,8 @@ impl DriverManifest {
     /// 詰めた `Manifest` をここで組み立てて渡す。`name`/`version`/
     /// `description`/`entry`/`events`/`bus` はこれらのストアのどのメソッドから
     /// も読まれないため、空/既定値のままでよい。
-    pub(crate) fn as_settings_manifest(&self) -> crate::plugin::Manifest {
-        crate::plugin::Manifest {
+    pub(crate) fn as_settings_manifest(&self) -> crate::manifest::Manifest {
+        crate::manifest::Manifest {
             id: self.id.clone(),
             name: self.name.clone(),
             version: self.version.clone(),
@@ -102,7 +102,7 @@ fn validate_topics(topics: &[TopicSpec]) -> Result<(), ManifestError> {
 
 /// `dir/driver.toml` を読み込み、検証して返す。
 ///
-/// `crate::plugin::manifest::load_manifest` と同じ構造(id の字種検証・
+/// `crate::manifest::load_manifest` と同じ構造(id の字種検証・
 /// ディレクトリ名との一致・`entry` の実在確認・`capabilities` /
 /// `sidecar` / `filesystem` / `settings` の検証)に加えて `topics` を検証する。
 /// 検証エラーは `Err` として返す(panic しない)。
@@ -335,7 +335,7 @@ settings = [{ key = "voice", label = "Voice", type = "string", default = "a" }]
 
     #[test]
     fn unknown_top_level_keys_are_reported() {
-        let unknown = crate::plugin::manifest::unknown_top_level_keys(
+        let unknown = crate::manifest::unknown_top_level_keys(
             r#"
 id = "ed-state"
 name = "ED State"
@@ -351,7 +351,7 @@ topic = []
 
     #[test]
     fn a_driver_manifest_using_only_known_top_level_keys_reports_nothing() {
-        let unknown = crate::plugin::manifest::unknown_top_level_keys(
+        let unknown = crate::manifest::unknown_top_level_keys(
             r#"
 id = "ed-state"
 name = "ED State"
