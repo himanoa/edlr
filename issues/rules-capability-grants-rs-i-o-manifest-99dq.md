@@ -2,10 +2,10 @@
 id: rules-capability-grants-rs-i-o-manifest-99dq
 title: rules 文書と実装の乖離: capability/ の純粋分類と grants.rs の I/O・manifest との相互参照
 summary: Phase 1 で grants.rs(std::fs/Mutex 使用)が純粋分類の capability/ 配下へ移動し .claude/rules/ の記述と矛盾。また validate.rs → manifest::ManifestError の逆辺があり Phase 6 で解消要 / 未着手
-status: open
+status: closed
 labels: docs, refactor
 created: 2026-07-30T13:08:14Z
-updated: 2026-07-30T15:36:29Z
+updated: 2026-07-31T06:33:15Z
 ---
 
 ## どこで踏んだか
@@ -62,3 +62,12 @@ Phase 3 で `core/src/settings/store.rs`(SettingsStore、std::fs + Mutex)も
 文字列は凍結のまま。あわせて新規テストが旧互換パス
 (`crate::plugin::grants::GrantState` 等)を参照している箇所も Phase 6 の
 旧パス削除時に正規パスへ置換する。
+
+## 解決(2026-07-31)
+
+コミット b20b39b で:
+- pure-imperative-boundary.md に「Storage trait のディスク実装ファイル4件は公認の例外」を明文化、module-layout.md にも注記
+- 逆辺1(capability/validate → manifest): is_valid_id を capability/validate へ移動(manifest は pub use)、
+  validate_bus/validate_widget_entry を Result<(), String> 化して ManifestError への wrap を manifest 側へ(文字列 byte 同一)
+- 逆辺2(settings/validate → store): SettingsError を settings/mod.rs へ移動(store は pub use)
+capability/mod.rs・grants.rs の Manifest **値型** import は rpc/render の前例と同じ公認例外として存置。
