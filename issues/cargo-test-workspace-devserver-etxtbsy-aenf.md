@@ -1,11 +1,11 @@
 ---
 id: cargo-test-workspace-devserver-etxtbsy-aenf
 title: cargo test --workspace が devserver のテストで ETXTBSY で落ちることがある
-summary: tempdir に書いた sh スクリプトを spawn する devserver のテストが、他スレッドの fork と競合して Text file busy で落ちる(単体実行では通る) / 未着手
-status: open
+summary: tempdir に書いた sh スクリプトを spawn する devserver のテストが、他スレッドの fork と競合して Text file busy で落ちる(単体実行では通る) / /bin/sh 経由 exec に変更して解消(722a70c)
+status: closed
 labels: flaky-test
 created: 2026-07-29T07:52:47Z
-updated: 2026-07-29T07:53:24Z
+updated: 2026-07-31T12:30:46Z
 ---
 
 ## 現象
@@ -55,3 +55,10 @@ issue `info-host-log-debug-efeq` の修正をマージした直後の検証で�
 案 2 が競合そのものを無くすので素直。`spawn_in_own_process_group` が
 「実行ファイルのパス」を受け取る前提なら、`sh` のパスと `-c` 引数を渡す形に
 できるか確認する必要がある。
+
+## 対応(2026-07-31)
+
+案 2 を採用。テストが tempfile を直接 exec するのをやめ、
+`spawn_in_own_process_group("/bin/sh", [script])` に変更(commit 722a70c)。
+新規作成した実行ファイルを exec しなくなったので ETXTBSY の競合自体が消えた。
+`spawn_in_own_process_group` は program + args を受ける形のままで変更不要だった。
