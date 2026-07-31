@@ -18,6 +18,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 #[allow(unused_imports)]
 use std::sync::Arc;
+use std::time::Duration;
 
 use edlr_core::capability::grants::GrantsStore;
 use edlr_core::host::driver::DriverHost;
@@ -30,6 +31,8 @@ use edlr_core::schedule::store::ScheduleStore;
 use edlr_core::settings::filesystem::FilesystemConfigStore;
 use edlr_core::settings::sidecar::SidecarConfigStore;
 use edlr_core::settings::store::SettingsStore;
+use futures_util::{SinkExt, StreamExt};
+use tokio_tungstenite::tungstenite::Message;
 
 /// ドライバを 1 件もロードしていない `DriverRegistry`(存在しないディレクトリ
 /// を走査させることで空のまま作る)。バス機能を主眼にしないテストの
@@ -45,6 +48,128 @@ pub fn empty_driver_registry(tmp_path: &Path) -> DriverRegistry {
         edlr_driver_channel::Bus::new(),
         DriverHost::new().expect("driver host should build"),
     )
+}
+
+/// `rpc_pin_integration.rs` と `ws_rpc_integration.rs` の両方で使う WS
+/// クライアントの型・接続・送受信ヘルパ(issue yzyv: 両ファイルで完全一致
+/// していた重複を集約)。
+#[allow(dead_code)]
+pub type Ws =
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+
+#[allow(dead_code)]
+pub async fn connect(addr: std::net::SocketAddr) -> Ws {
+    let (ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws"))
+        .await
+        .expect("connect");
+    ws
+}
+
+#[allow(dead_code)]
+pub async fn recv_json(ws: &mut Ws) -> serde_json::Value {
+    loop {
+        let msg = tokio::time::timeout(Duration::from_secs(5), ws.next())
+            .await
+            .expect("timeout")
+            .expect("stream ended")
+            .expect("ws error");
+        if let Message::Text(text) = msg {
+            return serde_json::from_str(&text).expect("valid json");
+        }
+    }
+}
+
+#[allow(dead_code)]
+pub async fn recv_hello(ws: &mut Ws) {
+    assert_eq!(recv_json(ws).await["type"], "hello");
+}
+
+#[allow(dead_code)]
+pub async fn send_rpc(ws: &mut Ws, id: i64, method: &str, params: serde_json::Value) {
+    let msg = serde_json::json!({
+        "type": "rpc",
+        "id": id,
+        "method": method,
+        "params": params,
+    });
+    ws.send(Message::Text(msg.to_string().into()))
+        .await
+        .unwrap();
+}
+
+/// `examples/plugins/http-caller` を `wasm32-wasip2` 向けにビルドし、できあがった
+/// `.wasm` へのパスを返す。
+#[allow(dead_code)]
+fn http_caller_wasm() -> PathBuf {
+    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let crate_path = manifest_dir.join("..").join("examples/plugins/http-caller");
+
+    let status = Command::new("cargo")
+        .args(["build", "--target", "wasm32-wasip2", "--release"])
+        .current_dir(&crate_path)
+        .status()
+        .expect("failed to spawn cargo build for fixture plugin");
+    assert!(status.success(), "http-caller fixture build failed");
+
+    crate_path
+        .join("target/wasm32-wasip2/release")
+        .join("http_caller.wasm")
+}
+
+#[allow(dead_code)]
+fn write_http_caller(plugins_dir: &Path) {
+    let dir = plugins_dir.join("http-caller");
+    std::fs::create_dir_all(&dir).unwrap();
+    let wasm_src = http_caller_wasm();
+    std::fs::copy(&wasm_src, dir.join("http_caller.wasm")).unwrap();
+    std::fs::write(
+        dir.join("manifest.toml"),
+        r#"
+id = "http-caller"
+name = "http-caller"
+version = "0.1.0"
+entry = "http_caller.wasm"
+events = ["FSDJump"]
+
+[[capabilities]]
+kind = "http"
+hosts = ["https://api.example.com"]
+reason = "test"
+"#,
+    )
+    .unwrap();
+}
+
+/// capability を宣言した http-caller プラグイン 1 件を持つ `Registry`
+/// (`rpc_pin_integration.rs`/`ws_rpc_integration.rs` の両方で使う)。
+#[allow(dead_code)]
+pub fn http_caller_registry() -> (tempfile::TempDir, Registry) {
+    let tmp = tempfile::tempdir().unwrap();
+    let plugins_dir = tmp.path().join("plugins");
+    std::fs::create_dir_all(&plugins_dir).unwrap();
+    write_http_caller(&plugins_dir);
+
+    let settings_store = SettingsStore::new(tmp.path().join("settings"));
+    let grants_store = GrantsStore::new(tmp.path().join("grants"));
+    let sidecar_config_store = SidecarConfigStore::new(tmp.path().join("settings"));
+    let filesystem_config_store =
+        FilesystemConfigStore::new(tmp.path().join("settings"), Vec::new());
+    let router = Router::new(16);
+    let host = PluginHost::new().expect("host should start");
+
+    let registry = edlr_core::runner::plugin::start_plugins(
+        &plugins_dir,
+        settings_store,
+        sidecar_config_store,
+        filesystem_config_store,
+        grants_store,
+        ScheduleStore::new(tmp.path().join("settings")),
+        &router,
+        edlr_driver_channel::Bus::new(),
+        empty_driver_registry(tmp.path()),
+        host,
+    );
+    (tmp, registry)
 }
 
 pub struct Env {

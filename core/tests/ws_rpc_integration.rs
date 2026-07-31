@@ -9,18 +9,16 @@ use edlr_core::server::{self, ServerState};
 use edlr_core::settings::filesystem::FilesystemConfigStore;
 use edlr_core::settings::sidecar::SidecarConfigStore;
 use edlr_core::settings::store::SettingsStore;
-use futures_util::{SinkExt, StreamExt};
+use futures_util::SinkExt;
 use std::fs;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::Duration;
 use tokio_tungstenite::tungstenite::Message;
 
 mod support;
 
-type Ws =
-    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+use support::{connect, recv_hello, recv_json, send_rpc, Ws};
 
 fn hello_logger_wasm() -> PathBuf {
     let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -95,77 +93,6 @@ fn hello_logger_registry() -> (tempfile::TempDir, Registry) {
     (tmp, registry)
 }
 
-fn http_caller_wasm() -> PathBuf {
-    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let crate_path = manifest_dir.join("..").join("examples/plugins/http-caller");
-
-    let status = Command::new("cargo")
-        .args(["build", "--target", "wasm32-wasip2", "--release"])
-        .current_dir(&crate_path)
-        .status()
-        .expect("failed to spawn cargo build for fixture plugin");
-    assert!(status.success(), "http-caller fixture build failed");
-
-    crate_path
-        .join("target/wasm32-wasip2/release")
-        .join("http_caller.wasm")
-}
-
-fn write_http_caller(plugins_dir: &Path) {
-    let dir = plugins_dir.join("http-caller");
-    fs::create_dir_all(&dir).unwrap();
-    let wasm_src = http_caller_wasm();
-    fs::copy(&wasm_src, dir.join("http_caller.wasm")).unwrap();
-    fs::write(
-        dir.join("manifest.toml"),
-        r#"
-id = "http-caller"
-name = "http-caller"
-version = "0.1.0"
-entry = "http_caller.wasm"
-events = ["FSDJump"]
-
-[[capabilities]]
-kind = "http"
-hosts = ["https://api.example.com"]
-reason = "test"
-"#,
-    )
-    .unwrap();
-}
-
-/// Builds a `Registry` with a single running http-caller plugin (which
-/// declares an http capability request), under a fresh tempdir for plugins,
-/// settings, and grants storage.
-fn http_caller_registry() -> (tempfile::TempDir, Registry) {
-    let tmp = tempfile::tempdir().unwrap();
-    let plugins_dir = tmp.path().join("plugins");
-    fs::create_dir_all(&plugins_dir).unwrap();
-    write_http_caller(&plugins_dir);
-
-    let settings_store = SettingsStore::new(tmp.path().join("settings"));
-    let grants_store = GrantsStore::new(tmp.path().join("grants"));
-    let sidecar_config_store = SidecarConfigStore::new(tmp.path().join("settings"));
-    let filesystem_config_store =
-        FilesystemConfigStore::new(tmp.path().join("settings"), Vec::new());
-    let router = Router::new(16);
-    let host = PluginHost::new().expect("host should start");
-
-    let registry = start_plugins(
-        &plugins_dir,
-        settings_store,
-        sidecar_config_store,
-        filesystem_config_store,
-        grants_store,
-        ScheduleStore::new(tmp.path().join("settings")),
-        &router,
-        edlr_driver_channel::Bus::new(),
-        support::empty_driver_registry(tmp.path()),
-        host,
-    );
-    (tmp, registry)
-}
-
 async fn setup(registry: Option<Registry>) -> (Router, SocketAddr) {
     let router = Router::new(64);
     let state = ServerState::new(&router, registry, None);
@@ -173,42 +100,6 @@ async fn setup(registry: Option<Registry>) -> (Router, SocketAddr) {
     let addr = listener.local_addr().unwrap();
     tokio::spawn(server::serve(listener, state, None));
     (router, addr)
-}
-
-async fn connect(addr: SocketAddr) -> Ws {
-    let (ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws"))
-        .await
-        .expect("connect");
-    ws
-}
-
-async fn recv_json(ws: &mut Ws) -> serde_json::Value {
-    loop {
-        let msg = tokio::time::timeout(Duration::from_secs(5), ws.next())
-            .await
-            .expect("timeout")
-            .expect("stream ended")
-            .expect("ws error");
-        if let Message::Text(text) = msg {
-            return serde_json::from_str(&text).expect("valid json");
-        }
-    }
-}
-
-async fn recv_hello(ws: &mut Ws) {
-    assert_eq!(recv_json(ws).await["type"], "hello");
-}
-
-async fn send_rpc(ws: &mut Ws, id: i64, method: &str, params: serde_json::Value) {
-    let msg = serde_json::json!({
-        "type": "rpc",
-        "id": id,
-        "method": method,
-        "params": params,
-    });
-    ws.send(Message::Text(msg.to_string().into()))
-        .await
-        .unwrap();
 }
 
 fn journal(name: &str) -> Event {
@@ -437,7 +328,7 @@ async fn rpc_responses_and_events_are_multiplexed_on_the_same_socket() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn plugins_list_includes_capabilities_with_declared_requests_and_initial_grant_state() {
-    let (_tmp, registry) = http_caller_registry();
+    let (_tmp, registry) = support::http_caller_registry();
     let (_router, addr) = setup(Some(registry)).await;
     let mut ws = connect(addr).await;
     recv_hello(&mut ws).await;
@@ -492,7 +383,7 @@ async fn plugins_list_reports_empty_requests_for_plugin_without_capabilities() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn plugins_get_capabilities_returns_requests_and_grant_state_and_errors_for_unknown_plugin() {
-    let (_tmp, registry) = http_caller_registry();
+    let (_tmp, registry) = support::http_caller_registry();
     let (_router, addr) = setup(Some(registry)).await;
     let mut ws = connect(addr).await;
     recv_hello(&mut ws).await;
@@ -529,7 +420,7 @@ async fn plugins_get_capabilities_returns_requests_and_grant_state_and_errors_fo
 
 #[tokio::test(flavor = "multi_thread")]
 async fn plugins_set_capabilities_grants_and_revokes_and_is_reflected_in_get_and_list() {
-    let (_tmp, registry) = http_caller_registry();
+    let (_tmp, registry) = support::http_caller_registry();
     let (_router, addr) = setup(Some(registry)).await;
     let mut ws = connect(addr).await;
     recv_hello(&mut ws).await;
@@ -589,7 +480,7 @@ async fn plugins_set_capabilities_grants_and_revokes_and_is_reflected_in_get_and
 
 #[tokio::test(flavor = "multi_thread")]
 async fn plugins_set_capabilities_with_invalid_params_returns_rpc_error() {
-    let (_tmp, registry) = http_caller_registry();
+    let (_tmp, registry) = support::http_caller_registry();
     let (_router, addr) = setup(Some(registry)).await;
     let mut ws = connect(addr).await;
     recv_hello(&mut ws).await;
