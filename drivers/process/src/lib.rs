@@ -766,13 +766,15 @@ mod tests {
         }
     }
 
-    fn free_port() -> u16 {
-        std::net::TcpListener::bind("127.0.0.1:0")
-            .unwrap()
-            .local_addr()
-            .unwrap()
-            .port()
-    }
+    // 「未 listen のポートが欲しい」テストに `bind(0) → drop → 後で再 bind`
+    // のパターンを使ってはいけない: drop から再 bind までの間に、並列に走る
+    // 他テスト(別プロセス含む)の `bind(0)` や outgoing 接続の source port
+    // が同じポートを取り、AddrInUse で落ちる(issue oxa3 で実際に踏んだ)。
+    // 最初から listen してよいテストは `bind("127.0.0.1:0")` した listener を
+    // 持ち続け、後から listen したいテストは ephemeral port range
+    // (Linux 既定 32768-60999)の外の固定ポートを使う。固定値は
+    // リポジトリ内で一意にすること(285xx/286xx は core の統合テスト、
+    // 29993 は ui が使用中)。
 
     fn ready_channel(driver: &ProcessDriver) -> std::sync::mpsc::Receiver<ReadyEvent> {
         let (tx, rx) = std::sync::mpsc::sync_channel::<ReadyEvent>(8);
@@ -789,7 +791,7 @@ mod tests {
     #[test]
     fn ready_is_notified_once_the_port_becomes_connectable() {
         let driver = driver();
-        let port = free_port();
+        let port = 28621;
         let rx = ready_channel(&driver);
 
         driver
@@ -822,7 +824,7 @@ mod tests {
     #[test]
     fn ready_is_not_notified_if_the_process_dies_before_the_port_opens() {
         let driver = driver();
-        let port = free_port();
+        let port = 28622;
         let rx = ready_channel(&driver);
         let spec = ProcessSpec {
             command: PathBuf::from("/bin/sh"),
@@ -846,11 +848,12 @@ mod tests {
     fn respawn_notifies_ready_again() {
         // spawn_min_interval = 0 の driver() を使う(即 respawn できる)。
         let driver = driver();
-        let port = free_port();
         let rx = ready_channel(&driver);
         // 最初からポートが開いている状態にしておけば、spawn → 通知が
-        // それぞれ即座に来る。
-        let _listener = std::net::TcpListener::bind(("127.0.0.1", port)).unwrap();
+        // それぞれ即座に来る。listen し続けるので bind(0) のポートをそのまま
+        // 使えばよく、drop → 再 bind の競合窓を作らない。
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
 
         driver
             .ensure_started("d/re", &sleep_spec(vec![port]))

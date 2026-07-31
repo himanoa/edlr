@@ -12,8 +12,10 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 /// このテスト専用の listen アドレス。他の統合テストのポート帯
-/// (5030x/5040x/5850x)と衝突しない値。
-const DAEMON_ADDR: &str = "127.0.0.1:58503";
+/// (285xx/5030x/5040x)と衝突せず、かつ ephemeral port range
+/// (Linux 既定 32768-60999)の外の値
+/// (→ `daemon_signal_shutdown_integration.rs` の `DAEMON_ADDR` のコメント)。
+const DAEMON_ADDR: &str = "127.0.0.1:28503";
 
 fn daemon_running(addr: &str) -> bool {
     use std::net::TcpStream;

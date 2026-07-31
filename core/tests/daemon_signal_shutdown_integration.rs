@@ -21,15 +21,19 @@ type Ws =
 
 /// このテスト専用の listen アドレス。他の統合テストが使うポート帯
 /// (5030x/5040x など)と衝突しないよう、明確に離れたポートを使う。
-const DAEMON_ADDR: &str = "127.0.0.1:58501";
+/// かつ ephemeral port range(Linux 既定 32768-60999)の外にすること:
+/// range 内の固定ポートは、並列に走る他テストの `bind(0)` や outgoing 接続の
+/// source port に取られて daemon の listen が AddrInUse で死にうる
+/// (旧 58501/58502 で実際に踏んだ flaky、issue oxa3)。
+const DAEMON_ADDR: &str = "127.0.0.1:28501";
 /// サイドカーに割り当てるポート。同様に他テストと衝突しない値。
-const SIDECAR_PORT: u16 = 58601;
+const SIDECAR_PORT: u16 = 28601;
 
 /// ドライバ側のシャットダウンテスト専用の listen アドレス・サイドカー
 /// ポート。プラグイン側のテスト(`DAEMON_ADDR`/`SIDECAR_PORT`)と同時に
 /// 実行されても衝突しないよう、別の値を使う。
-const DRIVER_DAEMON_ADDR: &str = "127.0.0.1:58502";
-const DRIVER_SIDECAR_PORT: u16 = 58602;
+const DRIVER_DAEMON_ADDR: &str = "127.0.0.1:28502";
+const DRIVER_SIDECAR_PORT: u16 = 28602;
 
 /// 実際にロード・init が成功する wasm を使う(`support::valid_plugin_wasm`
 /// 参照)。`control_sidecar` が `PluginState` を見るようになった(無効化
