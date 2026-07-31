@@ -176,8 +176,6 @@ impl std::error::Error for RegistryError {}
 pub struct Registry {
     entries: EntryTable<PluginEntry>,
     _host: Arc<PluginHost>,
-    settings_store: Arc<SettingsStore>,
-    grants_store: Arc<GrantsStore>,
     /// fs 群(`filesystem` / `set_filesystem_config` / `set_filesystem_grant`
     /// とその内部ヘルパー)の実体。`registry::filesystem::FilesystemService`
     /// のドキュメント参照(Phase 4 タスク4で移動)。
@@ -258,16 +256,14 @@ impl Registry {
         );
         let grant_service = DiskGrantService::new(
             entries.clone(),
-            grants_store.clone(),
+            grants_store,
             capabilities_lock.clone(),
             plugins_dir.clone(),
         );
-        let settings_service = DiskSettingsService::new(entries.clone(), settings_store.clone());
+        let settings_service = DiskSettingsService::new(entries.clone(), settings_store);
         Registry {
             entries,
             _host: host,
-            settings_store,
-            grants_store,
             filesystem_service,
             sidecar_service,
             bus_service,
@@ -387,8 +383,8 @@ impl Registry {
                 crate::registry::select_options::resolve(&mut manifest.settings, &self.bus);
                 // 秘密情報は RPC 応答から落とす(設定済みかどうかだけ返す)。
                 let (values, secrets_set) =
-                    split_secrets(&manifest, self.settings_store.effective(&manifest));
-                let grant_state = self.grants_store.state(&manifest);
+                    split_secrets(&manifest, self.settings_service.effective_for(&manifest));
+                let grant_state = self.grant_service.state_for(&manifest);
                 let capability_requests = manifest.capabilities.clone();
                 let sidecars = self.sidecar_service.build_sidecar_infos(&manifest);
                 let filesystem = self.filesystem_service.build_filesystem_infos(&manifest);
@@ -1770,7 +1766,8 @@ pub(crate) mod tests {
             bus_json: Arc::new(Mutex::new("[]".to_string())),
         });
         registry
-            .grants_store
+            .sidecar_service
+            .grants_store()
             .set_sidecar(&manifest, "tts", true)
             .expect("grant should persist");
         registry
@@ -1862,7 +1859,8 @@ pub(crate) mod tests {
         });
 
         registry
-            .grants_store
+            .sidecar_service
+            .grants_store()
             .set_sidecar(&manifest, "tts", true)
             .expect("grant should persist");
         registry
@@ -1916,7 +1914,8 @@ pub(crate) mod tests {
         revoker.join().expect("revoker thread should not panic");
 
         let disk_granted = registry
-            .grants_store
+            .sidecar_service
+            .grants_store()
             .sidecar_state(&manifest, "tts")
             .granted;
         let key = crate::registry::sidecar::sidecar_key("sc-plugin", "tts");
@@ -1976,7 +1975,8 @@ pub(crate) mod tests {
         }
         assert!(
             !registry
-                .grants_store
+                .sidecar_service
+                .grants_store()
                 .sidecar_state(&manifest, "tts")
                 .granted,
             "a rejected grant must not be persisted"
@@ -2009,7 +2009,8 @@ pub(crate) mod tests {
             .expect("granting with a configured command must succeed");
         assert!(
             registry
-                .grants_store
+                .sidecar_service
+                .grants_store()
                 .sidecar_state(&manifest, "tts")
                 .granted
         );

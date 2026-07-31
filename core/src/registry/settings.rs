@@ -108,6 +108,19 @@ impl<St: settings::Storage, E: SettingsEntry> SettingsService<St, E> {
             .ok_or_else(|| E::Subject::unknown_error(id))
     }
 
+    /// `subject` の effective settings(秘密情報を含む生値)を返す。`id` から
+    /// の `entries` ルックアップを経由しない -- 呼び出し側(`Registry::list`/
+    /// `DriverRegistry::list`)が既に manifest のスナップショットを持っている
+    /// 経路用(facade の `list()` が `settings_store` を直叩きしていた箇所を
+    /// このサービス経由に寄せるための最小 pub(crate) メソッド)。
+    pub(crate) fn effective_for(
+        &self,
+        subject: &E::Subject,
+    ) -> serde_json::Map<String, serde_json::Value> {
+        self.settings_store
+            .effective(&subject.as_settings_manifest())
+    }
+
     /// `id` の effective settings(秘密情報を含む生値)と、その manifest
     /// クローンを返す。secret 剥がしは呼び出し側(plugin wrapper)の責務
     /// (このサービスは剥がさない)。

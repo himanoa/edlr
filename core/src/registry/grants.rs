@@ -111,6 +111,15 @@ impl<G: GrantStorage, E: SidecarEntry> GrantService<G, E> {
             .ok_or_else(|| E::Subject::unknown_error(id))
     }
 
+    /// `subject` の現在の capability 承認状態を返す。`id` からの `entries`
+    /// ルックアップを経由しない -- 呼び出し側(`Registry::list`/
+    /// `DriverRegistry::list`)が既に manifest のスナップショットを持っている
+    /// 経路用(facade の `list()` が `grants_store` を直叩きしていた箇所を
+    /// このサービス経由に寄せるための最小 pub(crate) メソッド)。
+    pub(crate) fn state_for(&self, subject: &E::Subject) -> GrantState {
+        self.grants_store.state(&subject.as_settings_manifest())
+    }
+
     /// `id` のプラグイン/ドライバの capability 承認/取消を `GrantsStore` に
     /// 永続化し、稼働中プラグイン/ドライバが参照する共有 `capabilities_json`
     /// も更新する。

@@ -352,6 +352,15 @@ impl<G: GrantStorage, P: ProcessControl, E: SidecarEntry> SidecarService<G, P, E
         &self.sidecar_config_store
     }
 
+    /// テスト用アクセサ: `set_sidecar_grant`/`set_capabilities` の RPC 経路を
+    /// 経由せず、承認状態を直接仕込む・検証する統合テストのため、内部の
+    /// `GrantStorage` 実装をそのまま返す(facade 側の `grants_store` フィール
+    /// ドが list() サービス経由化で不要になったため、こちらへ寄せた)。
+    #[cfg(test)]
+    pub(crate) fn grants_store(&self) -> &Arc<G> {
+        &self.grants_store
+    }
+
     /// `id` の現在のサイドカー状態一覧(manifest の `[[sidecar]]` 宣言順)を
     /// 返す。
     pub(crate) fn sidecars(&self, id: &str) -> Result<Vec<SidecarInfo>, RegistryError> {
