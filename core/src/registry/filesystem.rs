@@ -116,7 +116,7 @@ impl<G: GrantStorage, E: FilesystemEntry> FilesystemService<G, E> {
     /// `id` の manifest クローンを返す(`entries` ロック保持はこの
     /// ルックアップの間だけ)。`Registry::find_manifest` /
     /// `DriverRegistry::find_manifest_for_shared` と同じ流儀。未登録 id の
-    /// エラーは `E::Subject::unknown_error` に委ねる(`UnknownPlugin` vs
+    /// エラーは `E::Subject::unknown_registry_error` に委ねる(`UnknownPlugin` vs
     /// `UnknownDriver`)。
     fn find_manifest(&self, id: &str) -> Result<E::Subject, RegistryError> {
         self.entries
@@ -124,7 +124,7 @@ impl<G: GrantStorage, E: FilesystemEntry> FilesystemService<G, E> {
                 |entry| entry.manifest().id() == id,
                 |entry| entry.manifest().clone(),
             )
-            .ok_or_else(|| E::Subject::unknown_error(id))
+            .ok_or_else(|| E::Subject::unknown_registry_error(id))
     }
 
     /// `subject.filesystem()` の宣言順に `FilesystemInfo` を組み立てる。
@@ -184,7 +184,7 @@ impl<G: GrantStorage, E: FilesystemEntry> FilesystemService<G, E> {
                 |entry| entry.manifest().id() == id,
                 |entry| entry.filesystem_json().clone(),
             )
-            .ok_or_else(|| E::Subject::unknown_error(id))?;
+            .ok_or_else(|| E::Subject::unknown_registry_error(id))?;
         let buffer = filesystem_json
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -222,7 +222,7 @@ impl<G: GrantStorage, E: FilesystemEntry> FilesystemService<G, E> {
                 |entry| entry.manifest().id() == id,
                 |entry| (entry.manifest().clone(), entry.filesystem_json().clone()),
             )
-            .ok_or_else(|| E::Subject::unknown_error(id))?;
+            .ok_or_else(|| E::Subject::unknown_registry_error(id))?;
 
         let runtime_lock = self.filesystem_runtime_lock_for(id);
         let _runtime_guard = runtime_lock

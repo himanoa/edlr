@@ -253,7 +253,7 @@ impl<G: GrantStorage, P: ProcessControl, E: SidecarEntry> SidecarService<G, P, E
     }
 
     /// `id` の manifest クローンを返す(`entries` ロック保持はこの
-    /// ルックアップの間だけ)。未登録 id のエラーは `E::Subject::unknown_error`
+    /// ルックアップの間だけ)。未登録 id のエラーは `E::Subject::unknown_registry_error`
     /// に委ねる(`UnknownPlugin` vs `UnknownDriver`)。
     fn find_manifest(&self, id: &str) -> Result<E::Subject, RegistryError> {
         self.entries
@@ -261,7 +261,7 @@ impl<G: GrantStorage, P: ProcessControl, E: SidecarEntry> SidecarService<G, P, E
                 |entry| entry.manifest().id() == id,
                 |entry| entry.manifest().clone(),
             )
-            .ok_or_else(|| E::Subject::unknown_error(id))
+            .ok_or_else(|| E::Subject::unknown_registry_error(id))
     }
 
     /// `subject.sidecars()` の宣言順に `SidecarInfo` を組み立てる。設定
@@ -408,7 +408,7 @@ impl<G: GrantStorage, P: ProcessControl, E: SidecarEntry> SidecarService<G, P, E
                     )
                 },
             )
-            .ok_or_else(|| E::Subject::unknown_error(id))?;
+            .ok_or_else(|| E::Subject::unknown_registry_error(id))?;
 
         let runtime_lock = self.sidecar_runtime_lock_for(id);
         let _runtime_guard = runtime_lock
@@ -603,6 +603,15 @@ impl<G: GrantStorage, P: ProcessControl, E: SidecarEntry> SidecarService<G, P, E
         // ロック保持中に読み直す: `refresh_sidecar_runtime` は同じロックを
         // 取ってから承認取消/設定変更を確定するので、ここで読む値は
         // 「取消/変更が確定済みならその後の値」であることが保証される。
+        //
+        // `disabled` が既に確定していても(= 下の `match` が
+        // `SidecarStartDecision::Disabled` で即エラーになる経路でも)、この
+        // grant/config の 2 回のディスク読み取りは `disabled` チェックより
+        // 先に無条件で走る。無効化されたプラグイン/ドライバに対する
+        // `Start`/`Restart` はエラー経路(出力は "{subject} {id} is
+        // disabled" で不変)にしかならず、そのぶんロック保持時間が延びるだけ
+        // なので、issue kgc6 残件5として容認する(early return で `disabled`
+        // 判定を先に行えば省けるが、ホットになった実績が無い限り触らない)。
         let grant = self.grants_store.sidecar_state(settings_manifest, name);
         let configs = self.sidecar_config_store.effective(settings_manifest);
         let config = configs

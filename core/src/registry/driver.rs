@@ -8,6 +8,16 @@
 //!   も呼ぶ。ドライバの retained 値はドライバ自身の生存が前提であり、無効化
 //!   された時点でその値を読み続けさせるのは fail-open になる
 //!   (`edlr_driver_channel::Bus::disable_driver` のドキュメント参照)。
+//! - `crate::registry::plugin::Registry::capabilities`(1件分の capability
+//!   要求一覧と承認状態を単独で読める RPC 用の読み口)に相当するメソッドを
+//!   持たない。ドライバ側でこの情報が欲しい呼び出し元は `list()` が返す
+//!   `DriverInfo::grant_state` 経由でしか読めない -- **意図的な非対称**
+//!   (issue kgc6 残件6として記録。`drivers/*` RPC がこれまで単体の
+//!   capabilities 読み出しを必要としてこなかったため、実際に要る場面が出る
+//!   まで `Registry::capabilities` 相当を足さずに済ませる判断。追加するなら
+//!   `registry::grants::GrantService` の generic impl(`set_capabilities`/
+//!   `effective_hosts` と同じブロック)に `capabilities` を生やせば
+//!   `RegistrySubject::Error` 経由でそのまま driver 版も手に入る)。
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -86,27 +96,6 @@ impl fmt::Display for DriverRegistryError {
 }
 
 impl std::error::Error for DriverRegistryError {}
-
-/// `registry::settings::SettingsService`/`registry::grants::GrantService`
-/// (共通実装、`RegistryError` を返す)から `DriverRegistryError` への写像。
-/// `values`/`set_values`/`set_capabilities` の wrapper 3箇所で使う
-/// (タスクブリーフのとおり、エラー enum 写像は wrapper 側の責務)。
-///
-/// 呼び出し元はいずれも `E::Subject::unknown_error` を通じて
-/// `RegistryError::UnknownDriver` を返す `DriverEntry`(`RegistrySubject` for
-/// `DriverManifest`)越しに使われているため、ここで実際に来るのは
-/// `UnknownDriver`/`Settings`/`Grants` の3種類だけ。
-fn to_driver_error(err: RegistryError) -> DriverRegistryError {
-    match err {
-        RegistryError::UnknownDriver(id) => DriverRegistryError::UnknownDriver(id),
-        RegistryError::Settings(e) => DriverRegistryError::Settings(e),
-        RegistryError::Grants(e) => DriverRegistryError::Grants(e),
-        other => unreachable!(
-            "settings/grant サービスは driver 側では UnknownDriver/Settings/Grants しか \
-             返さないはず: {other}"
-        ),
-    }
-}
 
 /// 起動中ドライバ一覧の共有ビュー。`crate::registry::plugin::Registry` と対称。
 ///
@@ -257,6 +246,11 @@ impl DriverRegistry {
     /// タスク8で抽出)。**plugin 側と違い秘密情報を剥がさない**(`split_secrets`
     /// を適用しない -- Task 1 の pin
     /// `pin_drivers_set_settings_does_not_strip_secret_value` が防衛)。
+    ///
+    /// `SettingsService::effective` は `RegistrySubject::Error` 関連型経由で
+    /// 既に `DriverRegistryError` を返す(`DriverManifest` の `impl
+    /// RegistrySubject` 参照)ので、旧 `to_driver_error` のような変換は要らない
+    /// (issue kgc6 残件4)。
     pub fn values(
         &self,
         id: &str,
@@ -264,7 +258,6 @@ impl DriverRegistry {
         self.settings_service
             .effective(id)
             .map(|(_manifest, values)| values)
-            .map_err(to_driver_error)
     }
 
     /// `id` のドライバの settings を検証・永続化し、稼働中ドライバが参照する
@@ -280,22 +273,20 @@ impl DriverRegistry {
         self.settings_service
             .update_and_effective(id, values)
             .map(|(_manifest, effective)| effective)
-            .map_err(to_driver_error)
     }
 
     /// `id` のドライバの capability 承認/取消を `GrantsStore` に永続化し、
     /// 稼働中ドライバが参照する共有 `capabilities_json` も更新する。実体は
     /// `registry::grants::GrantService::set_capabilities`(Phase 4 タスク8で
     /// 統合。ロック規律・"live な `sidecars_json` バッファを読み再計算はし
-    /// ない"という不変条件のドキュメントは移動先のコメント参照)。
+    /// ない"という不変条件のドキュメントは移動先のコメント参照)。`values`
+    /// と同じ理由で `to_driver_error` 相当の変換は不要。
     pub fn set_capabilities(
         &self,
         id: &str,
         granted: bool,
     ) -> Result<GrantState, DriverRegistryError> {
-        self.grant_service
-            .set_capabilities(id, granted)
-            .map_err(to_driver_error)
+        self.grant_service.set_capabilities(id, granted)
     }
 
     /// サイドカー/ファイルアクセス

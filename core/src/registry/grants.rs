@@ -101,8 +101,13 @@ impl<G: GrantStorage, E: SidecarEntry> GrantService<G, E> {
 
     /// `id` の manifest クローンを返す(`entries` ロック保持はこの
     /// ルックアップの間だけ)。未登録 id のエラーは `E::Subject::unknown_error`
-    /// に委ねる(`UnknownPlugin` vs `UnknownDriver`)。
-    fn find_manifest(&self, id: &str) -> Result<E::Subject, RegistryError> {
+    /// に委ねる(`RegistryError::UnknownPlugin` vs
+    /// `DriverRegistryError::UnknownDriver` -- `E::Subject::Error` の関連型
+    /// で分岐する)。
+    fn find_manifest(
+        &self,
+        id: &str,
+    ) -> Result<E::Subject, <E::Subject as RegistrySubject>::Error> {
         self.entries
             .find(
                 |entry| entry.manifest().id() == id,
@@ -150,7 +155,7 @@ impl<G: GrantStorage, E: SidecarEntry> GrantService<G, E> {
         &self,
         id: &str,
         granted: bool,
-    ) -> Result<GrantState, RegistryError> {
+    ) -> Result<GrantState, <E::Subject as RegistrySubject>::Error> {
         let (subject, capabilities_json, sidecars_json) = self
             .entries
             .find(
@@ -174,7 +179,7 @@ impl<G: GrantStorage, E: SidecarEntry> GrantService<G, E> {
         let state = self
             .grants_store
             .set(&settings_manifest, granted)
-            .map_err(RegistryError::Grants)?;
+            .map_err(E::Subject::grants_error)?;
 
         let sidecar_entries: Vec<SidecarRuntimeEntry> = parse_sidecars(
             &sidecars_json
@@ -200,7 +205,10 @@ impl<G: GrantStorage, E: SidecarEntry> GrantService<G, E> {
     /// `id` のプラグイン/ドライバの `capabilities_json` 共有バッファが現在
     /// 載せている実効許可ホストを返す(テスト用アクセサ)。
     /// `driver-http.send` が実際に参照するのと同じ値。
-    pub(crate) fn effective_hosts(&self, id: &str) -> Result<Vec<String>, RegistryError> {
+    pub(crate) fn effective_hosts(
+        &self,
+        id: &str,
+    ) -> Result<Vec<String>, <E::Subject as RegistrySubject>::Error> {
         let capabilities_json = self
             .entries
             .find(

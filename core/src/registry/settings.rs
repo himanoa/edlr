@@ -22,7 +22,6 @@
 use std::sync::{Arc, Mutex};
 
 use crate::registry::entries::EntryTable;
-use crate::registry::plugin::RegistryError;
 use crate::registry::subject::RegistrySubject;
 use crate::settings;
 use crate::settings::store::SettingsStore;
@@ -88,6 +87,15 @@ impl<St: settings::Storage, E: SettingsEntry> Clone for SettingsService<St, E> {
 /// `EntryTable` 要素かは呼び出し側が `E` で指定する。
 pub(crate) type DiskSettingsService<E> = SettingsService<SettingsStore, E>;
 
+/// `effective`/`update_and_effective` の戻り値型のエイリアス
+/// (`clippy::type_complexity` 対策。`E::Subject::Error` の関連型化で型が
+/// 長くなったため)。
+type SubjectAndValues<E> = (
+    <E as SettingsEntry>::Subject,
+    serde_json::Map<String, serde_json::Value>,
+);
+type SubjectError<E> = <<E as SettingsEntry>::Subject as RegistrySubject>::Error;
+
 impl<St: settings::Storage, E: SettingsEntry> SettingsService<St, E> {
     pub(crate) fn new(entries: EntryTable<E>, settings_store: Arc<St>) -> Self {
         Self {
@@ -98,8 +106,10 @@ impl<St: settings::Storage, E: SettingsEntry> SettingsService<St, E> {
 
     /// `id` の manifest クローンを返す(`entries` ロック保持はこの
     /// ルックアップの間だけ)。未登録 id のエラーは `E::Subject::unknown_error`
-    /// に委ねる(`UnknownPlugin` vs `UnknownDriver`)。
-    fn find_manifest(&self, id: &str) -> Result<E::Subject, RegistryError> {
+    /// に委ねる(`RegistryError::UnknownPlugin` vs
+    /// `DriverRegistryError::UnknownDriver` -- `E::Subject::Error` の関連型
+    /// で分岐する)。
+    fn find_manifest(&self, id: &str) -> Result<E::Subject, SubjectError<E>> {
         self.entries
             .find(
                 |entry| entry.manifest().id() == id,
@@ -124,10 +134,7 @@ impl<St: settings::Storage, E: SettingsEntry> SettingsService<St, E> {
     /// `id` の effective settings(秘密情報を含む生値)と、その manifest
     /// クローンを返す。secret 剥がしは呼び出し側(plugin wrapper)の責務
     /// (このサービスは剥がさない)。
-    pub(crate) fn effective(
-        &self,
-        id: &str,
-    ) -> Result<(E::Subject, serde_json::Map<String, serde_json::Value>), RegistryError> {
+    pub(crate) fn effective(&self, id: &str) -> Result<SubjectAndValues<E>, SubjectError<E>> {
         let subject = self.find_manifest(id)?;
         let values = self
             .settings_store
@@ -149,7 +156,7 @@ impl<St: settings::Storage, E: SettingsEntry> SettingsService<St, E> {
         &self,
         id: &str,
         values: &serde_json::Map<String, serde_json::Value>,
-    ) -> Result<(E::Subject, serde_json::Map<String, serde_json::Value>), RegistryError> {
+    ) -> Result<SubjectAndValues<E>, SubjectError<E>> {
         let (subject, settings_json) = self
             .entries
             .find(
@@ -162,7 +169,7 @@ impl<St: settings::Storage, E: SettingsEntry> SettingsService<St, E> {
         let effective = self
             .settings_store
             .update_and_effective(&settings_manifest, values)
-            .map_err(RegistryError::Settings)?;
+            .map_err(E::Subject::settings_error)?;
 
         let settings_json_string =
             serde_json::to_string(&serde_json::Value::Object(effective.clone()))
