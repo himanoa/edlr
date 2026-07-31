@@ -44,3 +44,38 @@ core リファクタ Phase 4(registry 解体、plan: `docs/superpowers/plans/202
 
 Phase 5(runner/host)・Phase 6(旧パス削除・仕上げ)の計画に取り込む。
 2 と 6 は Phase 6 の facade 仕上げ、1・3・5 は触るついでに、4 はエラー enum 整理と同時に。
+
+## 対応結果(2026-07-31、refactor-followup-issues Task 5)
+
+- **2(list() のサービス迂回)**: 実装。`Registry::list`/`DriverRegistry::list` を
+  `SettingsService::effective_for`/`GrantService::state_for`(新設の最小
+  pub(crate) メソッド)経由に変更し、両 facade の `settings_store`/`grants_store`
+  フィールドをコンストラクタごと削除した。list() の出力 JSON は不変
+  (`rpc_pin_integration.rs` の pin テストで確認)。
+- **4(`to_driver_error` の `unreachable!`)**: 実装。`RegistrySubject` に関連型
+  `Error`(plugin=`RegistryError`/driver=`DriverRegistryError`)と
+  `unknown_error`/`settings_error`/`grants_error` の constructor を追加し、
+  `SettingsService`/`GrantService` の共通経路(`set_capabilities`/
+  `effective_hosts`)を `Subject::Error` 返しに変更。`to_driver_error` と
+  `unreachable!` を削除した。エラー Display 文字列は不変
+  (`pin_drivers_set_settings_does_not_strip_secret_value` 他が防衛)。
+  sidecar.rs/filesystem.rs は driver 側でも `RegistryError` を共有する設計上の
+  非対称を保つため、`RegistrySubject::unknown_registry_error`(デフォルト実装)を
+  新設してそちらを使うよう揃えた。
+- **1(as_settings_manifest の全 clone)**: コメント化のみ(実装は見送り)。
+  `registry/subject.rs` の `Manifest` 側 `as_settings_manifest` に、容認理由の
+  doc コメントを追加した。
+- **5(disabled 経路のロック内 disk read)**: コメント化のみ(実装は見送り)。
+  `registry/sidecar.rs` の `start_or_restart_sidecar` に、容認理由の doc
+  コメントを追加した。
+- **6(driver capabilities 読み口の非対称)**: コメント化のみ。
+  `registry/driver.rs` のモジュール doc に非対称であることを明記した。
+- **3(entry trait 3本の再宣言)**: 対応なし。4本目の entry trait が必要になる
+  具体的な事態が起きるまで、`FilesystemEntry`/`SidecarEntry`/`SettingsEntry` の
+  重複はこのまま許容する(基底 trait への集約は過剰な先取り抽象化になるため)。
+- test 側の `InMemoryGrantStorage` stale/fingerprint 未実装は今回の範囲外
+  (触っていない)。
+
+実装は 2 コミットに分割:
+`refactor(core): facade list() を service 経由に寄せ冗長 store フィールドを削除(issue kgc6 残件2)`、
+`refactor(core): RegistrySubject::Error 関連型で to_driver_error の unreachable を撤去(issue kgc6 残件4、容認3点のコメント化を含む)`。
