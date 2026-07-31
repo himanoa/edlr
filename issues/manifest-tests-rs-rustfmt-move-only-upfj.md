@@ -2,10 +2,10 @@
 id: manifest-tests-rs-rustfmt-move-only-upfj
 title: manifest/tests.rs が rustfmt 非準拠(move-only 移動の意図的トレードオフ)
 summary: core リファクタ Phase 1 のテスト分離で dedent した manifest/tests.rs の7箇所が cargo fmt --check に落ちる(byte-identical 移動を優先した意図的債務)。フェーズ境界で formatting-only commit を入れて解消する / 未着手
-status: open
+status: closed
 labels: build, refactor
 created: 2026-07-30T13:08:14Z
-updated: 2026-07-30T13:09:13Z
+updated: 2026-07-31T06:33:15Z
 ---
 
 ## どこで踏んだか
@@ -28,3 +28,8 @@ core リファクタ Phase 1(plan: `docs/superpowers/plans/2026-07-30-core-refac
 フェーズ境界(Phase 2 着手前など)で、formatting-only commit を1つ入れる。
 コミットメッセージに「フォーマットのみ・トークン変更ゼロ・テスト凍結の明示的例外」と明記する。
 main 側 drift の issue と同じコミットでまとめて解消してもよい。
+
+## 解決(2026-07-31)
+
+Phase 6 の style コミット 91dca61(cargo fmt を全ワークスペースへ適用、issue so6b と同時)で解消済み。
+cargo fmt --check は現在差分0(2026-07-31 確認)。
