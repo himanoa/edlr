@@ -2,10 +2,10 @@
 id: phase-4-registry-perf-deferred-minors-kgc6
 title: Phase 4 registry サービス化の後追い残件(perf・構造の deferred minors)
 summary: registry 解体(Phase 4)の最終レビューで挙動不変優先のため見送った残件6点 — as_settings_manifest の全 clone、list() のサービス迂回、entry trait 3本、to_driver_error の unreachable、disabled 経路のロック内 read、driver capabilities 読み口の非対称 / 未着手
-status: open
+status: closed
 labels: refactor
 created: 2026-07-30T18:50:00Z
-updated: 2026-07-30T18:50:42Z
+updated: 2026-07-31T06:22:18Z
 ---
 
 ## どこで踏んだか
