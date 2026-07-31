@@ -2,10 +2,10 @@
 id: rpc-render-rs-registry-info-import-l051
 title: rpc/render.rs が registry の *Info 型を import している(純粋→命令的の境界違反)
 summary: rpc/render.rs(純粋)が registry(命令的)の *Info 値型を import している既存負債。値型の純粋側移設か rules の明文化で解消 / 未着手
-status: open
+status: closed
 labels: refactor
 created: 2026-07-31T03:23:13Z
-updated: 2026-07-31T03:23:39Z
+updated: 2026-07-31T05:55:27Z
 ---
 
 
