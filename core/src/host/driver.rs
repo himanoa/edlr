@@ -1,9 +1,10 @@
 //! wasmtime component host for the `driver` world: loads driver components,
 //! wires host-log / host-settings / driver-http / driver-process / driver-fs
 //! imports, and implements `bus-host.emit` so drivers can publish back to
-//! subscribers. Modeled on `crate::plugin::host` (same shape, different
-//! `bindgen!` world and import set); see `crate::driver`'s module doc for why
-//! the two are kept separate rather than unified.
+//! subscribers. Modeled on `crate::host::plugin` (same shape, different
+//! `bindgen!` world and import set); driver and plugin hosts are a symmetric
+//! structure but a separate layer, so they are not forced to share code
+//! beyond the grants/settings utilities they already share.
 
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -60,7 +61,7 @@ const _: () = assert!(
 
 /// Maximum response body size, in bytes, a `driver-http.send` call will
 /// return before failing with a `transport` error. Mirrors
-/// `crate::plugin::host::HTTP_MAX_BODY`.
+/// `crate::host::plugin::HTTP_MAX_BODY`.
 pub const HTTP_MAX_BODY: usize = 8 * 1024 * 1024;
 
 /// `driver-fs` の 1 回の読み取り上限。`HTTP_MAX_BODY` と同値。ホスト側の
@@ -73,7 +74,7 @@ pub const FS_READ_LIMIT: usize = HTTP_MAX_BODY;
 pub const FS_LIST_LIMIT: usize = 10_000;
 
 /// サイドカー停止時、SIGTERM から SIGKILL へ昇格するまでの猶予。
-/// `crate::plugin::host::SIDECAR_SHUTDOWN_GRACE` と同じく
+/// `crate::host::plugin::SIDECAR_SHUTDOWN_GRACE` と同じく
 /// `edlr_config::SIDECAR_SHUTDOWN_GRACE_SECS` から取る。
 pub const SIDECAR_SHUTDOWN_GRACE: Duration =
     Duration::from_secs(edlr_config::SIDECAR_SHUTDOWN_GRACE_SECS);
@@ -83,11 +84,11 @@ pub const SIDECAR_SHUTDOWN_GRACE: Duration =
 pub const SIDECAR_SPAWN_MIN_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Maximum linear memory (bytes) a single driver instance may allocate.
-/// Mirrors `crate::plugin::host`'s `PLUGIN_MEMORY_LIMIT`.
+/// Mirrors `crate::host::plugin`'s `PLUGIN_MEMORY_LIMIT`.
 const DRIVER_MEMORY_LIMIT: usize = 64 * 1024 * 1024;
 
 /// Maximum number of component instances / tables a single driver `Store`
-/// may create. Mirrors `crate::plugin::host`'s `PLUGIN_INSTANCE_LIMIT` /
+/// may create. Mirrors `crate::host::plugin`'s `PLUGIN_INSTANCE_LIMIT` /
 /// `PLUGIN_TABLE_LIMIT`.
 const DRIVER_INSTANCE_LIMIT: usize = 8;
 const DRIVER_TABLE_LIMIT: usize = 8;
@@ -101,15 +102,15 @@ pub struct DriverCtx {
     pub settings_json: Arc<Mutex<String>>,
     /// Capability grant state JSON string, shape `{"hosts": ["https://..."]}`
     /// -- the *effective* set of hosts this driver instance may reach via
-    /// `driver-http.send`. See `crate::plugin::host::HostCtx::capabilities_json`
+    /// `driver-http.send`. See `crate::host::plugin::HostCtx::capabilities_json`
     /// for the full rationale; the same reasoning applies here verbatim,
     /// substituting "driver" for "plugin".
     pub capabilities_json: Arc<Mutex<String>>,
     /// サイドカーの承認状態と実行に必要な値の共有バッファ。形は
-    /// `sidecar_runtime::sidecars_json_string` を参照。
+    /// `crate::runtime::sidecar::sidecars_json_string` を参照。
     pub sidecars_json: Arc<Mutex<String>>,
     /// ファイルシステムルートの承認状態と実パスの共有バッファ。形は
-    /// `fs_runtime::filesystem_json_string` を参照。
+    /// `crate::runtime::fs::filesystem_json_string` を参照。
     pub filesystem_json: Arc<Mutex<String>>,
     /// プラグイン間バスの実体。全ドライバインスタンスで共有される
     /// (`http_driver`/`process_driver`/`fs_driver` と同様)。`bus-host.emit`
@@ -207,7 +208,7 @@ impl HostSettingsHost for DriverCtx {
 }
 
 impl DriverHttpHost for DriverCtx {
-    /// See `crate::plugin::host::HostCtx::send` for the full rationale --
+    /// See `crate::host::plugin::HostCtx::send` for the full rationale --
     /// identical logic, substituting `driver_id` for `plugin_id`.
     fn send(&mut self, req: WitRequest) -> Result<WitResponse, WitDriverError> {
         let raw = self
@@ -259,7 +260,7 @@ impl BusHostHost for DriverCtx {
 }
 
 /// `edlr_driver_channel::BusError` を WIT の `bus-error` variant へ 1:1 で
-/// 写像する。`crate::plugin::host` にも同名の関数があるが、2 つの
+/// 写像する。`crate::host::plugin` にも同名の関数があるが、2 つの
 /// `bindgen!` 呼び出し(`world: "plugin"` と `world: "driver"`)は同じ WIT
 /// variant に対してそれぞれ別の Rust 型を生成するため、共有できない
 /// (`plugin::host::WitBusError` と `driver::host::WitBusError` は構造的に
@@ -278,7 +279,7 @@ fn bus_error_to_wit(error: edlr_driver_channel::BusError) -> WitBusError {
 
 impl DriverCtx {
     /// `sidecars_json` から当該サイドカーの実行仕様を解決する。判定自体は
-    /// `resolve::resolve_sidecar`(`crate::plugin::host::HostCtx::resolve_sidecar`
+    /// `resolve::resolve_sidecar`(`crate::host::plugin::HostCtx::resolve_sidecar`
     /// と共有)へ委譲し、ここでは variant を写像するだけ。
     fn resolve_sidecar(
         &self,
@@ -320,7 +321,7 @@ fn to_wit_instances(statuses: Vec<edlr_driver_process::InstanceStatus>) -> Vec<W
 }
 
 impl DriverProcessHost for DriverCtx {
-    /// See `crate::plugin::host::HostCtx::ensure_started` for the residual
+    /// See `crate::host::plugin::HostCtx::ensure_started` for the residual
     /// TOCTOU rationale -- identical logic here.
     fn ensure_started(&mut self, name: String) -> Result<Vec<WitInstance>, WitProcessError> {
         let spec = self.resolve_sidecar(&name)?;
@@ -336,7 +337,7 @@ impl DriverProcessHost for DriverCtx {
             })
     }
 
-    /// See `crate::plugin::host::HostCtx::stop`'s doc comment: uses the
+    /// See `crate::host::plugin::HostCtx::stop`'s doc comment: uses the
     /// fire-and-forget `stop_detached` so a guest-facing `stop` call never
     /// blocks the driver's dedicated thread for the sidecar shutdown grace
     /// period.
@@ -365,7 +366,7 @@ impl DriverProcessHost for DriverCtx {
 
 impl DriverCtx {
     /// `filesystem_json` から当該ルートの実パスと mode を解決する。判定自体は
-    /// `resolve::resolve_root`(`crate::plugin::host::HostCtx::resolve_root`
+    /// `resolve::resolve_root`(`crate::host::plugin::HostCtx::resolve_root`
     /// と共有)へ委譲し、ここでは variant を写像するだけ。
     fn resolve_root(&self, root: &str, need_write: bool) -> Result<std::path::PathBuf, WitFsError> {
         let raw = self

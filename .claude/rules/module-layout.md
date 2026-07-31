@@ -5,9 +5,6 @@ paths:
 
 # モジュール構成と依存方向
 
-> 注: core リファクタリング実施中は docs/superpowers/plans/ の移行規律
-> (move-only コミット・旧パス pub use 温存・テスト凍結)が本 rules に優先する。
-
 core は**機能名モジュール**で構成する。レイヤーディレクトリ
 (`domain/`、`ports/`、`infra/` など)は作らない。
 
@@ -21,6 +18,7 @@ core は**機能名モジュール**で構成する。レイヤーディレク�
 | `schedule/` | 純粋 | 発火計算 + 永続化 |
 | `rpc/` | 純粋 | RPC 解釈・JSON 整形(純粋関数群) |
 | `journal/` | 純粋 | discovery/parser/position/tailer |
+| `runtime/` | 純粋 | HostCtx と Registry が共有するランタイムバッファの JSON 形式 + DropCounters |
 | `registry/` | 命令的 | プラグイン・ドライバの facade と各サービス |
 | `runner/` | 命令的 | プラグインスレッドとイベントループ |
 | `host/` | 命令的 | wasmtime 配線 |

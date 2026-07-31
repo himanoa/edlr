@@ -52,18 +52,18 @@ pub struct PluginEntry {
     /// 再起動不要で反映される。
     pub capabilities_json: Arc<Mutex<String>>,
     /// `HostCtx` と共有されるサイドカー承認状態・実行仕様 JSON。形は
-    /// `sidecar_runtime::sidecars_json_string` を参照。
+    /// `crate::runtime::sidecar::sidecars_json_string` を参照。
     /// `Registry::refresh_sidecar_runtime` がここを更新すると、次回以降の
     /// `driver-process.ensure-started` 呼び出しに再起動不要で反映される。
     pub sidecars_json: Arc<Mutex<String>>,
     /// `HostCtx` と共有されるファイルアクセス承認状態・実パス JSON。形は
-    /// `fs_runtime::filesystem_json_string` を参照。
+    /// `crate::runtime::fs::filesystem_json_string` を参照。
     /// `Registry::refresh_filesystem_runtime` がここを更新すると、次回以降の
     /// `driver-fs.*` 呼び出しに再起動不要で反映される。未承認のルートは
-    /// `path` を持たない(`fs_runtime` のドキュメント参照)。
+    /// `path` を持たない(`crate::runtime::fs` のドキュメント参照)。
     pub filesystem_json: Arc<Mutex<String>>,
     /// `HostCtx` と共有されるバス承認状態・宣言済みトピック JSON。形は
-    /// `bus_runtime::bus_json_string` を参照。`filesystem_json` と同じく
+    /// `crate::runtime::bus::bus_json_string` を参照。`filesystem_json` と同じく
     /// 起動時に `GrantsStore::bus_state` と manifest から組み立てられ、以後は
     /// 将来の `Registry` の bus 承認 API(Task 10)が更新する。
     pub bus_json: Arc<Mutex<String>>,
@@ -188,7 +188,7 @@ pub enum RegistryError {
     /// 未承認のダッシュボードウィジェットのアセットが要求された。
     DashboardNotGranted(String),
     /// 指定された `id` のドライバが登録されていない。`UnknownPlugin` とは
-    /// 別の variant にしてある: `crate::driver::registry::DriverRegistry` の
+    /// 別の variant にしてある: `crate::registry::driver::DriverRegistry` の
     /// サイドカー/ファイルアクセス系メソッド(`find_manifest_for_shared` /
     /// `refresh_sidecar_runtime` / `refresh_filesystem_runtime`)が返す未登録
     /// エラーは「プラグイン」ではなく「ドライバ」の話であり、
@@ -269,7 +269,7 @@ pub struct Registry {
     settings_service: DiskSettingsService<PluginEntry>,
     /// プラグイン間バスの実体。`list()` が `options-from` を持つ select の候補を
     /// retain トピックから解決するために保持する
-    /// (`crate::plugin::select_options::resolve`)。`Bus` は `Clone` で内部を
+    /// (`crate::registry::select_options::resolve`)。`Bus` は `Clone` で内部を
     /// 共有するので、ドライバ側に配線したのと同じ実体を指す。
     bus: Bus,
     plugins_dir: PathBuf,
@@ -396,7 +396,7 @@ impl Registry {
         self.supervisor.shutdown_all();
     }
 
-    /// `crate::plugin::runner::spawn_bus_subscriber` が共有する shutdown
+    /// `crate::runner::plugin::spawn_bus_subscriber` が共有する shutdown
     /// フラグの `Arc` を返す。`runner.rs` がプラグインごとの購読タスクを
     /// 起動する際にこれを渡す(crate 内部専用: `pub(crate)`)。
     pub(crate) fn bus_subscriber_shutdown_flag(&self) -> Arc<AtomicBool> {
@@ -564,7 +564,7 @@ impl Registry {
     /// `id` のプラグインの effective settings(`SettingsStore` 由来)を返す。
     /// 実体は `registry::settings::SettingsService::effective`(Phase 4
     /// タスク8で抽出)。秘密情報を読み出し応答から落とすのはここ(plugin
-    /// wrapper)の役目 -- driver 側(`crate::driver::registry::DriverRegistry::values`)
+    /// wrapper)の役目 -- driver 側(`crate::registry::driver::DriverRegistry::values`)
     /// は落とさない(`split_secrets` のドキュメント参照)。
     pub fn values(
         &self,
@@ -632,7 +632,7 @@ impl Registry {
 
     /// `id` のプラグインの `filesystem_json` 共有バッファの中身をそのまま
     /// 返す(テスト用アクセサ)。`driver-fs.*` が実際に参照するのと同じ
-    /// 文字列(`fs_runtime::filesystem_json_string` の出力そのもの)。実体は
+    /// 文字列(`crate::runtime::fs::filesystem_json_string` の出力そのもの)。実体は
     /// `registry::filesystem::FilesystemService::filesystem_buffer`。
     pub fn filesystem_buffer(&self, id: &str) -> Result<String, RegistryError> {
         self.filesystem_service.filesystem_buffer(id)
@@ -748,7 +748,7 @@ impl Registry {
     /// 限り自然には終了しない。`Runtime::drop` は実行中の `spawn_blocking`
     /// タスクの完了を待つため、これを呼ばずに `main` を抜けようとすると
     /// **プロセスが `Runtime::drop` の中で無期限にハングする**(実際に踏んだ
-    /// Critical バグ。詳細は `crate::plugin::runner::
+    /// Critical バグ。詳細は `crate::runner::plugin::
     /// BUS_SUBSCRIBER_SHUTDOWN_POLL_INTERVAL` のドキュメントコメント参照)。
     ///
     /// `stop_all_sidecars` と同じくデーモンの shutdown シーケンスの一部として
@@ -1577,7 +1577,7 @@ pub(crate) mod tests {
     /// `set_bus_grant` は `GrantsStore` への永続化と `bus_json` バッファの
     /// 作り直しを両方行う。承認・取消の両方を同じプラグイン・同じ manifest
     /// で確認し、`bus_json` に載る `publish`/`subscribe` の有無が承認状態と
-    /// 一致することを見る(`bus_runtime` の「未承認は topics を落とす」
+    /// 一致することを見る(`crate::runtime::bus` の「未承認は topics を落とす」
     /// 契約どおりであることの確認)。
     #[test]
     fn set_bus_grant_persists_and_updates_the_shared_buffer_both_ways() {

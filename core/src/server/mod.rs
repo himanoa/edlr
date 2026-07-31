@@ -1,3 +1,8 @@
+//! axum/WS の配線(命令的モジュール)。
+//!
+//! `rpc/` を呼んで JSON を組み立てるだけの薄い層に保つ -- RPC の解釈・整形
+//! ロジック自体は持たない。
+
 use crate::registry::driver::DriverRegistry;
 use crate::event::Event;
 use crate::registry::plugin::Registry;
@@ -173,7 +178,7 @@ pub fn handle_rpc_with_drivers(
 
 /// `drivers/*` RPC メソッドを処理する。呼び出し元([`handle_rpc_with_drivers`])
 /// が `drivers/` プレフィックスを剥がして渡す(`method` はプレフィックス無し)。
-/// `crate::plugin::registry::Registry` の `plugins/*` 系(`get-settings`/
+/// `crate::registry::plugin::Registry` の `plugins/*` 系(`get-settings`/
 /// `set-settings`/`set-capabilities`)と同じ形の応答を返す。`DriverInfo` は
 /// `PluginInfo` と違い `capability_requests` を持たない(manifest の
 /// `capabilities` をそのまま使う設計 -- `DriverInfo` のドキュメント参照)ため、

@@ -332,7 +332,7 @@ async fn main() {
     // **`shutdown_bus_subscribers` を `main` が返る(= `#[tokio::main]` が
     // 暗黙の `Runtime` を drop する)前に呼ぶことが必須**: `[[bus]] subscribe`
     // を宣言するプラグインが 1 つでもあれば、その購読転送タスク
-    // (`crate::plugin::runner::spawn_bus_subscriber`)は `spawn_blocking` の
+    // (`crate::runner::plugin::spawn_bus_subscriber`)は `spawn_blocking` の
     // 中でブロッキング受信をしており、これを呼ばずに `Runtime` を drop する
     // と `Runtime::drop` がそのタスクの完了を無期限に待ち、プロセスが
     // SIGTERM/SIGINT を受けても終了できなくなる(実際に踏んだ Critical
@@ -370,7 +370,7 @@ async fn main() {
     // daemon_signal_shutdown_integration.rs` の
     // `sigterm_to_daemon_stops_running_driver_sidecars` がこの回帰を防ぐ)。
     //
-    // ドライバ専用スレッド(`crate::driver::runner::run_driver_thread`)自体を
+    // ドライバ専用スレッド(`crate::runner::driver::run_driver_thread`)自体を
     // 明示的に止める必要は無い: プラグインの `spawn_bus_subscriber` と違い、
     // これは(`tokio::task::spawn_blocking` ではなく)素の `std::thread::spawn`
     // で動いており、`Runtime::drop` はこのスレッドの完了を待たない。つまり

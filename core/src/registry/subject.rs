@@ -2,8 +2,8 @@
 //! (`registry::filesystem::FilesystemService` が最初の consumer)を書けるように
 //! する薄い trait。
 //!
-//! plugin 側は `crate::plugin::Manifest` そのもの、driver 側は
-//! `crate::driver::manifest::DriverManifest` が実装する。両者の違いは
+//! plugin 側は `crate::manifest::Manifest` そのもの、driver 側は
+//! `crate::manifest::driver::DriverManifest` が実装する。両者の違いは
 //! 「未登録 id のエラー variant」(`RegistryError::UnknownPlugin` vs
 //! `UnknownDriver`)と「設定/承認ストア向けの `Manifest` 射影」
 //! (plugin は自分自身を clone するだけ、driver は `id`/`settings`/
@@ -32,7 +32,7 @@ pub(crate) trait RegistrySubject: Clone {
     fn sidecars(&self) -> &[SidecarRequest];
 
     /// `SettingsStore`/`GrantsStore`/`FilesystemConfigStore` など、既存の
-    /// ストア類が引数に取る `crate::plugin::Manifest` への射影。plugin は
+    /// ストア類が引数に取る `crate::manifest::Manifest` への射影。plugin は
     /// 自分自身の clone、driver は `DriverManifest::as_settings_manifest`
     /// と同じ変換(タスクブリーフ参照)。
     fn as_settings_manifest(&self) -> Manifest;

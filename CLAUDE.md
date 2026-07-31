@@ -3,7 +3,7 @@
 ## リポジトリ構成とコーディング規約
 
 - `core/` — デーモン本体。機能名モジュール構成:
-  純粋(`manifest` `capability` `settings` `schedule` `rpc` `journal`)+
+  純粋(`manifest` `capability` `settings` `schedule` `rpc` `journal` `runtime`)+
   命令的(`registry` `runner` `host` `server`)
 - `drivers/` — ドライバ群 / `ui/` — Tauri GUI / `config/` — 設定
 

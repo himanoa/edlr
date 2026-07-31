@@ -1,6 +1,6 @@
 //! `drivers_dir` を走査し、各ドライバをロードして専用スレッドで駆動する。
 //!
-//! `crate::plugin::runner` と同じ構造(専用 OS スレッドが `DriverHost::load`
+//! `crate::runner::plugin` と同じ構造(専用 OS スレッドが `DriverHost::load`
 //! → `call_init` → メッセージループを直列に実行する)だが、以下が異なる:
 //! - **イベント購読タスクを作らない**。プラグインは router の broadcast
 //!   イベントを tokio タスクでフィルタして転送するが、ドライバはそもそも
@@ -47,7 +47,7 @@ const DRIVER_MESSAGE_QUEUE_CAPACITY: usize = 64;
 /// 戻り値の `DriverRegistry` は起動直後から `list` 可能(= 各ドライバの
 /// `load`/`init` 結果が確定した後に返る)。
 ///
-/// **呼び出し順序が重要**: この関数は `crate::plugin::runner::start_plugins`
+/// **呼び出し順序が重要**: この関数は `crate::runner::plugin::start_plugins`
 /// より先に呼ぶこと。ドライバの登録(`Bus::register_driver`)が完了する前に
 /// プラグインが起動すると、そのプラグインの `init` 中の最初の `bus.get` 呼び
 /// 出しが `unknown-driver` を見てしまう(設計書「起動順序」参照)。

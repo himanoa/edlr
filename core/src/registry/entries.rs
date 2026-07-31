@@ -1,4 +1,4 @@
-//! `crate::plugin::registry::Registry` と `crate::driver::registry::DriverRegistry`
+//! `crate::registry::plugin::Registry` と `crate::registry::driver::DriverRegistry`
 //! が共通で持っていた「エントリ一覧 + per-id ロックマップ」の配線を抽出した
 //! もの(Phase 4 タスク2、move-only)。
 //!
@@ -7,7 +7,7 @@
 //! ロック保持区間の規律が完全に同一だった: `entries` のロックは
 //! 「manifest や共有バッファハンドルのクローンを取る」間だけ保持し、
 //! ディスク I/O やプロセス制御など時間のかかる処理へ入る前に手放す
-//! (`crate::plugin::registry::Registry` の型ドキュメントコメント、
+//! (`crate::registry::plugin::Registry` の型ドキュメントコメント、
 //! `sidecar_runtime_locks` 付近の記述を参照)。`EntryTable<E>` の各メソッドは
 //! その規律をそのまま体現する: クロージャを呼んでいる間だけロックを握り、
 //! 返り値はクロージャの外へ出る前に(`T` として)取り出し済みになる。
@@ -19,7 +19,7 @@
 //! もの。**マップを1つに統合するものではない**: 3本(plugin)/2本(driver)の
 //! 別々の `IdLocks` インスタンスをそれぞれのフィールドとして持つ
 //! (フィールドを分けている理由は fail-open 対策の意図的な設計であり、
-//! `crate::plugin::registry::Registry` の `filesystem_runtime_locks` /
+//! `crate::registry::plugin::Registry` の `filesystem_runtime_locks` /
 //! `bus_runtime_locks` のドキュメントコメントを参照)。
 
 use std::collections::HashMap;

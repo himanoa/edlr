@@ -1,8 +1,8 @@
 //! ファイルアクセス承認(`[[filesystem]]`)の状態管理。
 //!
-//! Phase 4 タスク4の move-only コミットで `crate::plugin::registry::Registry`
+//! Phase 4 タスク4の move-only コミットで `crate::registry::plugin::Registry`
 //! から plugin 専用として抽出したあと、このコミットで `RegistrySubject` を
-//! 使って driver 側(`crate::driver::registry::DriverRegistry`)も同じ
+//! 使って driver 側(`crate::registry::driver::DriverRegistry`)も同じ
 //! `FilesystemService` に載せた。分析(`docs/superpowers/specs/2026-07-31-phase4-registry-analysis.md`
 //! §3)のとおり、この2つの実装はエラー文字列を含めて byte 同一(差は
 //! 「未登録 id のエラー variant」と「設定/承認ストア向けの `Manifest` 射影」
@@ -131,7 +131,7 @@ impl<G: GrantStorage, E: FilesystemEntry> FilesystemService<G, E> {
     /// 設定(`FilesystemConfigStore`)・承認(`GrantsStore`)はディスクを読む
     /// (`build_sidecar_infos` と同じ流儀。こちらはプロセス状態が無いので
     /// `ProcessDriver::status` に相当する読み取りは無い)。設定/承認ストアは
-    /// `crate::plugin::Manifest` しか受け付けないため、`as_settings_manifest`
+    /// `crate::manifest::Manifest` しか受け付けないため、`as_settings_manifest`
     /// で一度だけ射影する(plugin は clone、driver は
     /// `DriverManifest::as_settings_manifest` と同じ変換)。
     pub(crate) fn build_filesystem_infos(&self, subject: &E::Subject) -> Vec<FilesystemInfo> {
@@ -176,7 +176,7 @@ impl<G: GrantStorage, E: FilesystemEntry> FilesystemService<G, E> {
 
     /// `id` の `filesystem_json` 共有バッファの中身をそのまま返す
     /// (テスト用アクセサ)。`driver-fs.*` が実際に参照するのと同じ文字列
-    /// (`fs_runtime::filesystem_json_string` の出力そのもの)。
+    /// (`crate::runtime::fs::filesystem_json_string` の出力そのもの)。
     pub(crate) fn filesystem_buffer(&self, id: &str) -> Result<String, RegistryError> {
         let filesystem_json = self
             .entries
@@ -198,7 +198,7 @@ impl<G: GrantStorage, E: FilesystemEntry> FilesystemService<G, E> {
     /// ので、`refresh_sidecar_runtime` の手順 1(`ProcessDriver::stop`)に
     /// 相当する処理は無い。`FilesystemConfigStore::effective` /
     /// `GrantsStore::filesystem_state` の現在値から `filesystem_json` を
-    /// 作り直すだけ(未承認のルートは `path` を持たない -- `fs_runtime` の
+    /// 作り直すだけ(未承認のルートは `path` を持たない -- `crate::runtime::fs` の
     /// ドキュメント参照)。それでも「永続化(呼び出し元で完了済み)」と
     /// 「バッファへの反映」を同じ id 別ロックの臨界区間に収めるのは
     /// `refresh_sidecar_runtime` と同じ理由: 2 つの同時呼び出し(例えば

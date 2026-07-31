@@ -160,7 +160,7 @@ pub struct HostCtx {
     /// -- the *effective* set of hosts this plugin instance may reach via
     /// `driver-http.send`. Built by the runner/`Registry` from `GrantsStore`,
     /// the manifest's requested hosts, and any approved sidecars' implicit
-    /// `127.0.0.1` origins (see `sidecar_runtime::implicit_http_hosts`
+    /// `127.0.0.1` origins (see `crate::runtime::sidecar::implicit_http_hosts`
     /// combined together), and readable/writable live via the same `Arc`
     /// the `Registry` holds -- so approving/revoking a capability takes
     /// effect on the very next `driver-http.send` call, no plugin restart
@@ -173,15 +173,15 @@ pub struct HostCtx {
     /// the decision through its inputs.
     pub capabilities_json: Arc<Mutex<String>>,
     /// サイドカーの承認状態と実行に必要な値の共有バッファ。形は
-    /// `sidecar_runtime::sidecars_json_string` を参照。`capabilities_json`
+    /// `crate::runtime::sidecar::sidecars_json_string` を参照。`capabilities_json`
     /// と同じく `Registry` が承認・設定変更のたびに上書きする。
     pub sidecars_json: Arc<Mutex<String>>,
     /// ファイルシステムルートの承認状態と実パスの共有バッファ。形は
-    /// `fs_runtime::filesystem_json_string` を参照。`sidecars_json` と同じく
+    /// `crate::runtime::fs::filesystem_json_string` を参照。`sidecars_json` と同じく
     /// `Registry` が承認・設定変更のたびに上書きする。
     pub filesystem_json: Arc<Mutex<String>>,
     /// バスの承認状態と宣言済みトピックの共有バッファ。形は
-    /// `bus_runtime::bus_json_string` を参照。`filesystem_json` と同じく
+    /// `crate::runtime::bus::bus_json_string` を参照。`filesystem_json` と同じく
     /// `Registry` が承認・設定変更のたびに上書きする。
     ///
     /// `bus.publish` / `bus.get` の許否は **このバッファだけ** から判定する

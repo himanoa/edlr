@@ -1,3 +1,9 @@
+//! TOML → `Manifest` のパースと全体整合の検証(純粋モジュール)。
+//!
+//! I/O は [`load_manifest`] だけに端に寄せてあり、それ以外はパースと
+//! バリデーションの純粋関数群。プラグイン用の [`Manifest`] とドライバ用の
+//! [`driver::DriverManifest`] の 2 つの manifest 型をここで扱う。
+
 use std::collections::HashSet;
 use std::fmt;
 use std::fs;
@@ -102,7 +108,7 @@ pub enum SettingField {
     /// `options-from` は「候補がインストール環境で決まる」設定のためにある
     /// (COEIROINK の話者一覧のように、何が選べるかは動かしてみないと分から
     /// ない)。解決は RPC 応答を組み立てる時点で行われ、`options` に埋められる
-    /// (`crate::plugin::select_options::resolve`)。解決できなければ `None` の
+    /// (`crate::registry::select_options::resolve`)。解決できなければ `None` の
     /// まま返り、UI が「候補を取得できません」を出す。
     Select {
         key: String,

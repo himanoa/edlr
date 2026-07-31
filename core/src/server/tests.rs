@@ -185,7 +185,7 @@ fn plugins_list_reports_empty_schedules_array_when_none_declared() {
 /// (`test_registries()` が焼き込むものとは別に、ここでは `ed-state` を
 /// 一切登録していないものを使う)に一致するドライバが無ければ、
 /// `resolved` は `false` に落ちる。`resolved` の計算
-/// (`crate::plugin::registry::Registry::build_bus_infos`、
+/// (`crate::registry::bus`(`BusService::build_bus_infos`)、
 /// `bus_result_json` はそれをそのまま JSON にするだけ)自体が効いている
 /// ことを、true/false 両方を**別々の `Registry` インスタンス**(=
 /// 別々の `DriverRegistry` を焼き込んだもの)で示すことで確認する
@@ -496,7 +496,7 @@ fn drivers_get_and_set_settings_round_trip() {
     assert!(fetched.is_object());
 }
 
-/// `ed-state` の fixture(`crate::driver::registry::tests::test_registry`)
+/// `ed-state` の fixture(`crate::registry::driver::tests::test_registry`)
 /// は http capability を 1 件宣言している(この review finding が入る
 /// までは宣言しておらず、`GrantsStore::set` の
 /// `capabilities_fingerprint` が常に `None` を返すため `granted` は
@@ -724,7 +724,7 @@ fn drivers_set_filesystem_grant_requires_driver_name_and_granted() {
 /// Configures a real executable first (`drivers/set-sidecar-config`, the
 /// same round-trip the UI performs), then grants and checks the
 /// response array directly -- this is the RPC-level counterpart to
-/// `crate::driver::registry::tests::set_sidecar_config_and_grant_update_the_shared_sidecars_buffer`,
+/// `crate::registry::driver::tests::set_sidecar_config_and_grant_update_the_shared_sidecars_buffer`,
 /// which checks the underlying shared buffer.
 #[test]
 fn drivers_set_sidecar_grant_persists_and_returns_the_full_sidecar_array() {

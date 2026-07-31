@@ -1,7 +1,8 @@
-//! プラグイン/ドライバの registry(facade と各サービス)。
+//! プラグイン/ドライバの registry(命令的モジュール: facade と各サービス)。
 //!
-//! Phase 4 完了済み。`EntryTable`・`ThreadSupervisor`・各サービス
-//! (filesystem・bus・sidecar・grants・settings)と facade(plugin.rs・driver.rs) が実装済み。
+//! `EntryTable`・`ThreadSupervisor`・各サービス(filesystem・bus・sidecar・
+//! grants・settings)を土台に、`plugin::Registry` / `driver::DriverRegistry`
+//! の 2 つの facade がそれぞれの公開シグネチャで委譲する。
 
 use edlr_driver_process::{InstanceStatus, ProcessError, ProcessSpec};
 

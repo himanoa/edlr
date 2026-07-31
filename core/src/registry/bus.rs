@@ -1,6 +1,6 @@
 //! プラグイン間バス接続(`[[bus]]`)の状態管理。
 //!
-//! Phase 4 タスク5の move-only コミットで `crate::plugin::registry::Registry`
+//! Phase 4 タスク5の move-only コミットで `crate::registry::plugin::Registry`
 //! から抽出した。`registry::filesystem::FilesystemService` と違い、bus は
 //! **plugin 専用**(分析 `docs/superpowers/specs/2026-07-31-phase4-registry-analysis.md`
 //! §5 のとおり、driver 側に bus grant は存在しない)なので、`FilesystemEntry`
@@ -129,7 +129,7 @@ impl<G: GrantStorage> BusService<G> {
     /// `id` のプラグインの `bus_json` 共有バッファの中身をそのまま返す
     /// (テスト用アクセサ)。`HostCtx::check_bus` /
     /// `runner::spawn_bus_subscriber` が実際に参照するのと同じ文字列
-    /// (`bus_runtime::bus_json_string` の出力そのもの)。
+    /// (`crate::runtime::bus::bus_json_string` の出力そのもの)。
     pub(crate) fn bus_buffer(&self, id: &str) -> Result<String, RegistryError> {
         let bus_json = self
             .entries
@@ -149,7 +149,7 @@ impl<G: GrantStorage> BusService<G> {
     /// 「止めるべきプロセス」が無いので、`GrantsStore::bus_state` /
     /// `DriverRegistry::manifest_of` の現在値から `bus_json` を作り直す
     /// だけ。未承認の接続先は `publish`/`subscribe` を持たない
-    /// (`bus_runtime` のドキュメント参照)。
+    /// (`crate::runtime::bus` のドキュメント参照)。
     ///
     /// ロックは `bus_runtime_lock_for(id)` -- サイドカー・ファイルアクセス
     /// とは別のマップ(`bus_runtime_locks` のドキュメント参照)から引く。

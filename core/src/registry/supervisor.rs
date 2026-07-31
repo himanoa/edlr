@@ -1,4 +1,4 @@
-//! `crate::plugin::registry::Registry` が持っていたプラグインスレッドの監督
+//! `crate::registry::plugin::Registry` が持っていたプラグインスレッドの監督
 //! (登録・schedule view 公開・drop counter 公開・shutdown)を抽出したもの
 //! (Phase 4 タスク3、move-only)。
 //!
@@ -42,9 +42,9 @@ struct PluginThreadHandle {
 }
 
 /// プラグイン専用スレッドの登録・監督(停止・schedule view・drop counter の
-/// 公開)を担う。`crate::plugin::registry::Registry` が 1 つ保持する。
+/// 公開)を担う。`crate::registry::plugin::Registry` が 1 つ保持する。
 pub(crate) struct ThreadSupervisor {
-    /// `crate::plugin::runner::spawn_bus_subscriber` の各インスタンスが共有
+    /// `crate::runner::plugin::spawn_bus_subscriber` の各インスタンスが共有
     /// する shutdown フラグ。`shutdown_bus_subscribers` が立て、各購読タスクは
     /// `BUS_SUBSCRIBER_SHUTDOWN_POLL_INTERVAL` ごとにこれを見に行く。詳しい
     /// 経緯は `Registry::shutdown_bus_subscribers` のドキュメントコメント参照。
@@ -257,7 +257,7 @@ impl ThreadSupervisor {
         }
     }
 
-    /// `crate::plugin::runner::spawn_bus_subscriber` が共有する shutdown
+    /// `crate::runner::plugin::spawn_bus_subscriber` が共有する shutdown
     /// フラグの `Arc` を返す。`runner.rs` がプラグインごとの購読タスクを
     /// 起動する際にこれを渡す(crate 内部専用)。
     pub(crate) fn shutdown_flag(&self) -> Arc<AtomicBool> {
@@ -276,7 +276,7 @@ impl ThreadSupervisor {
     /// 限り自然には終了しない。`Runtime::drop` は実行中の `spawn_blocking`
     /// タスクの完了を待つため、これを呼ばずに `main` を抜けようとすると
     /// **プロセスが `Runtime::drop` の中で無期限にハングする**(実際に踏んだ
-    /// Critical バグ。詳細は `crate::plugin::runner::
+    /// Critical バグ。詳細は `crate::runner::plugin::
     /// BUS_SUBSCRIBER_SHUTDOWN_POLL_INTERVAL` のドキュメントコメント参照)。
     ///
     /// `Registry::stop_all_sidecars` と同じくデーモンの shutdown シーケンス

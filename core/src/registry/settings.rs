@@ -1,7 +1,7 @@
 //! settings 群(`values` / `set_values`)の共通内部。
 //!
-//! Phase 4 タスク8: plugin(`crate::plugin::registry::Registry::values`/
-//! `set_values`)と driver(`crate::driver::registry::DriverRegistry::values`/
+//! Phase 4 タスク8: plugin(`crate::registry::plugin::Registry::values`/
+//! `set_values`)と driver(`crate::registry::driver::DriverRegistry::values`/
 //! `set_values`)は、`entries` から manifest/`settings_json` を引き、
 //! `settings::Storage::effective`/`update_and_effective` を呼んでから
 //! `settings_json` バッファを書き換える、という手順が完全に同一だった
@@ -122,7 +122,7 @@ impl<St: settings::Storage, E: SettingsEntry> SettingsService<St, E> {
 
     /// `id` の settings を検証・永続化し、稼働中プラグイン/ドライバが参照する
     /// 共有 `settings_json` も新しい effective 値(秘密情報を含む生値)で
-    /// 上書きする。`crate::plugin::registry::Registry::set_values` の
+    /// 上書きする。`crate::registry::plugin::Registry::set_values` の
     /// ドキュメントコメントに書かれたロック規律(`entries` ロックは manifest
     /// と `settings_json` の共有ハンドルを取得する間だけ保持し、ファイル I/O
     /// はロックを解放した後に行う)をそのまま踏襲する。

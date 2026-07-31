@@ -1,8 +1,8 @@
 //! サイドカープロセスの承認・起動停止状態管理。
 //!
-//! Phase 4 タスク6の move-only コミットで `crate::plugin::registry::Registry`
+//! Phase 4 タスク6の move-only コミットで `crate::registry::plugin::Registry`
 //! から plugin 専用として抽出したあと、このコミットで `RegistrySubject` を
-//! 使って driver 側(`crate::driver::registry::DriverRegistry`)も同じ
+//! 使って driver 側(`crate::registry::driver::DriverRegistry`)も同じ
 //! `SidecarService` に載せた。分析(`docs/superpowers/specs/2026-07-31-phase4-registry-analysis.md`
 //! §3)のとおり、この2つの実装はエラー文字列を含めて byte 同一(差は
 //! 「未登録 id のエラー variant」「設定/承認ストア向けの `Manifest` 射影」
@@ -42,7 +42,7 @@ use crate::registry::subject::RegistrySubject;
 use crate::registry::ProcessControl;
 
 /// `<id>/<sidecar-name>` の形で `ProcessControl` のキーを組み立てる。
-/// `HostCtx::sidecar_key`(`core/src/plugin/host.rs`)と同じ規則。
+/// `HostCtx::sidecar_key`(`core/src/host/plugin.rs`)と同じ規則。
 pub(crate) fn sidecar_key(id: &str, name: &str) -> String {
     format!("{id}/{name}")
 }
@@ -333,8 +333,8 @@ impl<G: GrantStorage, P: ProcessControl, E: SidecarEntry> SidecarService<G, P, E
     /// 区間(呼び出し側が別途 `.lock()` する)の間は保持しない。
     ///
     /// `pub(crate)`: サイドカー停止待ちがどれだけロックを保持するかを検証
-    /// するテストが `crate::plugin::registry::tests` /
-    /// `crate::driver::registry::tests` から直接このロックを取るため。
+    /// するテストが `crate::registry::plugin::tests` /
+    /// `crate::registry::driver::tests` から直接このロックを取るため。
     pub(crate) fn sidecar_runtime_lock_for(&self, id: &str) -> Arc<Mutex<()>> {
         self.sidecar_runtime_locks.lock_for(id)
     }

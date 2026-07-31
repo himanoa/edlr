@@ -1,8 +1,8 @@
 //! 実行中ドライバの状態を保持する共有ビュー。`start_drivers` が構築する。
 //!
-//! `crate::plugin::registry::Registry` と対称の構造だが、以下が異なる:
+//! `crate::registry::plugin::Registry` と対称の構造だが、以下が異なる:
 //! - bus の承認 API は持たない(プラグインの `[[bus]]` 要求を承認するのは
-//!   `crate::plugin::registry::Registry` の責務 -- ドライバは自分の側から
+//!   `crate::registry::plugin::Registry` の責務 -- ドライバは自分の側から
 //!   バス接続を要求しない)。
 //! - `set_disabled` は状態を `Disabled` にするだけでなく `bus.disable_driver`
 //!   も呼ぶ。ドライバの retained 値はドライバ自身の生存が前提であり、無効化
@@ -28,7 +28,7 @@ use crate::registry::grants::DiskGrantService;
 use crate::registry::settings::DiskSettingsService;
 use crate::registry::sidecar::DiskSidecarService;
 
-/// ドライバ 1 件の現在の駆動状態。`crate::plugin::registry::PluginState` と対称。
+/// ドライバ 1 件の現在の駆動状態。`crate::registry::plugin::PluginState` と対称。
 #[derive(Debug, Clone, PartialEq)]
 pub enum DriverState {
     Running,
@@ -62,7 +62,7 @@ pub struct DriverInfo {
 }
 
 /// `DriverRegistry` の値アクセス系メソッドが返しうるエラー。
-/// `crate::plugin::registry::RegistryError` と対称だが、ドライバの API 面が
+/// `crate::registry::plugin::RegistryError` と対称だが、ドライバの API 面が
 /// 狭い(サイドカー/ファイルアクセスの個別承認 API を持たない)ぶん variant
 /// も少ない。
 #[derive(Debug)]
@@ -108,7 +108,7 @@ fn to_driver_error(err: RegistryError) -> DriverRegistryError {
     }
 }
 
-/// 起動中ドライバ一覧の共有ビュー。`crate::plugin::registry::Registry` と対称。
+/// 起動中ドライバ一覧の共有ビュー。`crate::registry::plugin::Registry` と対称。
 ///
 /// 内部で `DriverHost` の `Arc` も保持している。理由は `Registry` が
 /// `PluginHost` を保持しているのと同じ(エポック割り込み用 ticker スレッドを
@@ -120,27 +120,27 @@ pub struct DriverRegistry {
     settings_store: Arc<SettingsStore>,
     grants_store: Arc<GrantsStore>,
     /// fs 群(`filesystem` / `set_filesystem_config` / `set_filesystem_grant`
-    /// とその内部ヘルパー)の実体。`crate::plugin::registry::Registry` と
+    /// とその内部ヘルパー)の実体。`crate::registry::plugin::Registry` と
     /// 同じ `registry::filesystem::FilesystemService` を `RegistrySubject`
     /// (`DriverManifest`)越しに共有する(Phase 4 タスク4で統合)。
     filesystem_service: DiskFilesystemService<DriverEntry>,
     /// サイドカー群(`sidecars` / `set_sidecar_config` / `set_sidecar_grant` /
     /// `control_sidecar` / `stop_all_sidecars` とその内部ヘルパー)の実体。
-    /// `crate::plugin::registry::Registry` と同じ
+    /// `crate::registry::plugin::Registry` と同じ
     /// `registry::sidecar::SidecarService` を `RegistrySubject`
     /// (`DriverManifest`)越しに共有する(Phase 4 タスク6で統合)。
     /// `capabilities_lock`(`new` 内のローカル変数)の `Arc` は `grant_service`
     /// にも同一のものを注入している(`registry::grants::GrantService` の
     /// ドキュメントコメント参照。`Registry` 自身はこの `Arc` をフィールドとし
-    /// ては保持しない -- `crate::plugin::registry::Registry` と同じ流儀)。
+    /// ては保持しない -- `crate::registry::plugin::Registry` と同じ流儀)。
     sidecar_service: DiskSidecarService<DriverEntry>,
     /// capability 承認群(`set_capabilities` / `effective_hosts`)の実体。
-    /// `crate::plugin::registry::Registry` と同じ
+    /// `crate::registry::plugin::Registry` と同じ
     /// `registry::grants::GrantService` を `SidecarEntry`(`DriverEntry`)越しに
     /// 共有する(Phase 4 タスク8で統合)。dashboard 群はこのインスタンスでは
     /// 使わない(`GrantService<G, PluginEntry>` 限定の impl のため呼べない)。
     grant_service: DiskGrantService<DriverEntry>,
-    /// settings 群(`values` / `set_values`)の実体。`crate::plugin::registry::Registry`
+    /// settings 群(`values` / `set_values`)の実体。`crate::registry::plugin::Registry`
     /// と同じ `registry::settings::SettingsService` を `SettingsEntry`
     /// (`DriverEntry`)越しに共有する(Phase 4 タスク8で統合)。
     settings_service: DiskSettingsService<DriverEntry>,
@@ -214,7 +214,7 @@ impl DriverRegistry {
     ///
     /// `entries` ロックは manifest/state のクローン取得のみに使い、ロックを
     /// 解放してから(ディスクを読む)各ストアを呼ぶ
-    /// (`crate::plugin::registry::Registry::list` と同じ流儀)。
+    /// (`crate::registry::plugin::Registry::list` と同じ流儀)。
     pub fn list(&self) -> Vec<DriverInfo> {
         let snapshot: Vec<(DriverManifest, DriverState)> = self.entries.with_entries(|entries| {
             entries
@@ -229,7 +229,7 @@ impl DriverRegistry {
                 // `options-from` の select の候補を、いま retain されている値から
                 // 解決して埋める。ドライバ自身が emit したトピックを自分の設定の
                 // 候補源にする形(COEIROINK の話者一覧)を成立させるために、
-                // プラグイン側(`crate::plugin::registry::Registry::list`)と
+                // プラグイン側(`crate::registry::plugin::Registry::list`)と
                 // 同じ解決をここでも行う。
                 crate::registry::select_options::resolve(&mut manifest.settings, &self.bus);
                 let settings_manifest = manifest.as_settings_manifest();
@@ -304,7 +304,7 @@ impl DriverRegistry {
     }
 
     /// サイドカー/ファイルアクセス
-    /// 系のメソッド群は `crate::plugin::registry::Registry` の対応メソッドと
+    /// 系のメソッド群は `crate::registry::plugin::Registry` の対応メソッドと
     /// エラー型を揃えるため(`SidecarInfo`/`FilesystemInfo`/`SidecarAction`/
     /// `RegistryError` は既にプラグイン・ドライバ両レイヤーで共有されている
     /// 型 -- タスクブリーフ参照)、`DriverRegistryError` ではなくこちらを
@@ -318,7 +318,7 @@ impl DriverRegistry {
     /// ..." の 2 通りの文言に分かれてしまう)。
     /// `id` のドライバの現在のサイドカー状態一覧(manifest の `[[sidecar]]`
     /// 宣言順)を返す。実体は `registry::sidecar::SidecarService::sidecars`
-    /// (Phase 4 タスク6で統合。`crate::plugin::registry::Registry::sidecars`
+    /// (Phase 4 タスク6で統合。`crate::registry::plugin::Registry::sidecars`
     /// と同じサービスを `RegistrySubject` 越しに共有する)。
     pub fn sidecars(&self, id: &str) -> Result<Vec<SidecarInfo>, RegistryError> {
         self.sidecar_service.sidecars(id)
@@ -327,7 +327,7 @@ impl DriverRegistry {
     /// `id` のドライバの現在のファイルアクセス状態一覧(manifest の
     /// `[[filesystem]]` 宣言順)を返す。実体は
     /// `registry::filesystem::FilesystemService::filesystem`(Phase 4
-    /// タスク4で統合。`crate::plugin::registry::Registry::filesystem` と
+    /// タスク4で統合。`crate::registry::plugin::Registry::filesystem` と
     /// 同じサービスを `RegistrySubject` 越しに共有する)。
     pub fn filesystem(&self, id: &str) -> Result<Vec<FilesystemInfo>, RegistryError> {
         self.filesystem_service.filesystem(id)
@@ -437,7 +437,7 @@ impl DriverRegistry {
     /// `edlr_driver_channel::Bus::disable_driver` のドキュメント参照)。
     ///
     /// **状態を `Disabled` にするのを、サイドカーを止めるより先に行う**
-    /// (`crate::plugin::registry::Registry::set_disabled` と同じ順序・同じ
+    /// (`crate::registry::plugin::Registry::set_disabled` と同じ順序・同じ
     /// ロック規律。以前はここが「サイドカーを止める → 最後に `Disabled` を
     /// 立てる」の順で、しかも `sidecar_runtime_lock_for(id)` を一切取って
     /// いなかった -- Important: 最終レビューで見つかった取りこぼし)。この順序
@@ -468,7 +468,7 @@ impl DriverRegistry {
     }
 
     /// 全ドライバの全サイドカーインスタンスを停止する(デーモン shutdown 用)。
-    /// `crate::plugin::registry::Registry::stop_all_sidecars` と同じ流儀
+    /// `crate::registry::plugin::Registry::stop_all_sidecars` と同じ流儀
     /// (`ProcessDriver::stop_all` をそのまま呼ぶ薄い入口)。
     ///
     /// **Critical: 最終レビューで見つかった取りこぼし**。デーモンの shutdown
@@ -519,11 +519,11 @@ pub(crate) mod tests {
     /// `ed-state` を 1 件だけ載せた `DriverRegistry`。`current-system`
     /// (retain 付き)と `ship-status` の 2 トピックを宣言する -- 前者は
     /// `crate::server` の `drivers/list` テストが `topics[0]` として見るもの、
-    /// 後者は `crate::plugin::registry::tests::test_registry_with_bus_request`
+    /// 後者は `crate::registry::plugin::tests::test_registry_with_bus_request`
     /// が宣言する `[[bus]]` 要求(`publish = ["ship-status"]`、
     /// `subscribe = ["current-system"]`)を両方とも解決させる(`resolved: true`
     /// にする)ために要る。`bus` は呼び出し元と共有させたいので引数で受け取る
-    /// (`crate::plugin::registry::tests` 側のテストが同じ `Bus` を使う場合に
+    /// (`crate::registry::plugin::tests` 側のテストが同じ `Bus` を使う場合に
     /// 備える。今のところ呼び出し元は毎回新しい `Bus::new()` を渡している)。
     ///
     /// http capability も 1 件宣言する(`crate::server` の
@@ -653,7 +653,7 @@ pub(crate) mod tests {
     }
 
     /// Regression test mirroring
-    /// `crate::plugin::registry::tests::set_disabled_stops_all_sidecars_of_that_plugin`:
+    /// `crate::registry::plugin::tests::set_disabled_stops_all_sidecars_of_that_plugin`:
     /// `set_disabled`'s sidecar-stop half was previously untested (the other
     /// `set_disabled` test's fixture declares zero sidecars), so a future
     /// refactor that dropped it would go uncaught.
@@ -772,7 +772,7 @@ pub(crate) mod tests {
     }
 
     /// Regression test mirroring
-    /// `crate::plugin::registry::tests::control_sidecar_rejects_start_and_restart_once_the_plugin_is_disabled_but_allows_stop`.
+    /// `crate::registry::plugin::tests::control_sidecar_rejects_start_and_restart_once_the_plugin_is_disabled_but_allows_stop`.
     /// `control_sidecar` already checks `is_disabled`, so this passed before
     /// the `set_disabled` ordering fix too -- it pins the sequential
     /// (non-racing) case as a baseline alongside the concurrent regression
@@ -1104,7 +1104,7 @@ pub(crate) mod tests {
     }
 
     /// Regression guard mirroring
-    /// `crate::plugin::registry::tests::set_sidecar_grant_rejects_granting_without_a_configured_command`:
+    /// `crate::registry::plugin::tests::set_sidecar_grant_rejects_granting_without_a_configured_command`:
     /// granting a driver sidecar whose `command` was never configured must
     /// be rejected as `RegistryError::Sidecar`, both at the top-level
     /// `set_sidecar_grant` call and (implicitly) via `control_sidecar`'s own
@@ -1123,7 +1123,7 @@ pub(crate) mod tests {
     /// `crate::server`'s `drivers/sidecar-control` `start` (and, by
     /// extension, `restart`) must refuse to launch a sidecar that has never
     /// been granted, even once a `command` is configured. Mirrors
-    /// `crate::plugin::registry::tests::control_sidecar_rejects_start_and_restart_once_the_plugin_is_disabled_but_allows_stop`
+    /// `crate::registry::plugin::tests::control_sidecar_rejects_start_and_restart_once_the_plugin_is_disabled_but_allows_stop`
     /// (a narrower slice of it: the "not granted" branch specifically).
     #[test]
     fn control_sidecar_rejects_starting_an_ungranted_sidecar() {
@@ -1207,7 +1207,7 @@ pub(crate) mod tests {
     }
 
     /// Regression guard mirroring
-    /// `crate::plugin::registry::tests`'s filesystem-grant validation:
+    /// `crate::registry::plugin::tests`'s filesystem-grant validation:
     /// granting a filesystem root that has no directory configured must be
     /// rejected as `RegistryError::Filesystem`, and must not be confused
     /// with an unrelated early return (e.g. `UnknownFilesystem`) -- pin the
@@ -1226,11 +1226,11 @@ pub(crate) mod tests {
     }
 
     /// Port of
-    /// `crate::plugin::registry::tests::concurrent_control_sidecar_start_and_grant_revoke_never_leaves_an_ungranted_instance_running`
+    /// `crate::registry::plugin::tests::concurrent_control_sidecar_start_and_grant_revoke_never_leaves_an_ungranted_instance_running`
     /// onto `DriverRegistry`.
     ///
     /// The review finding this closes: the plugin-side test only exercises
-    /// `crate::plugin::registry::Registry`'s own `entries` Vec and its own
+    /// `crate::registry::plugin::Registry`'s own `entries` Vec and its own
     /// `sidecar_runtime_locks` map -- both independently typed/instantiated
     /// fields on `DriverRegistry`, not shared with the plugin registry in any
     /// way (no `Arc` is shared between the two; `DriverRegistry::new`

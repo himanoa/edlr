@@ -152,7 +152,7 @@ impl FilesystemConfigStore {
     /// 旧バージョンで保存されたもの、保護対象が増える前に保存されたもの)。
     /// 検証を通らない値は空パス(= 未設定)へ落とすので、承認もできず
     /// (`Registry::set_filesystem_grant`)、共有バッファにも `path` が載らず
-    /// (`fs_runtime`)、ホスト側も `not-configured` で拒否する
+    /// (`crate::runtime::fs`)、ホスト側も `not-configured` で拒否する
     /// (`HostCtx::resolve_root`)。これで I1 の保護が保存時だけでなく恒久的に
     /// 閉じる。
     pub fn effective(&self, manifest: &Manifest) -> BTreeMap<String, FilesystemConfig> {

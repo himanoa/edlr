@@ -100,7 +100,7 @@ pub fn validate_bus(requests: &mut [BusRequest]) -> Result<(), ManifestError> {
         for topic in request.publish.iter().chain(request.subscribe.iter()) {
             edlr_driver_channel::topic::validate_name(topic).map_err(ManifestError::BadBus)?;
         }
-        // `[[topics]]`(`crate::driver::manifest::validate_topics`)と同じ
+        // `[[topics]]`(`crate::manifest::driver::validate_topics`)と同じ
         // 規律: `publish`/`subscribe` それぞれの中で同じトピック名が重複して
         // 宣言されているのを許すと、`subscribe = ["a", "a"]` が実際には 2 件の
         // 購読を作ってしまい、`emit` のたびに `on-event` が 2 回呼ばれ、

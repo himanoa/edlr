@@ -1,6 +1,6 @@
 //! capability 承認とダッシュボードウィジェットの状態管理。
 //!
-//! Phase 4 タスク7の move-only コミットで `crate::plugin::registry::Registry`
+//! Phase 4 タスク7の move-only コミットで `crate::registry::plugin::Registry`
 //! から抽出した。分析(`docs/superpowers/specs/2026-07-31-phase4-registry-analysis.md`
 //! §5)のとおり、spec 自体には dashboard 群の置き場が無いが、実体は
 //! 「grants(承認の読み書き)+ `is_file` の 1 発チェック」なので、grants と
@@ -8,7 +8,7 @@
 //!
 //! タスク8で `set_capabilities`(+ `effective_hosts`)だけを
 //! `registry::sidecar::SidecarEntry` 越しにジェネリック化し、
-//! `crate::driver::registry::DriverRegistry::set_capabilities` もこのサービス
+//! `crate::registry::driver::DriverRegistry::set_capabilities` もこのサービス
 //! に統合した(driver 版と byte 同一だったのは分析 §3 のとおり: 差は
 //! projection(`RegistrySubject::as_settings_manifest`)とエラー enum 変換の
 //! 2点だけ、どちらも呼び出し側 wrapper の責務)。dashboard 群は引き続き

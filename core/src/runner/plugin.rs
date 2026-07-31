@@ -186,7 +186,7 @@ fn deadline_verdict(strikes: u32) -> DeadlineVerdict {
 /// **`bus` は呼び出し元が構築した 1 つのインスタンスを渡す**: ここで組み立て
 /// る各プラグインの `HostCtx` はこの同じ `bus` を(`Clone` して)共有する
 /// (`http_driver`/`process_driver`/`fs_driver` と同様、`HostCtx::bus` の
-/// ドキュメントコメント参照)。呼び出し元は `crate::driver::start_drivers` を
+/// ドキュメントコメント参照)。呼び出し元は `crate::runner::driver::start_drivers` を
 /// この関数より先に呼び、そこで返した `DriverRegistry` の構築に使ったのと
 /// 同じ `bus` をここへ渡すこと -- そうしないと、ドライバの登録
 /// (`Bus::register_driver`)が完了する前にプラグインが起動し、`init` 中の
@@ -312,7 +312,7 @@ fn load_and_run_plugin(
     // バス接続先ごとの承認(`GrantsStore::bus_state`)を解決して
     // `BusRuntimeEntry` にまとめる。サイドカー/ファイルアクセスの初期値組み
     // 立てと同じ流儀(未承認の接続先は `bus_json_string` が `publish`/
-    // `subscribe` を落とす -- `bus_runtime` のドキュメント参照)。トピック
+    // `subscribe` を落とす -- `crate::runtime::bus` のドキュメント参照)。トピック
     // 一覧自体は manifest の要求をそのまま載せる(`GrantsStore` はトピック
     // の中身を持たない)。
     let bus_entries: Vec<BusRuntimeEntry> = manifest
