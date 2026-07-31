@@ -1,7 +1,7 @@
 use super::discovery::{latest_journal, next_journal_after};
 use super::position::Position;
 use std::io::{self, Read, Seek, SeekFrom};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// tail で読み取った 1 行と、その行がデーモン起動前に既に書かれていたか。
 #[derive(Debug, Clone, PartialEq)]
@@ -75,13 +75,11 @@ impl JournalTailer {
         // しかも `caught_up` が既に true なので全てが `replay = false`(= 今
         // 起きたイベント)として再配信されてしまう。新しいファイルが現れるまでは
         // 現在位置を据え置き、次の poll で再試行する。
-        if let Some(cur) = &self.current {
+        if let Some(cur) = self.current.clone() {
             if !cur.is_file() {
-                let next = match next_journal_after(&self.dir, cur)? {
-                    Some(next) => Some(next),
-                    None => latest_journal(&self.dir)?.filter(|latest| latest > cur),
-                };
-                if let Some(next) = next {
+                let next = next_journal_after(&self.dir, &cur)?;
+                let latest = latest_journal(&self.dir)?;
+                if let Some(next) = rotation_fallback(&cur, next, latest) {
                     self.current = Some(next);
                     self.pos = 0;
                     self.partial.clear();
@@ -184,17 +182,42 @@ impl JournalTailer {
         // len を使うと次回ポーリングで既読分を取りこぼす/重複する。
         self.pos += chunk.len() as u64;
         self.partial.push_str(&chunk);
-        while let Some(nl) = self.partial.find('\n') {
-            let line: String = self.partial.drain(..=nl).collect();
-            let line = line.trim_end();
-            if !line.is_empty() {
-                lines.push(JournalLine {
-                    text: line.to_string(),
-                    replay: !self.caught_up,
-                });
-            }
-        }
+        let (new_lines, remainder) =
+            split_complete_lines(std::mem::take(&mut self.partial), self.caught_up);
+        self.partial = remainder;
+        lines.extend(new_lines);
         Ok(())
+    }
+}
+
+/// 現ファイル消失時のローテーション先。「次」が無ければ、消えたファイルより
+/// 厳密に新しい latest だけ採る(巻き戻すと全再配信になる — 現 poll 78–90 の判定)。
+fn rotation_fallback(
+    current: &Path,
+    next: Option<PathBuf>,
+    latest: Option<PathBuf>,
+) -> Option<PathBuf> {
+    next.or_else(|| latest.filter(|latest| latest.as_path() > current))
+}
+
+/// バッファから完全な行を切り出す(現 read_new 187–196 の判定)。
+/// 戻りは (切り出した行, 未完の残り)。空行は捨て、replay は !caught_up。
+fn split_complete_lines(buf: String, caught_up: bool) -> (Vec<JournalLine>, String) {
+    match buf.rfind('\n') {
+        None => (Vec::new(), buf),
+        Some(idx) => {
+            let remainder = buf[idx + 1..].to_string();
+            let lines = buf[..idx]
+                .split('\n')
+                .map(str::trim_end)
+                .filter(|line| !line.is_empty())
+                .map(|text| JournalLine {
+                    text: text.to_string(),
+                    replay: !caught_up,
+                })
+                .collect();
+            (lines, remainder)
+        }
     }
 }
 

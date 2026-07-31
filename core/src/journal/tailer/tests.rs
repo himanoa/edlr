@@ -401,3 +401,56 @@ fn a_temporarily_unreadable_rotated_file_is_not_skipped_and_stays_replay() {
         "these lines were written before the daemon started"
     );
 }
+
+#[test]
+fn rotation_fallback_prefers_the_next_file_when_present() {
+    let current = std::path::PathBuf::from("/journal/Journal.2026-07-27T120000.01.log");
+    let next = std::path::PathBuf::from("/journal/Journal.2026-07-27T130000.01.log");
+    let latest = std::path::PathBuf::from("/journal/Journal.2026-07-27T100000.01.log"); // older, must be ignored
+    assert_eq!(
+        rotation_fallback(&current, Some(next.clone()), Some(latest)),
+        Some(next)
+    );
+}
+
+#[test]
+fn rotation_fallback_falls_back_to_a_strictly_newer_latest_when_there_is_no_next() {
+    let current = std::path::PathBuf::from("/journal/Journal.2026-07-27T120000.01.log");
+    let latest = std::path::PathBuf::from("/journal/Journal.2026-07-27T130000.01.log");
+    assert_eq!(
+        rotation_fallback(&current, None, Some(latest.clone())),
+        Some(latest)
+    );
+}
+
+#[test]
+fn rotation_fallback_never_rewinds_to_an_older_latest_when_there_is_no_next() {
+    let current = std::path::PathBuf::from("/journal/Journal.2026-07-27T120000.01.log");
+    let latest = std::path::PathBuf::from("/journal/Journal.2026-07-27T100000.01.log");
+    assert_eq!(rotation_fallback(&current, None, Some(latest)), None);
+}
+
+#[test]
+fn split_complete_lines_extracts_only_fully_terminated_lines() {
+    let (lines, remainder) = split_complete_lines("line1\nline2\n".to_string(), true);
+    assert_eq!(texts(lines), vec!["line1", "line2"]);
+    assert_eq!(remainder, "");
+}
+
+#[test]
+fn split_complete_lines_keeps_an_unterminated_tail_as_the_remainder() {
+    let (lines, remainder) = split_complete_lines("line1\npart".to_string(), true);
+    assert_eq!(texts(lines), vec!["line1"]);
+    assert_eq!(remainder, "part");
+}
+
+#[test]
+fn split_complete_lines_skips_empty_lines_and_tags_replay_from_caught_up() {
+    let (lines, remainder) = split_complete_lines("a\n\nb\n".to_string(), false);
+    assert_eq!(texts(lines.clone()), vec!["a", "b"]);
+    assert!(
+        lines.iter().all(|l| l.replay),
+        "caught_up=false means these lines are replay"
+    );
+    assert_eq!(remainder, "");
+}
