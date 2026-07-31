@@ -2,10 +2,10 @@
 id: cargo-fmt-check-main-driver-runner-rs-dr-so6b
 title: cargo fmt --check が main で既に落ちている(driver/runner.rs と drivers/process)
 summary: main(efd382e)時点で core/src/driver/runner.rs:158 と drivers/process/src/lib.rs:526,853 が rustfmt 非準拠。cargo fmt で直るだけの drift / 未着手
-status: open
+status: closed
 labels: build
 created: 2026-07-30T13:04:24Z
-updated: 2026-07-30T13:04:49Z
+updated: 2026-07-31T03:17:18Z
 ---
 
 ## どこで踏んだか
