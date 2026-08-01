@@ -72,13 +72,22 @@ impl fmt::Display for LayoutWarning {
                 write!(f, "layout: section without a title is ignored")
             }
             LayoutWarning::UnknownFieldKey(key) => {
-                write!(f, "layout: field {key:?} is not declared in [[settings]]; ignored")
+                write!(
+                    f,
+                    "layout: field {key:?} is not declared in [[settings]]; ignored"
+                )
             }
             LayoutWarning::DuplicateFieldKey(key) => {
-                write!(f, "layout: field {key:?} is referenced more than once; keeping the first")
+                write!(
+                    f,
+                    "layout: field {key:?} is referenced more than once; keeping the first"
+                )
             }
             LayoutWarning::BothFilesPresent => {
-                write!(f, "layout: both layout.kdl and layout.json exist; using layout.kdl")
+                write!(
+                    f,
+                    "layout: both layout.kdl and layout.json exist; using layout.kdl"
+                )
             }
             LayoutWarning::ParseFailed(e) => write!(f, "layout: parse failed: {e}"),
         }
@@ -131,12 +140,19 @@ mod tests {
         assert_eq!(section.description.as_deref(), Some("サーバへの接続設定"));
         assert_eq!(
             section.children[0],
-            Node::Field { field: "endpoint".into() }
+            Node::Field {
+                field: "endpoint".into()
+            }
         );
         match &section.children[1] {
             Node::Section(inner) => {
                 assert_eq!(inner.title, "詳細");
-                assert_eq!(inner.children, vec![Node::Field { field: "timeout".into() }]);
+                assert_eq!(
+                    inner.children,
+                    vec![Node::Field {
+                        field: "timeout".into()
+                    }]
+                );
             }
             other => panic!("expected nested section, got {other:?}"),
         }
@@ -163,7 +179,9 @@ mod tests {
             sections: vec![Section {
                 title: "基本".into(),
                 description: None,
-                children: vec![Node::Field { field: "voice".into() }],
+                children: vec![Node::Field {
+                    field: "voice".into(),
+                }],
             }],
         };
         let json = serde_json::to_value(&layout).unwrap();

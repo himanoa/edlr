@@ -128,7 +128,9 @@ section "読み上げ" {
         );
         assert_eq!(
             layout.sections[0].children[0],
-            Node::Field { field: "endpoint".into() }
+            Node::Field {
+                field: "endpoint".into()
+            }
         );
         match &layout.sections[0].children[1] {
             Node::Section(inner) => assert_eq!(inner.title, "詳細"),
