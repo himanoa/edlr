@@ -179,6 +179,123 @@ fn plugins_list_reports_empty_schedules_array_when_none_declared() {
     assert_eq!(result["plugins"][0]["schedules"], serde_json::json!([]));
 }
 
+/// `plugins/list` の各エントリは `layout` を必ず持つ(無ければ `null`)。
+/// フィールド省略ではなく `null` を明示するのは、UI が「無い」を
+/// `undefined` と区別しないで済むようにするため(Task 7)。
+#[test]
+fn plugins_list_includes_layout_or_null() {
+    let (registry, drivers) = test_registries();
+    let result = handle_rpc_with_drivers(
+        Some(&registry),
+        Some(&drivers),
+        "plugins/list",
+        &serde_json::json!({}),
+    )
+    .unwrap();
+    assert_eq!(result["plugins"][0]["layout"], serde_json::Value::Null);
+
+    let layout = crate::layout::Layout {
+        sections: vec![crate::layout::Section {
+            title: "基本".into(),
+            description: None,
+            children: vec![crate::layout::Node::Field {
+                field: "voice".into(),
+            }],
+        }],
+    };
+    registry.push(crate::registry::plugin::PluginEntry {
+        manifest: crate::manifest::Manifest {
+            id: "layout-plugin".into(),
+            name: "Layout Plugin".into(),
+            version: "0.1.0".into(),
+            description: String::new(),
+            entry: "plugin.wasm".into(),
+            events: Vec::new(),
+            settings: Vec::new(),
+            capabilities: Vec::new(),
+            sidecars: Vec::new(),
+            filesystem: Vec::new(),
+            bus: Vec::new(),
+            dashboard: Vec::new(),
+            schedules: Vec::new(),
+        },
+        state: crate::registry::plugin::PluginState::Running,
+        settings_json: std::sync::Arc::new(std::sync::Mutex::new("{}".to_string())),
+        capabilities_json: std::sync::Arc::new(std::sync::Mutex::new(
+            crate::host::plugin::capabilities_json_string(&[]),
+        )),
+        sidecars_json: std::sync::Arc::new(std::sync::Mutex::new("[]".to_string())),
+        filesystem_json: std::sync::Arc::new(std::sync::Mutex::new("[]".to_string())),
+        bus_json: std::sync::Arc::new(std::sync::Mutex::new("[]".to_string())),
+        layout: Some(layout),
+    });
+
+    let result = handle_rpc_with_drivers(
+        Some(&registry),
+        Some(&drivers),
+        "plugins/list",
+        &serde_json::json!({}),
+    )
+    .unwrap();
+    let entry = result["plugins"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["id"] == "layout-plugin")
+        .expect("layout-plugin entry must be present");
+    assert_eq!(entry["layout"]["sections"][0]["title"], "基本");
+}
+
+/// `drivers/list` の各エントリも `plugins/list` と対称に `layout` を
+/// 必ず持つ(無ければ `null`)。
+#[test]
+fn drivers_list_includes_layout_or_null() {
+    let (_registry, drivers) = test_registries();
+    let result = handle_drivers_rpc(&drivers, "list", &serde_json::json!({})).unwrap();
+    assert_eq!(result["drivers"][0]["layout"], serde_json::Value::Null);
+
+    let layout = crate::layout::Layout {
+        sections: vec![crate::layout::Section {
+            title: "基本".into(),
+            description: None,
+            children: vec![crate::layout::Node::Field {
+                field: "port".into(),
+            }],
+        }],
+    };
+    drivers.push(crate::registry::driver::DriverEntry {
+        manifest: crate::manifest::driver::DriverManifest {
+            id: "layout-driver".into(),
+            name: "Layout Driver".into(),
+            version: "0.1.0".into(),
+            description: String::new(),
+            entry: "driver.wasm".into(),
+            topics: Vec::new(),
+            settings: Vec::new(),
+            capabilities: Vec::new(),
+            sidecars: Vec::new(),
+            filesystem: Vec::new(),
+        },
+        state: crate::registry::driver::DriverState::Running,
+        settings_json: std::sync::Arc::new(std::sync::Mutex::new("{}".to_string())),
+        capabilities_json: std::sync::Arc::new(std::sync::Mutex::new(
+            r#"{"hosts":[]}"#.to_string(),
+        )),
+        sidecars_json: std::sync::Arc::new(std::sync::Mutex::new("[]".to_string())),
+        filesystem_json: std::sync::Arc::new(std::sync::Mutex::new("[]".to_string())),
+        layout: Some(layout),
+    });
+
+    let result = handle_drivers_rpc(&drivers, "list", &serde_json::json!({})).unwrap();
+    let entry = result["drivers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|d| d["id"] == "layout-driver")
+        .expect("layout-driver entry must be present");
+    assert_eq!(entry["layout"]["sections"][0]["title"], "基本");
+}
+
 /// 上のテストの裏付け: `registry` 自身が保持する `DriverRegistry`
 /// (`test_registries()` が焼き込むものとは別に、ここでは `ed-state` を
 /// 一切登録していないものを使う)に一致するドライバが無ければ、

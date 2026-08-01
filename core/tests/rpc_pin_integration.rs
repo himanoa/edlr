@@ -263,6 +263,7 @@ async fn pin_plugins_list_with_sidecar_plugin() {
                     "busDeliveries": 0,
                 },
                 "secretsSet": [],
+                "layout": null,
             }
         ],
     });
@@ -370,6 +371,7 @@ async fn pin_drivers_list_with_fixture_driver() {
                 },
                 "sidecars": [],
                 "filesystem": [],
+                "layout": null,
             }
         ],
     });

@@ -22,6 +22,7 @@ fn plugin_entry_json(
             &info.capability_requests,
             &info.grant_state,
         ),
+        "layout": info.layout,
     });
     value["sidecars"] = sidecars_result_json(&info.sidecars)["sidecars"].clone();
     value["filesystem"] = filesystem_result_json(&info.filesystem)["roots"].clone();

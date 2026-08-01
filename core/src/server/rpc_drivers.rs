@@ -19,6 +19,7 @@ fn driver_entry_json(info: DriverInfo) -> serde_json::Value {
         "capabilities": capabilities_result_json(&info.manifest.capabilities, &info.grant_state),
         "sidecars": sidecars_result_json(&info.sidecars)["sidecars"],
         "filesystem": filesystem_result_json(&info.filesystem)["roots"],
+        "layout": info.layout,
     });
     // `plugins/list` と同じ流儀: `reason` は `Disabled` のときだけ
     // 載せる(`ui/frontend/src/types/plugin.ts` の `reason?: string`、
