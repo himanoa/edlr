@@ -1518,6 +1518,7 @@ pub(crate) mod tests {
             ))),
             sidecars_json: Arc::new(Mutex::new("[]".to_string())),
             filesystem_json: Arc::new(Mutex::new("[]".to_string())),
+            layout: None,
         });
 
         let registry = test_registry_with_bus_request_using(driver_registry);

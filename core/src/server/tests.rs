@@ -72,6 +72,7 @@ fn drivers_list_carries_the_disabled_reason() {
         )),
         sidecars_json: std::sync::Arc::new(std::sync::Mutex::new("[]".to_string())),
         filesystem_json: std::sync::Arc::new(std::sync::Mutex::new("[]".to_string())),
+        layout: None,
     });
 
     let result = handle_drivers_rpc(&drivers, "list", &serde_json::json!({})).unwrap();
