@@ -115,7 +115,9 @@ async fn main() {
                 config::fallback_journal_dir(xdg_data_home.as_deref(), home.as_deref())
             else {
                 eprintln!(
-                    "error: journal directory not found; specify one with --journal-dir <PATH> \
+                    "error: journal directory could not be resolved (no --journal-dir, no \
+                     journalDir in config.json, autodetection failed, and no HOME/\
+                     XDG_DATA_HOME for the fallback); specify one with --journal-dir <PATH> \
                      or set journalDir in config.json"
                 );
                 std::process::exit(1);

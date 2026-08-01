@@ -165,8 +165,11 @@ fn get_config(state: tauri::State<'_, AppState>) -> config::ConfigDto {
 
 /// 再起動したデーモンが実際に応答するようになるまで待つ。
 ///
-/// `spawn()` の成否は生存を意味しない(デーモンは journal ディレクトリを
-/// 決められないと `exit(1)` する)。listen し始めたかどうかで判定する。
+/// `spawn()` の成否は生存を意味しない(自動検出が外れてもフォールバック
+/// journal ディレクトリを作成して起動を続けるため、単に自動検出に失敗した
+/// だけではもう `exit(1)` しないが、ポート競合やフォールバック用ディレクトリ
+/// の作成失敗など他の要因では直後に落ちうる)。listen し始めたかどうかで
+/// 判定する。
 fn wait_until_listening(attempts: u32) -> bool {
     for _ in 0..attempts {
         if daemon::daemon_running(daemon::DAEMON_ADDR) {

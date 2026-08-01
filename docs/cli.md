@@ -4,7 +4,7 @@
 
     cargo run -p edlr-core --bin edlr -- --journal-dir <JournalディレクトリのPATH>
 
-`--journal-dir` 省略時は以下の順で解決する: CLI 引数 → `config.json` の `journalDir` → Proton の既定パス自動検出 → フォールバック(`$XDG_DATA_HOME/edlr/journal`, `XDG_DATA_HOME` 未設定なら `~/.local/share/edlr/journal`)を作成して使用。イベントは 1 行 1 JSON で stdout に流れる。
+`--journal-dir` 省略時は以下の順で解決する: `config.json` の `journalDir` → Proton の既定パス自動検出 → フォールバック(`$XDG_DATA_HOME/edlr/journal`, `XDG_DATA_HOME` 未設定なら `~/.local/share/edlr/journal`)を作成して使用。イベントは 1 行 1 JSON で stdout に流れる。
 
 ## CLI フラグ一覧
 

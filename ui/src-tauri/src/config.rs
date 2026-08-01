@@ -56,18 +56,22 @@ pub fn resolve_journal_dir(env: Option<PathBuf>, config: Option<PathBuf>) -> Opt
 /// 再起動後に `daemon_error` へ入れるべき値を決める。
 ///
 /// `spawn()` が `Ok` を返すことと、デーモンが生きていることは別物である。
-/// デーモンは journal ディレクトリを決められないと `exit(1)` する
-/// (`core/src/bin/edlr.rs`)。設定値を消して自動検出へ戻したとき、
-/// 自動検出が外れる環境ではまさにこれが起きる — つまり、この機能を
-/// 必要としているユーザーほど踏みやすい。spawn の成否だけで成功と表示すると、
-/// 設定が消えデーモンも死んだ状態を「成功」と報告してしまう。
+/// 自動検出が外れてもデーモンはフォールバックディレクトリを作成して
+/// 起動を続ける(`core/src/bin/edlr.rs`)ため、単に「自動検出に失敗した」
+/// だけではもう `exit(1)` しない。それでも応答しない場合は、バイナリの
+/// クラッシュ・ポートの競合・フォールバック用ディレクトリの作成失敗
+/// (`$XDG_DATA_HOME`/`$HOME` が無い、パーミッションが無い等)といった
+/// 別の原因を疑う必要がある。spawn の成否だけで成功と表示すると、
+/// こうした失敗を「成功」と報告してしまう。
 pub fn daemon_error_after_restart(came_up: bool) -> Option<String> {
     if came_up {
         None
     } else {
         Some(
-            "デーモンを起動しましたが応答しません。Journal ディレクトリの自動検出に\
-             失敗した可能性があります(ディレクトリを明示的に指定してください)。"
+            "デーモンを起動しましたが応答しません。ポートが他のプロセスに\
+             使われている、または journal ディレクトリの用意に失敗した\
+             可能性があります(ログを確認するか、ディレクトリを明示的に\
+             指定してください)。"
                 .to_string(),
         )
     }
@@ -178,8 +182,9 @@ mod tests {
 
     #[test]
     fn restart_that_never_comes_up_keeps_an_error() {
-        // spawn() が Ok を返しても、デーモンは直後に exit(1) しうる
-        // (自動検出が外れる環境で journalDir を消した場合がまさにそれ)。
+        // spawn() が Ok を返しても、デーモンが直後に落ちる・応答しない
+        // ケースはありうる(ポート競合、フォールバック journal ディレクトリの
+        // 作成失敗など — 自動検出に失敗しただけではもう exit(1) しない)。
         // 「起動した」ではなく「応答している」を成功の条件にする。
         let err = daemon_error_after_restart(false);
         assert!(err.is_some(), "daemon never came up, error must remain");
