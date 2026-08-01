@@ -45,7 +45,10 @@ manifest and individually approved by the user through the UI.
 cargo run -p edlr-core --bin edlr -- --journal-dir <path-to-journal-dir>
 ```
 
-If `--journal-dir` is omitted, edlr looks for the default Proton journal path.
+If `--journal-dir` is omitted, edlr resolves the journal directory by checking (in order):
+the `journalDir` field in `config.json`, the default Proton journal path, and finally
+a fallback directory (`$XDG_DATA_HOME/edlr/journal`, or `~/.local/share/edlr/journal` if
+`XDG_DATA_HOME` is unset), which is automatically created if needed.
 Events are streamed to stdout as one JSON object per line, and served over
 WebSocket at `ws://127.0.0.1:8137/ws`.
 
