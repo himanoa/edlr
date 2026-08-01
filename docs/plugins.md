@@ -303,6 +303,80 @@ API キーのように UI から読み出せてはいけない設定はこの型
 `interval-seconds` は「前回から N 秒後」という経過時間の宣言であって
 「何時に実行する」ではないため、追い掛けるべき定刻が存在しない。
 
+## 設定画面のレイアウト(layout.kdl / layout.json)
+
+`[[settings]]` の平坦なリストは、設定画面ではそのまま上から順に並ぶだけで
+グループ化や説明文を挟めない。**データ構造(`[[settings]]`)はそのままに、
+「どう見せるか」だけ**を `manifest.toml` と同じディレクトリに置く
+`layout.kdl`(または `layout.json`)で別に記述できる。どちらも任意で、
+無くても現行どおりの平坦フォームが表示される。
+
+    <plugins-dir>/
+      <id>/
+        manifest.toml
+        plugin.wasm
+        layout.kdl      (任意)
+
+`layout.kdl` の語彙は v1 では最小限で、セクションの入れ子と `field` 参照だけ:
+
+    section "接続" description="COEIROINK サーバへの接続設定" {
+        field "endpoint"
+        field "api-key"
+    }
+    section "読み上げ" {
+        field "voice"
+        field "speed"
+        section "詳細" {
+            field "pitch"
+        }
+    }
+
+- `section` — `title`(最初の位置引数、必須)、`description`(名前付き引数、
+  任意)を持ち、子として `field` / `section` を任意個持てる(入れ子可)
+- `field` — `[[settings]]` の `key` への参照。型・label・default はここには
+  持たず、あくまで manifest 側の値を「どこに置くか」だけを指定する
+
+機械生成向けに同形の `layout.json` も使える(内容は上と同じもの):
+
+    {
+      "sections": [
+        {
+          "title": "接続",
+          "description": "COEIROINK サーバへの接続設定",
+          "children": [{ "field": "endpoint" }, { "field": "api-key" }]
+        },
+        {
+          "title": "読み上げ",
+          "children": [
+            { "field": "voice" },
+            { "field": "speed" },
+            { "title": "詳細", "children": [{ "field": "pitch" }] }
+          ]
+        }
+      ]
+    }
+
+### lenient な挙動
+
+manifest.toml と違い、layout ファイルの不備は**プラグインのロードを一切
+妨げない**。壊れていれば警告ログを出して読める範囲を使うか、丸ごと諦めて
+平坦フォームへフォールバックする:
+
+| 状況 | 挙動 |
+| --- | --- |
+| layout ファイルが無い | `layout: null`。UI は現行どおり平坦フォーム |
+| パース失敗(KDL/JSON とも) | 警告ログ + `layout: null` → 平坦フォーム |
+| 未知のノード名・属性 | 警告ログを出してそのノード/属性を無視、残りは使う |
+| 存在しない settings キーへの `field` 参照 | 警告ログを出してその参照を捨て、残りは描画 |
+| `.kdl` と `.json` が両方存在 | 警告ログを出して `.kdl` を採用 |
+| どのセクションにも載らなかったキー | 末尾の暗黙セクション(「その他」)に自動で入る。**書き忘れで項目が消えることはない** |
+| 同じキーが複数回参照された | 警告ログを出して最初の出現だけ残す |
+
+つまり、`layout.kdl` に書き忘れたキーがあっても設定項目そのものが消えることは
+なく、末尾の「その他」セクションに現れる。実例は
+[`examples/plugins/tutorial-jump-log-rs/layout.kdl`](../examples/plugins/tutorial-jump-log-rs/layout.kdl)
+を参照。
+
 ## サンプルのビルドと配置(スクリプト)
 
 `manifest.toml` / `driver.toml` を同梱しているサンプル(`state-reader`、

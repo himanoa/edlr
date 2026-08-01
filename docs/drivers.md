@@ -66,6 +66,11 @@ retained 値は **`select` 設定の候補源**としても使える。プラグ
 トップレベルキーをテーブルヘッダより後ろに書いてしまう事故については
 [plugins.md](plugins.md#トップレベルキーはテーブルヘッダより前に書く)を参照。
 
+ドライバも `driver.toml` と同じディレクトリに `layout.kdl` / `layout.json` を
+置けば、設定画面をセクション分けして描画できる。仕組み・語彙・lenient な
+エラー処理はプラグインと共通なので、詳細は
+[plugins.md](plugins.md#設定画面のレイアウトlayoutkdl--layoutjson)を参照。
+
 ## プラグイン側の `[[bus]]` 書式と承認フロー
 
 プラグインが特定のドライバと話すには、`manifest.toml` に接続先ごとの
