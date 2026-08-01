@@ -2,10 +2,10 @@
 id: wasm32-wasip2-5guz
 title: テスト実行に wasm32-wasip2 ターゲットが必要なことが未文書で、未導入時のエラーも分かりにくい
 summary: core の統合テストが hello-logger を wasm32-wasip2 でビルドするが、ターゲット未導入だと E0463 で落ちる。セットアップ手順の文書化 or fixture 側での事前チェックが要る / 未着手
-status: open
+status: closed
 labels: dx, docs
 created: 2026-08-01T07:39:18Z
-updated: 2026-08-01T07:39:45Z
+updated: 2026-08-01T07:46:59Z
 ---
 
 ## どこで踏んだか
