@@ -397,6 +397,7 @@ mod tests {
             sidecars_json: Arc::new(Mutex::new(String::new())),
             filesystem_json: Arc::new(Mutex::new(String::new())),
             bus_json: Arc::new(Mutex::new(String::new())),
+            layout: None,
         }
     }
 

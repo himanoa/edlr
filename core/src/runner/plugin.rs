@@ -291,6 +291,25 @@ fn load_and_run_plugin(
 ) {
     let entry_path = dir.join(&manifest.entry);
 
+    // layout.kdl / layout.json は不備があってもロードを一切妨げない
+    // (`crate::layout` のモジュールドキュメント参照)。パース/解決の警告は
+    // ここで warn ログへ落とし、解決済みの layout(または None)だけを
+    // entry へ格納する。
+    let (layout, layout_warnings) = crate::layout::load::load_layout(dir);
+    let (layout, layout_warnings) = match layout {
+        Some(parsed) => {
+            let (resolved, mut resolve_warnings) =
+                crate::layout::resolve::resolve(parsed, &manifest.settings);
+            let mut all = layout_warnings;
+            all.append(&mut resolve_warnings);
+            (Some(resolved), all)
+        }
+        None => (None, layout_warnings),
+    };
+    for warning in &layout_warnings {
+        tracing::warn!(plugin = %manifest.id, "{warning}");
+    }
+
     // settings/sidecars/capabilities/filesystem は plugin/driver 共通の
     // 組み立て方(`build_initial_buffers` のドキュメント参照)。この見た目の
     // 重複は `Registry::refresh_sidecar_runtime` 等(承認・設定変更のたびに
@@ -384,6 +403,7 @@ fn load_and_run_plugin(
         sidecars_json,
         filesystem_json,
         bus_json: bus_json.clone(),
+        layout,
     });
 
     if running {
