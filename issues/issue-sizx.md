@@ -5,7 +5,7 @@ summary: lifecycle 呼び出しの中で I/O を待つ設計をやめ、submit_j
 status: open
 labels: 人間がやる
 created: 2026-07-28T14:10:44Z
-updated: 2026-08-01T02:05:55Z
+updated: 2026-08-01T04:18:04Z
 ---
 
 
@@ -159,13 +159,20 @@ driver 抽象化の狙い(暗黙のプロトコルドリフト防止)とむし�
 
 2. **完了通知を捨てない保証** — 64 枠キューはイベント/バス配信と共有で
    満杯時破棄が方針だが、completion を捨てるとゲストは永遠に結果を待つ。
-   → **決定: 完了専用キューを分ける**。容量 = in-flight 上限にすれば、
-   submit 時の上限チェック(超過は `queue-full` 即時エラー)により
-   未完了 job 数 ≤ キュー容量が常に成り立ち、**送信は定義上ブロックも
-   破棄もしない**。残る論点は起床のみ: スレッドは `work_rx.recv_timeout`
-   1 本で寝ているので、(a) `crossbeam-channel` の `select!` で 2 本待つ
-   (`next_action` の純関数構造は保てる)、(b) ループ先頭で完了キューを
-   引き切る + 起床トークンを work_tx へ、のどちらか。(a) が素直。
+   → **決定: キューは 1 本のまま、満杯時の削除ルールを種別で変える**
+   (完了専用キューを分ける案は不採用 -- 2 本にするとプラグインスレッドの
+   起床に select が要る)。`std_mpsc::sync_channel` は削除ルールを
+   差し替えられない(try_send は常に新入りを捨てるだけ)ので、
+   `Mutex<VecDeque<PluginWork>> + Condvar` の小さな自作キューに置き換え、
+   受け入れ判定を種別ごとの純関数にする:
+   - `Event` / `Message`: 容量 64 超なら新入りを捨てて `DropCounters` 計上
+     (今と同じ)
+   - `JobComplete`: **常に受け入れる**。completion は submit 時の in-flight
+     上限チェック(超過は `queue-full` 即時エラー)で数が抑えられている
+     ので、キュー全体の上界は 64 + in-flight 上限で有界のまま
+   1 本のキューなのでイベントと完了通知の FIFO 順序も自然に保たれる。
+   `recv_timeout` 相当は Condvar の wait_timeout で再現でき、ループ構造・
+   `next_action` はそのまま。
 
 3. **tokio Handle の配線**(実装時に必須) — `submit_job` の
    `tokio::spawn` は、ホスト関数がプラグイン専用 OS スレッド上で走るため
