@@ -80,6 +80,7 @@ function makePlugin(overrides: Partial<PluginInfo> = {}): PluginInfo {
     schedules: [],
     secretsSet: [],
     dropped: { events: 0, busDeliveries: 0 },
+    layout: null,
     ...overrides,
   };
 }

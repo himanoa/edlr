@@ -50,6 +50,7 @@ const driver = {
   sidecars: [],
   filesystem: [],
   state: "running" as const,
+  layout: null,
 };
 
 function makeSidecar(
