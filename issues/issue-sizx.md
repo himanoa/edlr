@@ -1,11 +1,11 @@
 ---
 id: issue-sizx
 title: プラグインの非同期実行を submit/complete プロトコルで導入する
-summary: lifecycle 呼び出しの中で I/O を待つ設計をやめ、submit_job / on-job-complete の2フェーズに倒して deadline とキュー詰まりを解消する / 未着手
+summary: lifecycle 呼び出しの中で I/O を待つ設計をやめ、submit_job / on-job-complete の2フェーズに倒して deadline とキュー詰まりを解消する / 実現可能と調査済み・方針決定済み(ABI 破壊 OK・完了専用キュー)・実装未着手
 status: open
 labels: 人間がやる
 created: 2026-07-28T14:10:44Z
-updated: 2026-07-29T16:02:55Z
+updated: 2026-08-01T02:05:55Z
 ---
 
 
@@ -131,3 +131,60 @@ driver 抽象化の狙い(暗黙のプロトコルドリフト防止)とむし�
 - `core/src/plugin/host.rs`(`CALL_DEADLINE`、`HTTP_TIMEOUT`)
 - `core/wit/plugin.wit`
 - `docs/superpowers/plans/2026-07-28-plugin-scheduler.md`
+
+## 調査結果(2026-08-01)
+
+**結論: 実現可能。設計案は現行コードにほぼそのまま載る。** 合流点として
+想定した `PluginWork` の一本化キューは既に存在し(リファクタ後の現在地は
+`core/src/runner/plugin.rs`、ホストは `core/src/host/plugin.rs`)、追加の芯は
+「WIT に submit / on-job-complete を足す + 完了の合流経路を足す」だけ。
+
+問題の実在も全て確認済み:
+
+- `PLUGIN_WORK_QUEUE_CAPACITY = 64`、満杯時 try_send 破棄(`DropCounters` 計上)
+- `CALL_DEADLINE = 2s` / `CALL_DEADLINE_STRIKES = 3` で Disabled
+- `HTTP_TIMEOUT = 1.5s` が const assert で `CALL_DEADLINE` 未満に固定されて
+  おり、**1.5 秒超の I/O を伴うプラグインは現状構造的に書けない**
+
+### issue 本文に無かった要決断ポイントと、その決定
+
+1. **WIT export 追加は既存プラグインを全部壊す** —
+   ホストは `PluginBindings::instantiate` で world の export を全解決する
+   ため、`export on-job-complete` を足すと未実装 wasm は全てロード失敗する。
+   → **決定: 互換を捨てて壊してよい**(未リリース・ゲストは examples 10 個
+   のみ)。`world plugin` を 0.5.0 に上げ、全ゲストを一斉再生成する。
+   `get_typed_func` の手動解決による互換レイヤは作らない。
+   MoonBit は wit-bindgen 0.45 ピン(→ moonbit-wit-bindgen-0-45-0-60-na5m)
+   のまま再生成できる。
+
+2. **完了通知を捨てない保証** — 64 枠キューはイベント/バス配信と共有で
+   満杯時破棄が方針だが、completion を捨てるとゲストは永遠に結果を待つ。
+   → **決定: 完了専用キューを分ける**。容量 = in-flight 上限にすれば、
+   submit 時の上限チェック(超過は `queue-full` 即時エラー)により
+   未完了 job 数 ≤ キュー容量が常に成り立ち、**送信は定義上ブロックも
+   破棄もしない**。残る論点は起床のみ: スレッドは `work_rx.recv_timeout`
+   1 本で寝ているので、(a) `crossbeam-channel` の `select!` で 2 本待つ
+   (`next_action` の純関数構造は保てる)、(b) ループ先頭で完了キューを
+   引き切る + 起床トークンを work_tx へ、のどちらか。(a) が素直。
+
+3. **tokio Handle の配線**(実装時に必須) — `submit_job` の
+   `tokio::spawn` は、ホスト関数がプラグイン専用 OS スレッド上で走るため
+   `Handle::current()` では取れない。tokio コンテキスト内で動いている
+   `start_plugins` で `Handle` を捕まえ `HostCtx` に持たせる。
+
+4. **インスタンス再作成と job_id の世代管理** — deadline strike からの
+   復帰でインスタンスは作り直されるため、旧インスタンスが submit した
+   job の完了が新インスタンスに届きうる。job に世代番号を付けて旧世代の
+   完了は捨てる。
+
+### 実装時の補足
+
+- `submit(kind: string, payload: list<u8>)` の untyped な形は「暗黙の
+  プロトコルドリフト防止」思想と衝突する。`submit-http(request) -> job-id`
+  のような型付き submit の方が思想に合う(要検討)。
+- HTTP の実行体は現行 `reqwest::blocking`(内部で自前ランタイム生成)。
+  job 実行は async client 新設か `spawn_blocking` で既存 client を包むかの
+  二択。どちらでも可。
+- ドライバ側(`world driver`)の同種の問題は別 issue http-driver-9znv の領分。
+- 規模感: WIT + ホスト + runner 配線 + ゲスト SDK/examples 更新 + テストで
+  中規模。技術的な阻害要因はなし。
