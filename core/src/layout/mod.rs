@@ -14,7 +14,7 @@
 
 use std::fmt;
 
-// pub mod kdl;
+pub mod kdl;
 // pub mod load;
 // pub mod resolve;
 
