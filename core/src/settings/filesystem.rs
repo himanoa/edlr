@@ -289,10 +289,15 @@ fn is_system_protected(canonical: &std::path::Path) -> bool {
         "/", "/home", "/etc", "/usr", "/var", "/boot", "/dev", "/proc", "/sys", "/root", "/bin",
         "/sbin", "/lib",
     ];
-    if PROTECTED
-        .iter()
-        .any(|p| canonical == std::path::Path::new(p))
-    {
+    // 候補(`canonical`)は canonicalize 済みなので、保護対象側も同じ正規化を
+    // 通してから比較する。macOS では /etc → /private/etc、/home →
+    // /System/Volumes/Data/home のように symlink 越しの実体になるため、
+    // 文字どおりの比較だけでは一致しない。存在しないパス(macOS の /boot 等)は
+    // canonicalize できないので、文字どおりの比較も残す。
+    if PROTECTED.iter().any(|p| {
+        let p = std::path::Path::new(p);
+        canonical == p || p.canonicalize().is_ok_and(|c| canonical == c)
+    }) {
         return true;
     }
     // ユーザーのホームディレクトリ「そのもの」も拒否する。`canonicalize()` 済み
