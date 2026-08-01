@@ -1,7 +1,7 @@
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { expect, test, vi } from "vitest";
-import type { PluginInfo } from "../types/plugin";
+import { describe, expect, it, test, vi } from "vitest";
+import type { PluginInfo, SettingField } from "../types/plugin";
 import PluginForm from "./PluginForm";
 
 function makePlugin(overrides: Partial<PluginInfo> = {}): PluginInfo {
@@ -35,6 +35,7 @@ function makePlugin(overrides: Partial<PluginInfo> = {}): PluginInfo {
     schedules: [],
     secretsSet: [],
     dropped: { events: 0, busDeliveries: 0 },
+    layout: null,
     ...overrides,
   };
 }
@@ -293,4 +294,76 @@ test("blurring a string field without editing does not call onChange", async () 
   await userEvent.tab();
 
   expect(onChange).not.toHaveBeenCalled();
+});
+
+describe("layout", () => {
+  const settings: SettingField[] = [
+    { type: "string", key: "endpoint", label: "Endpoint", default: "" },
+    { type: "string", key: "voice", label: "Voice", default: "" },
+  ];
+
+  it("layout があればセクション見出しと説明を描画する", () => {
+    render(
+      <PluginForm
+        plugin={{
+          id: "p1",
+          settings,
+          values: {},
+          layout: {
+            sections: [
+              {
+                title: "接続",
+                description: "サーバへの接続設定",
+                children: [{ field: "endpoint" }],
+              },
+              { title: "読み上げ", children: [{ field: "voice" }] },
+            ],
+          },
+        }}
+        onChange={async () => {}}
+      />,
+    );
+    expect(screen.getByRole("heading", { name: "接続" })).toBeInTheDocument();
+    expect(screen.getByText("サーバへの接続設定")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "読み上げ" })).toBeInTheDocument();
+    expect(screen.getByLabelText("Endpoint")).toBeInTheDocument();
+    expect(screen.getByLabelText("Voice")).toBeInTheDocument();
+  });
+
+  it("入れ子セクションも描画する", () => {
+    render(
+      <PluginForm
+        plugin={{
+          id: "p1",
+          settings,
+          values: {},
+          layout: {
+            sections: [
+              {
+                title: "外",
+                children: [
+                  { field: "endpoint" },
+                  { title: "内", children: [{ field: "voice" }] },
+                ],
+              },
+            ],
+          },
+        }}
+        onChange={async () => {}}
+      />,
+    );
+    expect(screen.getByRole("heading", { name: "内" })).toBeInTheDocument();
+    expect(screen.getByLabelText("Voice")).toBeInTheDocument();
+  });
+
+  it("layout が null なら従来どおり平坦に描画する", () => {
+    render(
+      <PluginForm
+        plugin={{ id: "p1", settings, values: {}, layout: null }}
+        onChange={async () => {}}
+      />,
+    );
+    expect(screen.queryByRole("heading")).not.toBeInTheDocument();
+    expect(screen.getByLabelText("Endpoint")).toBeInTheDocument();
+  });
 });

@@ -44,6 +44,7 @@ function makeDriver(overrides: Partial<DriverInfo> = {}): DriverInfo {
     sidecars: [],
     filesystem: [],
     state: "running",
+    layout: null,
     ...overrides,
   };
 }

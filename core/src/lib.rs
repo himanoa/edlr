@@ -21,6 +21,7 @@ pub mod capability;
 pub mod event;
 pub mod host;
 pub mod journal;
+pub mod layout;
 pub mod logs;
 pub mod manifest;
 pub mod monitor;

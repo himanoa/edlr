@@ -1,11 +1,11 @@
 import { useEffect, useRef, useState } from "react";
-import type { PluginInfo, SettingField } from "../types/plugin";
+import type { LayoutSection, PluginInfo, SettingField } from "../types/plugin";
 
 // `PluginInfo` の一部だけを要求する形にしてある。`DriverInfo`(bus を持たない)
 // のようにフィールドの一部が異なる形でも、この 3 つさえ揃っていれば
 // 同じフォームを再利用できるようにするため。
 export type FormPlugin = Pick<PluginInfo, "id" | "settings" | "values"> &
-  Partial<Pick<PluginInfo, "secretsSet">>;
+  Partial<Pick<PluginInfo, "secretsSet" | "layout">>;
 
 function mergedValues(plugin: FormPlugin): Record<string, unknown> {
   const defaults: Record<string, unknown> = {};
@@ -453,18 +453,38 @@ export default function PluginForm({
     }
   };
 
+  const fieldByKey = new Map(plugin.settings.map((f) => [f.key, f]));
+
+  const renderField = (key: string) => {
+    const field = fieldByKey.get(key);
+    if (!field) return null; // サーバ側 resolve 済みなので通常来ないが防御
+    return (
+      <Field
+        key={field.key}
+        field={field}
+        value={values[field.key]}
+        isSecretSet={(plugin.secretsSet ?? []).includes(field.key)}
+        disabled={savingKey === field.key}
+        onChange={(v) => update(field.key, v)}
+      />
+    );
+  };
+
+  const renderSection = (section: LayoutSection, depth: number, key: number) => (
+    <section key={key} className="form-section">
+      {depth === 0 ? <h3>{section.title}</h3> : <h4>{section.title}</h4>}
+      {section.description && <p className="note">{section.description}</p>}
+      {section.children.map((node, i) =>
+        "field" in node ? renderField(node.field) : renderSection(node, depth + 1, i),
+      )}
+    </section>
+  );
+
   return (
     <form className="plugin-form" onSubmit={(e) => e.preventDefault()}>
-      {plugin.settings.map((field) => (
-        <Field
-          key={field.key}
-          field={field}
-          value={values[field.key]}
-          isSecretSet={(plugin.secretsSet ?? []).includes(field.key)}
-          disabled={savingKey === field.key}
-          onChange={(v) => update(field.key, v)}
-        />
-      ))}
+      {plugin.layout
+        ? plugin.layout.sections.map((s, i) => renderSection(s, 0, i))
+        : plugin.settings.map((field) => renderField(field.key))}
       {error && <p className="form-error">{error}</p>}
     </form>
   );

@@ -65,6 +65,10 @@ pub struct PluginEntry {
     /// 起動時に `GrantsStore::bus_state` と manifest から組み立てられ、以後は
     /// 将来の `Registry` の bus 承認 API(Task 10)が更新する。
     pub bus_json: Arc<Mutex<String>>,
+    /// `layout.kdl` / `layout.json` 由来の解決済みレイアウト。無ければ None
+    /// (UI は平坦フォームで描画する)。ロード時に一度だけ解決する
+    /// (`crate::layout::resolve` — settings の宣言は不変なので使い回せる)。
+    pub layout: Option<crate::layout::Layout>,
 }
 
 /// `SidecarInfo` / `FilesystemInfo` / `BusInfo` / `DashboardInfo` /
@@ -91,6 +95,8 @@ pub struct PluginInfo {
     /// 作業キュー満杯で捨てた件数(デーモン起動時からの累計)。
     /// `plugin::dropped` のモジュールドキュメント参照。
     pub dropped: DroppedCounts,
+    /// `PluginEntry::layout` のスナップショット。
+    pub layout: Option<crate::layout::Layout>,
 }
 
 /// `control_sidecar` が指定できる操作。
@@ -368,16 +374,23 @@ impl Registry {
     /// れるものを含む)が settings のディスク I/O の間ブロックされないように
     /// するため。
     pub fn list(&self) -> Vec<PluginInfo> {
-        let snapshot: Vec<(Manifest, PluginState)> = self.entries.with_entries(|entries| {
-            entries
-                .iter()
-                .map(|entry| (entry.manifest.clone(), entry.state.clone()))
-                .collect()
-        });
+        let snapshot: Vec<(Manifest, PluginState, Option<crate::layout::Layout>)> =
+            self.entries.with_entries(|entries| {
+                entries
+                    .iter()
+                    .map(|entry| {
+                        (
+                            entry.manifest.clone(),
+                            entry.state.clone(),
+                            entry.layout.clone(),
+                        )
+                    })
+                    .collect()
+            });
 
         snapshot
             .into_iter()
-            .map(|(mut manifest, state)| {
+            .map(|(mut manifest, state, layout)| {
                 // `options-from` の select の候補を、いま retain されている値から
                 // 解決して埋める(未解決なら `options` は None のまま)。
                 crate::registry::select_options::resolve(&mut manifest.settings, &self.bus);
@@ -403,6 +416,7 @@ impl Registry {
                     dashboard,
                     schedules,
                     dropped,
+                    layout,
                 }
             })
             .collect()
@@ -941,6 +955,7 @@ pub(crate) mod tests {
             sidecars_json: Arc::new(Mutex::new("[]".to_string())),
             filesystem_json: Arc::new(Mutex::new("[]".to_string())),
             bus_json: Arc::new(Mutex::new("[]".to_string())),
+            layout: None,
         });
         registry
     }
@@ -1043,6 +1058,7 @@ pub(crate) mod tests {
             sidecars_json: Arc::new(Mutex::new("[]".to_string())),
             filesystem_json: Arc::new(Mutex::new("[]".to_string())),
             bus_json: Arc::new(Mutex::new("[]".to_string())),
+            layout: None,
         });
         registry
     }
@@ -1088,6 +1104,7 @@ pub(crate) mod tests {
             sidecars_json: Arc::new(Mutex::new("[]".to_string())),
             filesystem_json: Arc::new(Mutex::new("[]".to_string())),
             bus_json: Arc::new(Mutex::new("[]".to_string())),
+            layout: None,
         });
         (registry, tmp)
     }
@@ -1160,6 +1177,7 @@ pub(crate) mod tests {
             sidecars_json: Arc::new(Mutex::new("[]".to_string())),
             filesystem_json: Arc::new(Mutex::new("[]".to_string())),
             bus_json: Arc::new(Mutex::new("[]".to_string())),
+            layout: None,
         });
         registry
     }
@@ -1212,6 +1230,7 @@ pub(crate) mod tests {
             sidecars_json: Arc::new(Mutex::new("[]".to_string())),
             filesystem_json: Arc::new(Mutex::new("[]".to_string())),
             bus_json: Arc::new(Mutex::new("[]".to_string())),
+            layout: None,
         });
         (registry, tmp)
     }
@@ -1350,6 +1369,7 @@ pub(crate) mod tests {
             sidecars_json: Arc::new(Mutex::new("[]".to_string())),
             filesystem_json: Arc::new(Mutex::new("[]".to_string())),
             bus_json: Arc::new(Mutex::new("[]".to_string())),
+            layout: None,
         });
 
         let infos = registry.list();
@@ -1498,6 +1518,7 @@ pub(crate) mod tests {
             ))),
             sidecars_json: Arc::new(Mutex::new("[]".to_string())),
             filesystem_json: Arc::new(Mutex::new("[]".to_string())),
+            layout: None,
         });
 
         let registry = test_registry_with_bus_request_using(driver_registry);
@@ -1600,6 +1621,7 @@ pub(crate) mod tests {
             sidecars_json: Arc::new(Mutex::new("[]".to_string())),
             filesystem_json: filesystem_json.clone(),
             bus_json: Arc::new(Mutex::new("[]".to_string())),
+            layout: None,
         });
 
         let root = tmp.path().join("exports");
@@ -1699,6 +1721,7 @@ pub(crate) mod tests {
             sidecars_json: Arc::new(Mutex::new("[]".to_string())),
             filesystem_json: Arc::new(Mutex::new("[]".to_string())),
             bus_json: Arc::new(Mutex::new("[]".to_string())),
+            layout: None,
         });
 
         let key = crate::registry::sidecar::sidecar_key("sc-plugin", "tts");
@@ -1764,6 +1787,7 @@ pub(crate) mod tests {
             sidecars_json: Arc::new(Mutex::new("[]".to_string())),
             filesystem_json: Arc::new(Mutex::new("[]".to_string())),
             bus_json: Arc::new(Mutex::new("[]".to_string())),
+            layout: None,
         });
         registry
             .sidecar_service
@@ -1856,6 +1880,7 @@ pub(crate) mod tests {
             sidecars_json: Arc::new(Mutex::new("[]".to_string())),
             filesystem_json: Arc::new(Mutex::new("[]".to_string())),
             bus_json: Arc::new(Mutex::new("[]".to_string())),
+            layout: None,
         });
 
         registry
@@ -1964,6 +1989,7 @@ pub(crate) mod tests {
             sidecars_json: Arc::new(Mutex::new("[]".to_string())),
             filesystem_json: Arc::new(Mutex::new("[]".to_string())),
             bus_json: Arc::new(Mutex::new("[]".to_string())),
+            layout: None,
         });
 
         let result = registry.set_sidecar_grant("sc-plugin", "tts", true);
@@ -2052,6 +2078,7 @@ pub(crate) mod tests {
             sidecars_json: Arc::new(Mutex::new("[]".to_string())),
             filesystem_json: Arc::new(Mutex::new("[]".to_string())),
             bus_json: Arc::new(Mutex::new("[]".to_string())),
+            layout: None,
         });
 
         let state = registry
@@ -2137,6 +2164,7 @@ pub(crate) mod tests {
             sidecars_json: Arc::new(Mutex::new("[]".to_string())),
             filesystem_json: Arc::new(Mutex::new("[]".to_string())),
             bus_json: Arc::new(Mutex::new("[]".to_string())),
+            layout: None,
         });
 
         const THREADS: usize = 16;
@@ -2183,6 +2211,45 @@ pub(crate) mod tests {
         );
     }
 
+    /// Registry::list が entry の layout をそのまま PluginInfo へ載せることの
+    /// 固定(Task 5)。
+    #[test]
+    fn list_carries_layout_through() {
+        let registry = empty_registry();
+        let layout = crate::layout::Layout {
+            sections: vec![crate::layout::Section {
+                title: "基本".into(),
+                description: None,
+                children: vec![crate::layout::Node::Field {
+                    field: "voice".into(),
+                }],
+            }],
+        };
+        let mut manifest = plain_manifest("layout-plugin");
+        manifest.settings = vec![SettingField::String {
+            key: "voice".into(),
+            label: "Voice".into(),
+            default: String::new(),
+        }];
+        registry.push(PluginEntry {
+            manifest,
+            state: PluginState::Running,
+            settings_json: Arc::new(Mutex::new("{}".to_string())),
+            capabilities_json: Arc::new(Mutex::new(crate::host::plugin::capabilities_json_string(
+                &[],
+            ))),
+            sidecars_json: Arc::new(Mutex::new("[]".to_string())),
+            filesystem_json: Arc::new(Mutex::new("[]".to_string())),
+            bus_json: Arc::new(Mutex::new("[]".to_string())),
+            layout: Some(layout.clone()),
+        });
+
+        let infos = registry.list();
+
+        assert_eq!(infos.len(), 1);
+        assert_eq!(infos[0].layout, Some(layout));
+    }
+
     /// Task 5: `shutdown_plugins` のための最小限の manifest(id 以外はどの
     /// テストでも共通)。
     fn plain_manifest(id: &str) -> Manifest {
@@ -2217,6 +2284,7 @@ pub(crate) mod tests {
             sidecars_json: Arc::new(Mutex::new("[]".to_string())),
             filesystem_json: Arc::new(Mutex::new("[]".to_string())),
             bus_json: Arc::new(Mutex::new("[]".to_string())),
+            layout: None,
         });
     }
 
@@ -2324,6 +2392,7 @@ pub(crate) mod tests {
             sidecars_json: Arc::new(Mutex::new("[]".to_string())),
             filesystem_json: Arc::new(Mutex::new("[]".to_string())),
             bus_json: Arc::new(Mutex::new("[]".to_string())),
+            layout: None,
         });
 
         registry.shutdown_plugins();

@@ -59,6 +59,10 @@ pub struct DriverEntry {
     pub sidecars_json: Arc<Mutex<String>>,
     /// `DriverCtx` と共有されるファイルアクセス承認状態・実パス JSON。
     pub filesystem_json: Arc<Mutex<String>>,
+    /// `layout.kdl` / `layout.json` 由来の解決済みレイアウト。無ければ None
+    /// (UI は平坦フォームで描画する)。ロード時に一度だけ解決する
+    /// (`crate::registry::plugin::PluginEntry::layout` と対称)。
+    pub layout: Option<crate::layout::Layout>,
 }
 
 /// RPC 応答用のドライバ情報スナップショット。`PluginInfo` と対称。
@@ -69,6 +73,8 @@ pub struct DriverInfo {
     pub grant_state: GrantState,
     pub sidecars: Vec<SidecarInfo>,
     pub filesystem: Vec<FilesystemInfo>,
+    /// `DriverEntry::layout` のスナップショット。
+    pub layout: Option<crate::layout::Layout>,
 }
 
 /// `DriverRegistry` の値アクセス系メソッドが返しうるエラー。
@@ -201,16 +207,23 @@ impl DriverRegistry {
     /// 解放してから(ディスクを読む)各ストアを呼ぶ
     /// (`crate::registry::plugin::Registry::list` と同じ流儀)。
     pub fn list(&self) -> Vec<DriverInfo> {
-        let snapshot: Vec<(DriverManifest, DriverState)> = self.entries.with_entries(|entries| {
-            entries
-                .iter()
-                .map(|entry| (entry.manifest.clone(), entry.state.clone()))
-                .collect()
-        });
+        let snapshot: Vec<(DriverManifest, DriverState, Option<crate::layout::Layout>)> =
+            self.entries.with_entries(|entries| {
+                entries
+                    .iter()
+                    .map(|entry| {
+                        (
+                            entry.manifest.clone(),
+                            entry.state.clone(),
+                            entry.layout.clone(),
+                        )
+                    })
+                    .collect()
+            });
 
         snapshot
             .into_iter()
-            .map(|(mut manifest, state)| {
+            .map(|(mut manifest, state, layout)| {
                 // `options-from` の select の候補を、いま retain されている値から
                 // 解決して埋める。ドライバ自身が emit したトピックを自分の設定の
                 // 候補源にする形(COEIROINK の話者一覧)を成立させるために、
@@ -228,6 +241,7 @@ impl DriverRegistry {
                     grant_state,
                     sidecars,
                     filesystem,
+                    layout,
                 }
             })
             .collect()
@@ -539,6 +553,7 @@ pub(crate) mod tests {
             capabilities_json: Arc::new(Mutex::new(r#"{"hosts":[]}"#.to_string())),
             sidecars_json: Arc::new(Mutex::new("[]".to_string())),
             filesystem_json: Arc::new(Mutex::new("[]".to_string())),
+            layout: None,
         });
         registry
     }
@@ -571,6 +586,44 @@ pub(crate) mod tests {
         }
     }
 
+    /// DriverRegistry::list が entry の layout をそのまま DriverInfo へ載せる
+    /// ことの固定(Task 6。`crate::registry::plugin::tests::list_carries_layout_through`
+    /// と対称)。
+    #[test]
+    fn list_carries_layout_through() {
+        let bus = edlr_driver_channel::Bus::new();
+        let registry = bare_registry(bus);
+        let layout = crate::layout::Layout {
+            sections: vec![crate::layout::Section {
+                title: "基本".into(),
+                description: None,
+                children: vec![crate::layout::Node::Field {
+                    field: "port".into(),
+                }],
+            }],
+        };
+        let mut manifest = manifest_with_topic("layout-driver");
+        manifest.settings = vec![crate::manifest::SettingField::String {
+            key: "port".into(),
+            label: "Port".into(),
+            default: String::new(),
+        }];
+        registry.push(DriverEntry {
+            manifest,
+            state: DriverState::Running,
+            settings_json: Arc::new(Mutex::new("{}".to_string())),
+            capabilities_json: Arc::new(Mutex::new(r#"{"hosts":[]}"#.to_string())),
+            sidecars_json: Arc::new(Mutex::new("[]".to_string())),
+            filesystem_json: Arc::new(Mutex::new("[]".to_string())),
+            layout: Some(layout.clone()),
+        });
+
+        let infos = registry.list();
+
+        assert_eq!(infos.len(), 1);
+        assert_eq!(infos[0].layout, Some(layout));
+    }
+
     #[test]
     fn disabling_a_driver_marks_it_and_drops_its_retained_values() {
         let manifest = manifest_with_topic("ed-state");
@@ -588,6 +641,7 @@ pub(crate) mod tests {
             capabilities_json: Arc::new(Mutex::new(r#"{"hosts":[]}"#.to_string())),
             sidecars_json: Arc::new(Mutex::new("[]".to_string())),
             filesystem_json: Arc::new(Mutex::new("[]".to_string())),
+            layout: None,
         });
 
         registry.set_disabled(&manifest, "on-message call failed".to_string());
@@ -658,6 +712,7 @@ pub(crate) mod tests {
             capabilities_json: Arc::new(Mutex::new(r#"{"hosts":[]}"#.to_string())),
             sidecars_json: Arc::new(Mutex::new("[]".to_string())),
             filesystem_json: Arc::new(Mutex::new("[]".to_string())),
+            layout: None,
         });
 
         let key = crate::registry::sidecar::sidecar_key("sc-driver", "tts");
@@ -778,6 +833,7 @@ pub(crate) mod tests {
             capabilities_json: Arc::new(Mutex::new(r#"{"hosts":[]}"#.to_string())),
             sidecars_json: Arc::new(Mutex::new("[]".to_string())),
             filesystem_json: Arc::new(Mutex::new("[]".to_string())),
+            layout: None,
         });
         let settings_manifest = manifest.as_settings_manifest();
         registry
@@ -876,6 +932,7 @@ pub(crate) mod tests {
             capabilities_json: Arc::new(Mutex::new(r#"{"hosts":[]}"#.to_string())),
             sidecars_json: Arc::new(Mutex::new("[]".to_string())),
             filesystem_json: Arc::new(Mutex::new("[]".to_string())),
+            layout: None,
         });
         let settings_manifest = manifest.as_settings_manifest();
         registry
@@ -1043,6 +1100,7 @@ pub(crate) mod tests {
             ))),
             sidecars_json: Arc::new(Mutex::new("[]".to_string())),
             filesystem_json: Arc::new(Mutex::new("[]".to_string())),
+            layout: None,
         });
         (registry, tmp)
     }

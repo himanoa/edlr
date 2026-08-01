@@ -153,6 +153,28 @@ export interface DroppedCounts {
   busDeliveries: number;
 }
 
+/**
+ * 設定フォームのセクション 1 件(`plugins/list` / `drivers/list` の `layout` に含まれる)。
+ * `children` は入れ子の `LayoutSection` を許すので、任意の深さでグルーピングできる。
+ */
+export interface LayoutSection {
+  title: string;
+  description?: string;
+  children: LayoutNode[];
+}
+
+/** レイアウト木の葉(単一フィールド参照)か、入れ子の `LayoutSection`。 */
+export type LayoutNode = { field: string } | LayoutSection;
+
+/**
+ * `plugins/list` / `drivers/list` が返すフォームレイアウト。サーバ側で参照解決済み
+ * (不正キーは除去、未参照キーは末尾セクションに補完済み)なので、UI 側は
+ * そのまま描画すればよい。`layout` 自体が `null` なら従来通りの平坦描画にする。
+ */
+export interface Layout {
+  sections: LayoutSection[];
+}
+
 export interface PluginInfo {
   id: string;
   name: string;
@@ -172,6 +194,7 @@ export interface PluginInfo {
   dashboard: DashboardWidget[];
   schedules: Schedule[];
   dropped: DroppedCounts;
+  layout: Layout | null;
 }
 
 export interface PluginsList {
@@ -198,6 +221,7 @@ export interface DriverInfo {
   filesystem: FilesystemRoot[];
   state: "running" | "disabled";
   reason?: string;
+  layout: Layout | null;
 }
 
 export interface DriversList {

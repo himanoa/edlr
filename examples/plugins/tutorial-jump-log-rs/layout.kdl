@@ -1,0 +1,7 @@
+// tutorial-jump-log-rs の設定画面レイアウト。
+// manifest.toml の [[settings]] に実在するキー(enabled / minDistance)だけを
+// 1 セクションにまとめた最小例。
+section "記録設定" description="ジャンプの記録条件" {
+    field "enabled"
+    field "minDistance"
+}
