@@ -140,7 +140,7 @@ plugin dir ──(registry: ロード時に読む)──> Layout(または None 
                                               │
 core: layout 純粋モジュール                     │
   - KDL/JSON → Layout 変換                     ▼
-  - settings キー参照の解決・掃除      rpc: get-settings 応答に layout を同梱
+  - settings キー参照の解決・掃除      rpc: list 応答の各エントリに layout を同梱
   - 暗黙「その他」セクションの補完              │
                                               ▼
                               ui: PluginForm が layout 有→セクション描画
@@ -160,9 +160,10 @@ core: layout 純粋モジュール                     │
 
 ### RPC
 
-- `plugins/get-settings` / `drivers/get-settings`(および settings を
-  同梱している一覧応答があればそれも)の応答に任意フィールド
-  `layout` を追加。無ければ `null`。
+- `plugins/list` / `drivers/list` の各エントリ(フィールド定義
+  `settings` を既に運んでいる応答)に任意フィールド `layout` を追加。
+  無ければ `null`。`get-settings` は生の値マップそのものを返す形
+  (キーがユーザー定義)なので、そこには足さない。
 - 既存フィールドは不変。UI が古くても新しくても壊れない後方互換な追加。
 
 ### UI
