@@ -1,11 +1,11 @@
 ---
 id: issue-sizx
 title: プラグインの非同期実行を submit/complete プロトコルで導入する
-summary: lifecycle 呼び出しの中で I/O を待つ設計をやめ、submit_job / on-job-complete の2フェーズに倒して deadline とキュー詰まりを解消する / 実現可能と調査済み・方針決定済み(ABI 破壊 OK・完了専用キュー)・実装未着手
+summary: lifecycle 呼び出しの中で I/O を待つ設計をやめ、submit_job / on-job-complete の2フェーズに倒して deadline とキュー詰まりを解消する / 実現可能と調査済み・方針決定済み(ABI 破壊 OK・1本キューのまま種別別の削除ルール)・実装未着手
 status: open
 labels: 人間がやる
 created: 2026-07-28T14:10:44Z
-updated: 2026-08-01T04:18:04Z
+updated: 2026-08-01T04:18:13Z
 ---
 
 
