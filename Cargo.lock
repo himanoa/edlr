@@ -1262,6 +1262,7 @@ dependencies = [
 name = "edlr-driver-fs"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "rustix",
  "tempfile",
 ]

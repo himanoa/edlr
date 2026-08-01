@@ -992,16 +992,12 @@ mod tests {
         }
     }
 
+    // rustix は apple ターゲットに mknodat / mkfifoat を公開していないため libc 直呼び。
     fn make_fifo(path: &Path) {
-        use rustix::fs::{FileType, Mode};
-        rustix::fs::mknodat(
-            rustix::fs::CWD,
-            path,
-            FileType::Fifo,
-            Mode::from_bits_truncate(0o644),
-            0,
-        )
-        .expect("mkfifo");
+        use std::os::unix::ffi::OsStrExt;
+        let path = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+        let rc = unsafe { libc::mkfifo(path.as_ptr(), 0o644) };
+        assert_eq!(rc, 0, "mkfifo: {}", std::io::Error::last_os_error());
     }
 
     /// 深すぎるツリーは再帰が止まらないので、深さの上限で拒否する。

@@ -18,13 +18,13 @@ use std::fs::File;
 use std::os::fd::OwnedFd;
 use std::path::Path;
 
-use rustix::fs::{AtFlags, FileType, Mode, OFlags};
+use rustix::fs::{AtFlags, FileType, Mode, OFlags, RawMode};
 
 use crate::path;
 use crate::FsError;
 
 /// 新規ファイルのパーミッション(umask が更に絞る)。
-const FILE_MODE: u32 = 0o644;
+const FILE_MODE: RawMode = 0o644;
 
 /// ディレクトリを開くときのフラグ。
 fn dir_oflags() -> OFlags {

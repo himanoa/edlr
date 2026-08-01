@@ -8,4 +8,5 @@ license.workspace = true
 rustix = { version = "1", features = ["fs"] }
 
 [dev-dependencies]
+libc = "0.2"
 tempfile = "3"
