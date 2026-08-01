@@ -64,6 +64,35 @@ pub fn default_journal_dir(home: &Path) -> Option<PathBuf> {
     candidate.is_dir().then_some(candidate)
 }
 
+/// journal ディレクトリの最終フォールバックパスを組み立てる。
+///
+/// CLI 引数・config.json・[`default_journal_dir`] の自動検出のどれでも
+/// 解決できなかったときに、デーモンが「作成して使う」場所。パス計算のみで
+/// ディレクトリの作成はしない(作成は `edlr` バイナリ側の仕事)。
+///
+/// `$XDG_DATA_HOME` が Some かつ非空ならそれを、そうでなければ
+/// `<home>/.local/share` をデータベースディレクトリとして
+/// `<base>/edlr/journal` を返す。home も無ければ `None`
+/// (`config_base` と違いカレントディレクトリには落とさない —
+/// 勝手に作る対象が CWD 相対になるのは危険なため)。
+pub fn fallback_journal_dir(
+    xdg_data_home: Option<&Path>,
+    home: Option<&Path>,
+) -> Option<PathBuf> {
+    match (xdg_data_home, home) {
+        (Some(data_home), _) if !data_home.as_os_str().is_empty() => {
+            Some(data_home.join("edlr").join("journal"))
+        }
+        (_, Some(home)) => Some(
+            home.join(".local")
+                .join("share")
+                .join("edlr")
+                .join("journal"),
+        ),
+        _ => None,
+    }
+}
+
 /// デーモン側の journal ディレクトリ解決。優先順: CLI 引数 →
 /// 設定ファイル(`config.json` の `journalDir`)→ 既知パスの自動検出。
 ///
@@ -372,6 +401,31 @@ mod tests {
         // HOME も XDG_STATE_HOME も無い環境でも panic しない。
         let base = state_base(None, None);
         assert!(base.ends_with("edlr"));
+    }
+
+    #[test]
+    fn fallback_journal_dir_prefers_xdg_data_home() {
+        let dir = fallback_journal_dir(Some(Path::new("/x/data")), Some(Path::new("/home/u")));
+        assert_eq!(dir, Some(PathBuf::from("/x/data/edlr/journal")));
+    }
+
+    #[test]
+    fn fallback_journal_dir_falls_back_to_local_share_under_home() {
+        let dir = fallback_journal_dir(None, Some(Path::new("/home/u")));
+        assert_eq!(dir, Some(PathBuf::from("/home/u/.local/share/edlr/journal")));
+    }
+
+    #[test]
+    fn fallback_journal_dir_treats_empty_xdg_data_home_as_unset() {
+        let dir = fallback_journal_dir(Some(Path::new("")), Some(Path::new("/home/u")));
+        assert_eq!(dir, Some(PathBuf::from("/home/u/.local/share/edlr/journal")));
+    }
+
+    #[test]
+    fn fallback_journal_dir_none_when_nothing_available() {
+        assert_eq!(fallback_journal_dir(None, None), None);
+        // 空 XDG + home なしもフォールバック不能
+        assert_eq!(fallback_journal_dir(Some(Path::new("")), None), None);
     }
 
     #[test]
