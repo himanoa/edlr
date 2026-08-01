@@ -97,19 +97,42 @@ async fn main() {
             None
         }
     };
-    let dir = config::daemon_journal_dir(args.journal_dir, configured, home.as_deref());
-    let Some(dir) = dir else {
-        eprintln!(
-            "error: journal directory not found; specify one with --journal-dir <PATH> \
-             or set journalDir in config.json"
-        );
-        std::process::exit(1);
+    // CLI/config/自動検出で解決できたパスは存在検証のみ(設定ミスを勝手に
+    // 直さない)。どれでも解決できない場合だけ、フォールバックパスを
+    // 作成して使う — 新規環境で journal dir 未設定なだけでデーモンが
+    // exit(1) すると、初回の UI 起動が必ずデーモン不在で始まるため。
+    let dir = match config::daemon_journal_dir(args.journal_dir, configured, home.as_deref()) {
+        Some(dir) => {
+            if !dir.is_dir() {
+                eprintln!("error: journal directory does not exist: {}", dir.display());
+                std::process::exit(1);
+            }
+            dir
+        }
+        None => {
+            let xdg_data_home = std::env::var_os("XDG_DATA_HOME").map(PathBuf::from);
+            let Some(dir) =
+                config::fallback_journal_dir(xdg_data_home.as_deref(), home.as_deref())
+            else {
+                eprintln!(
+                    "error: journal directory could not be resolved (no --journal-dir, no \
+                     journalDir in config.json, autodetection failed, and no HOME/\
+                     XDG_DATA_HOME for the fallback); specify one with --journal-dir <PATH> \
+                     or set journalDir in config.json"
+                );
+                std::process::exit(1);
+            };
+            if let Err(e) = std::fs::create_dir_all(&dir) {
+                eprintln!(
+                    "error: failed to create fallback journal directory {}: {e}",
+                    dir.display()
+                );
+                std::process::exit(1);
+            }
+            tracing::info!("using fallback journal directory {}", dir.display());
+            dir
+        }
     };
-
-    if !dir.is_dir() {
-        eprintln!("error: journal directory does not exist: {}", dir.display());
-        std::process::exit(1);
-    }
 
     tracing::info!("watching {}", dir.display());
     let router = Router::new(256);
