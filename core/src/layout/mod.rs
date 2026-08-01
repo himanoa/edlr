@@ -96,10 +96,16 @@ impl fmt::Display for LayoutWarning {
 
 /// `layout.json` の中身をモデルへ読み込む。
 ///
-/// serde は未知キーを黙って無視するため、トップレベルと `sections` 配下の
-/// 未知キーだけ事前に `serde_json::Value` を歩いて `UnknownNode` 警告に拾う
-/// (深追いはしない — lenient の目的は「書き間違いに気付けること」で、
-/// 網羅的なスキーマ検証ではない)。
+/// serde は未知キーを黙って無視するため、**トップレベルの**未知キーだけ事前に
+/// `serde_json::Value` を歩いて `UnknownNode` 警告に拾う(深追いはしない —
+/// lenient の目的は「書き間違いに気付けること」で、網羅的なスキーマ検証ではない)。
+///
+/// `sections` 配下(`Section`/`Node` の入れ子)の未知キーは拾わない。`Node` は
+/// untagged なので、そこでの書き間違いは 2 通りに転ぶ: `Field`/`Section` の
+/// どちらにもマッチしなければ `serde_json::from_value` がエラーになり
+/// `ParseFailed` として layout 全体を捨てる。たまたまどちらかにマッチして
+/// しまえば(例: 余分なキーがあっても既知のフィールドが揃っている)、警告なしで
+/// 黙って無視される。
 pub fn from_json_str(content: &str) -> Result<(Layout, Vec<LayoutWarning>), serde_json::Error> {
     let value: serde_json::Value = serde_json::from_str(content)?;
     let mut warnings = Vec::new();

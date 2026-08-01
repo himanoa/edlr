@@ -470,12 +470,12 @@ export default function PluginForm({
     );
   };
 
-  const renderSection = (section: LayoutSection, depth: number) => (
-    <section key={section.title} className="form-section">
+  const renderSection = (section: LayoutSection, depth: number, key: number) => (
+    <section key={key} className="form-section">
       {depth === 0 ? <h3>{section.title}</h3> : <h4>{section.title}</h4>}
       {section.description && <p className="note">{section.description}</p>}
-      {section.children.map((node) =>
-        "field" in node ? renderField(node.field) : renderSection(node, depth + 1),
+      {section.children.map((node, i) =>
+        "field" in node ? renderField(node.field) : renderSection(node, depth + 1, i),
       )}
     </section>
   );
@@ -483,7 +483,7 @@ export default function PluginForm({
   return (
     <form className="plugin-form" onSubmit={(e) => e.preventDefault()}>
       {plugin.layout
-        ? plugin.layout.sections.map((s) => renderSection(s, 0))
+        ? plugin.layout.sections.map((s, i) => renderSection(s, 0, i))
         : plugin.settings.map((field) => renderField(field.key))}
       {error && <p className="form-error">{error}</p>}
     </form>
