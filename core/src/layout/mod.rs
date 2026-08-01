@@ -16,7 +16,7 @@ use std::fmt;
 
 pub mod kdl;
 // pub mod load;
-// pub mod resolve;
+pub mod resolve;
 
 /// layout ファイル 1 枚分の正準モデル。
 #[derive(Debug, Clone, PartialEq, serde::Deserialize, serde::Serialize)]
