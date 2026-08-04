@@ -794,12 +794,12 @@ pub(crate) mod tests {
             FilesystemConfigStore::new(tmp.join("driver-settings"), Vec::new()),
             GrantsStore::new_for_drivers(tmp.join("driver-grants")),
             edlr_driver_channel::Bus::new(),
-            crate::host::driver::DriverHost::new().expect("driver host should build"),
+            crate::host::driver::DriverHost::new(crate::host::drivers::test_handle()).expect("driver host should build"),
         )
     }
 
     fn empty_registry() -> Registry {
-        let host = Arc::new(PluginHost::new().expect("host should start"));
+        let host = Arc::new(PluginHost::new(crate::host::drivers::test_handle()).expect("host should start"));
         let tmp = tempfile::tempdir().unwrap();
         let settings_store = Arc::new(SettingsStore::new(tmp.path().join("settings")));
         let grants_store = Arc::new(GrantsStore::new(tmp.path().join("grants")));
@@ -909,7 +909,7 @@ pub(crate) mod tests {
     /// `options-from` の select を 1 件だけ持つプラグイン `speaky` を、渡された
     /// `Bus` 付きで載せた `Registry`。
     fn test_registry_with_dynamic_select(bus: edlr_driver_channel::Bus) -> Registry {
-        let host = Arc::new(PluginHost::new().expect("host should start"));
+        let host = Arc::new(PluginHost::new(crate::host::drivers::test_handle()).expect("host should start"));
         let tmp = tempfile::tempdir().unwrap();
         let settings_store = Arc::new(SettingsStore::new(tmp.path().join("settings")));
         let grants_store = Arc::new(GrantsStore::new(tmp.path().join("grants")));
@@ -1024,7 +1024,7 @@ pub(crate) mod tests {
     pub(crate) fn test_registry_with_bus_request_using(
         driver_registry: DriverRegistry,
     ) -> Registry {
-        let host = Arc::new(PluginHost::new().expect("host should start"));
+        let host = Arc::new(PluginHost::new(crate::host::drivers::test_handle()).expect("host should start"));
         let tmp = tempfile::tempdir().unwrap();
         let settings_store = Arc::new(SettingsStore::new(tmp.path().join("settings")));
         let grants_store = Arc::new(GrantsStore::new(tmp.path().join("grants")));
@@ -1069,7 +1069,7 @@ pub(crate) mod tests {
     /// 有無を呼び出し元が操作できる(fixture が `TempDir` を drop すると
     /// ディレクトリごと消えるため、所有権ごと返す)。
     pub(crate) fn test_registry_with_dashboard() -> (Registry, tempfile::TempDir) {
-        let host = Arc::new(PluginHost::new().expect("host should start"));
+        let host = Arc::new(PluginHost::new(crate::host::drivers::test_handle()).expect("host should start"));
         let tmp = tempfile::tempdir().unwrap();
         let settings_store = Arc::new(SettingsStore::new(tmp.path().join("settings")));
         let grants_store = Arc::new(GrantsStore::new(tmp.path().join("grants")));
@@ -1187,7 +1187,7 @@ pub(crate) mod tests {
     /// `list()`/`values()` に効く。
     fn test_registry_with_secret() -> (Registry, tempfile::TempDir) {
         let tmp = tempfile::tempdir().unwrap();
-        let host = Arc::new(PluginHost::new().expect("host should start"));
+        let host = Arc::new(PluginHost::new(crate::host::drivers::test_handle()).expect("host should start"));
         let settings_store = Arc::new(SettingsStore::new(tmp.path().join("settings")));
         let grants_store = Arc::new(GrantsStore::new(tmp.path().join("grants")));
         let sidecar_config_store = Arc::new(SidecarConfigStore::new(tmp.path().join("settings")));
@@ -1584,7 +1584,7 @@ pub(crate) mod tests {
     /// ファイルアクセスの取消が共有バッファへ速やかに反映されることを見る。
     #[test]
     fn revoking_filesystem_access_is_not_blocked_by_a_sidecar_stop_in_progress() {
-        let host = Arc::new(PluginHost::new().expect("host should start"));
+        let host = Arc::new(PluginHost::new(crate::host::drivers::test_handle()).expect("host should start"));
         let tmp = tempfile::tempdir().unwrap();
         let settings_store = Arc::new(SettingsStore::new(tmp.path().join("settings")));
         let grants_store = Arc::new(GrantsStore::new(tmp.path().join("grants")));
@@ -2127,7 +2127,7 @@ pub(crate) mod tests {
     /// so no amount of scheduling luck can reintroduce a disagreement.
     #[test]
     fn concurrent_set_capabilities_keeps_shared_buffer_consistent_with_disk() {
-        let host = Arc::new(PluginHost::new().expect("host should start"));
+        let host = Arc::new(PluginHost::new(crate::host::drivers::test_handle()).expect("host should start"));
         let tmp = tempfile::tempdir().unwrap();
         let settings_store = Arc::new(SettingsStore::new(tmp.path().join("settings")));
         let grants_store = Arc::new(GrantsStore::new(tmp.path().join("grants")));

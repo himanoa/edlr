@@ -209,7 +209,7 @@ fn start_drivers_for_test(
         FilesystemConfigStore::new(tmp.join("driver-settings"), Vec::new()),
         GrantsStore::new_for_drivers(tmp.join("driver-grants")),
         bus,
-        edlr_core::host::driver::DriverHost::new().expect("driver host should build"),
+        edlr_core::host::driver::DriverHost::new(test_handle()).expect("driver host should build"),
     )
 }
 
@@ -238,6 +238,16 @@ fn start_plugins_for_test(
         router,
         bus,
         drivers,
-        PluginHost::new().expect("wasmtime engine builds"),
+        PluginHost::new(test_handle()).expect("wasmtime engine builds"),
     )
+}
+
+/// テスト全体で共有する runtime の Handle(`HttpDriver` の同期 `send` の
+/// `block_on` 先)。関数ローカルの Runtime だと drop 後の `block_on` で
+/// panic するため static に生かす。
+fn test_handle() -> tokio::runtime::Handle {
+    static RT: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
+    RT.get_or_init(|| tokio::runtime::Runtime::new().expect("build test runtime"))
+        .handle()
+        .clone()
 }

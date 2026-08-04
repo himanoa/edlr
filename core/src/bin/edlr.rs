@@ -184,7 +184,11 @@ async fn main() {
     // プラグインの購読を確立できるよう、`monitor::run` の起動より先に完了
     // させる。
     let router_for_plugins = router.clone();
-    let registry_and_drivers = match (PluginHost::new(), DriverHost::new()) {
+    let handle = tokio::runtime::Handle::current();
+    let registry_and_drivers = match (
+        PluginHost::new(handle.clone()),
+        DriverHost::new(handle.clone()),
+    ) {
         (Ok(host), Ok(driver_host)) => {
             tracing::info!(
                 plugins_dir = %plugins_dir.display(),

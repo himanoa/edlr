@@ -9,8 +9,8 @@
 //! separation keeps the driver a plain, reusable HTTP client and keeps the
 //! security-relevant decision in one place.
 
-use std::io::Read;
 use std::time::Duration;
+use tokio::runtime::Handle;
 
 /// An HTTP request to perform. Mirrors the WIT `driver-http.request` record.
 pub struct HttpRequest {
@@ -73,60 +73,43 @@ fn is_forbidden_request_header(name: &str) -> bool {
     FORBIDDEN_REQUEST_HEADERS.contains(&lower.as_str()) || lower.starts_with("proxy-")
 }
 
-/// A reusable HTTP client with a fixed timeout, response body cap, and no
-/// automatic redirect following. Construction is comparatively expensive
-/// (it builds a `reqwest::blocking::Client`, which sets up TLS state and a
-/// background runtime), so callers should build one `HttpDriver` and reuse
-/// it across calls rather than constructing one per request.
 pub struct HttpDriver {
-    client: reqwest::blocking::Client,
+    client: reqwest::Client,
     /// Cap applied symmetrically to request bodies (checked up front in
     /// `send`, rejecting with `InvalidRequest`) and response bodies (checked
     /// while streaming the response, rejecting with `Transport` -- see
     /// `send` for why that one can't be enforced up front).
     max_body_bytes: usize,
+    /// デーモンの tokio runtime のハンドル。同期 `send` はこれで `block_on`
+    /// する。呼び出し元はプラグイン/ドライバスレッド(非ランタイムスレッド)
+    /// である前提 — ランタイムのワーカースレッド上から呼ぶと panic する。
+    handle: Handle,
 }
 
 impl HttpDriver {
-    /// Builds a driver that applies `timeout` to every request (covering
-    /// connect + the full response) and caps response bodies at
-    /// `max_body_bytes`. Redirects are never followed: `send` returns
-    /// whatever 3xx the server sent, untouched, so the permission-checked
-    /// URL a caller asked for is exactly the URL that gets fetched.
-    ///
-    /// `reqwest::blocking::Client::builder().build()` internally spins up
-    /// its own background Tokio runtime and, while doing so, briefly parks
-    /// the *calling* thread on a throwaway helper runtime of its own. If
-    /// the calling thread already belongs to an existing Tokio runtime
-    /// (e.g. this is called from `#[tokio::main]`, as `edlr`'s own `main`
-    /// does, or from a `#[tokio::test]`), that nested runtime construction
-    /// panics ("Cannot drop a runtime in a context where blocking is not
-    /// allowed"). Building the client on a plain, freshly spawned
-    /// `std::thread` -- which is never entered into any Tokio runtime --
-    /// sidesteps this entirely, regardless of what kind of thread `new` is
-    /// called from.
-    pub fn new(timeout: Duration, max_body_bytes: usize) -> Result<Self, HttpError> {
-        let client = std::thread::spawn(move || {
-            reqwest::blocking::Client::builder()
-                .timeout(timeout)
-                .redirect(reqwest::redirect::Policy::none())
-                .build()
-        })
-        .join()
-        .map_err(|_| HttpError::Transport("http client builder thread panicked".to_string()))?
-        .map_err(|e| HttpError::Transport(format!("failed to build http client: {e}")))?;
+    pub fn new(
+        timeout: Duration,
+        max_body_bytes: usize,
+        handle: Handle,
+    ) -> Result<Self, HttpError> {
+        let client = reqwest::Client::builder()
+            .timeout(timeout)
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .map_err(|e| HttpError::Transport(format!("failed to build http client: {e}")))?;
 
         Ok(HttpDriver {
             client,
             max_body_bytes,
+            handle,
         })
     }
 
     /// Performs `req` and returns the response, or a typed error.
     ///
-    /// Response bodies are read via a size-capped [`Read`] adapter
-    /// (`Read::take(max_body_bytes + 1)`): the driver never buffers more
-    /// than one byte past the configured cap regardless of what the server
+    /// Response bodies are read chunk by chunk with the size cap enforced
+    /// before each chunk is appended: the driver never buffers more than
+    /// one chunk past the configured cap regardless of what the server
     /// claims or how it frames the body (`Content-Length`, chunked
     /// transfer, or none at all), so a malicious or misconfigured server
     /// cannot force unbounded memory growth. When the server *does* send a
@@ -165,55 +148,57 @@ impl HttpDriver {
             builder = builder.body(body);
         }
 
-        let response = builder
-            .send()
-            .map_err(|e| HttpError::Transport(format!("request failed: {e}")))?;
+        self.handle.block_on(async {
+            let mut response = builder
+                .send()
+                .await
+                .map_err(|e| HttpError::Transport(format!("request failed: {e}")))?;
 
-        let status = response.status().as_u16();
-        let headers = response
-            .headers()
-            .iter()
-            .map(|(name, value)| {
-                (
-                    name.as_str().to_string(),
-                    value.to_str().unwrap_or_default().to_string(),
-                )
-            })
-            .collect();
+            let status = response.status().as_u16();
+            let headers = response
+                .headers()
+                .iter()
+                .map(|(name, value)| {
+                    (
+                        name.as_str().to_string(),
+                        value.to_str().unwrap_or_default().to_string(),
+                    )
+                })
+                .collect();
 
-        // Fast path: if the server declared an over-limit length up front,
-        // reject without reading anything.
-        if let Some(len) = response.content_length() {
-            if len > self.max_body_bytes as u64 {
-                return Err(HttpError::Transport(format!(
-                    "response body of {len} bytes exceeds the {max} byte limit",
-                    max = self.max_body_bytes
-                )));
+            // Fast path: if the server declared an over-limit length up front,
+            // reject without reading anything.
+            if let Some(len) = response.content_length() {
+                if len > self.max_body_bytes as u64 {
+                    return Err(HttpError::Transport(format!(
+                        "response body of {len} bytes exceeds the {max} byte limit",
+                        max = self.max_body_bytes
+                    )));
+                }
             }
-        }
 
-        // Primary guard: cap the actual read at max_body_bytes + 1 so we can
-        // tell "exactly at the limit" apart from "over the limit" without
-        // ever buffering more than one byte past the cap, regardless of
-        // what (if anything) the server claimed about its length.
-        let cap = self.max_body_bytes as u64 + 1;
-        let mut body = Vec::new();
-        response
-            .take(cap)
-            .read_to_end(&mut body)
-            .map_err(|e| HttpError::Transport(format!("failed to read response body: {e}")))?;
+            // Primary guard: check the cap before appending each chunk, so
+            // over-limit bodies fail as soon as they cross the line and we
+            // never buffer more than one chunk past the cap, regardless of
+            // what (if anything) the server claimed about its length.
+            let mut body = Vec::new();
+            while let Some(chunk) = response.chunk().await.map_err(|e| {
+                HttpError::Transport(format!("failed to read response body: {e}"))
+            })? {
+                if body.len() + chunk.len() > self.max_body_bytes {
+                    return Err(HttpError::Transport(format!(
+                        "response body exceeds the {max} byte limit",
+                        max = self.max_body_bytes
+                    )));
+                }
+                body.extend_from_slice(&chunk);
+            }
 
-        if body.len() > self.max_body_bytes {
-            return Err(HttpError::Transport(format!(
-                "response body exceeds the {max} byte limit",
-                max = self.max_body_bytes
-            )));
-        }
-
-        Ok(HttpResponse {
-            status,
-            headers,
-            body,
+            Ok(HttpResponse {
+                status,
+                headers,
+                body,
+            })
         })
     }
 }
@@ -221,8 +206,18 @@ impl HttpDriver {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
+    use std::io::{Read, Write};
     use std::net::{TcpListener, TcpStream};
+
+    /// テスト全体で共有する runtime の Handle。関数ローカルで Runtime を
+    /// 作って Handle だけ返すと drop された runtime への block_on で panic
+    /// するため、static に生かしておく。
+    fn test_handle() -> Handle {
+        static RT: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
+        RT.get_or_init(|| tokio::runtime::Runtime::new().expect("build test runtime"))
+            .handle()
+            .clone()
+    }
 
     fn request(url: &str) -> HttpRequest {
         HttpRequest {
@@ -327,7 +322,7 @@ mod tests {
         let url = spawn_stalling_server();
         // Deliberately short so the test doesn't take anywhere near the
         // production HTTP_TIMEOUT (10s); this exercises the same code path.
-        let driver = HttpDriver::new(Duration::from_millis(150), 1024).expect("build driver");
+        let driver = HttpDriver::new(Duration::from_millis(150), 1024, test_handle()).expect("build driver");
 
         let started = std::time::Instant::now();
         let err = driver
@@ -346,7 +341,7 @@ mod tests {
         let cap = 16usize;
         let body = vec![b'a'; cap];
         let url = spawn_server(move |_headers, _body| (200, vec![], body.clone()));
-        let driver = HttpDriver::new(Duration::from_secs(5), cap).expect("build driver");
+        let driver = HttpDriver::new(Duration::from_secs(5), cap, test_handle()).expect("build driver");
 
         let response = driver.send(request(&url)).expect("body at cap must pass");
         assert_eq!(response.body.len(), cap);
@@ -357,7 +352,7 @@ mod tests {
         let cap = 16usize;
         let body = vec![b'a'; cap + 1];
         let url = spawn_server(move |_headers, _body| (200, vec![], body.clone()));
-        let driver = HttpDriver::new(Duration::from_secs(5), cap).expect("build driver");
+        let driver = HttpDriver::new(Duration::from_secs(5), cap, test_handle()).expect("build driver");
 
         let err = driver
             .send(request(&url))
@@ -372,7 +367,7 @@ mod tests {
             assert_eq!(body.len(), cap);
             (200, vec![], vec![])
         });
-        let driver = HttpDriver::new(Duration::from_secs(5), cap).expect("build driver");
+        let driver = HttpDriver::new(Duration::from_secs(5), cap, test_handle()).expect("build driver");
 
         let mut req = request(&url);
         req.method = "POST".to_string();
@@ -386,7 +381,7 @@ mod tests {
         let cap = 16usize;
         // No server is spawned: the cap must be enforced before any
         // connection is attempted.
-        let driver = HttpDriver::new(Duration::from_secs(5), cap).expect("build driver");
+        let driver = HttpDriver::new(Duration::from_secs(5), cap, test_handle()).expect("build driver");
 
         let mut req = HttpRequest {
             method: "POST".to_string(),
@@ -414,7 +409,7 @@ mod tests {
             );
             (200, vec![("x-echo", "world")], vec![])
         });
-        let driver = HttpDriver::new(Duration::from_secs(5), 1024).expect("build driver");
+        let driver = HttpDriver::new(Duration::from_secs(5), 1024, test_handle()).expect("build driver");
 
         let mut req = request(&url);
         req.headers
@@ -433,7 +428,7 @@ mod tests {
 
     #[test]
     fn host_header_is_rejected() {
-        let driver = HttpDriver::new(Duration::from_secs(5), 1024).expect("build driver");
+        let driver = HttpDriver::new(Duration::from_secs(5), 1024, test_handle()).expect("build driver");
         let mut req = request("http://127.0.0.1:1/unreachable");
         req.headers
             .push(("Host".to_string(), "evil.example.com".to_string()));
@@ -446,7 +441,7 @@ mod tests {
 
     #[test]
     fn content_length_header_is_rejected() {
-        let driver = HttpDriver::new(Duration::from_secs(5), 1024).expect("build driver");
+        let driver = HttpDriver::new(Duration::from_secs(5), 1024, test_handle()).expect("build driver");
         let mut req = request("http://127.0.0.1:1/unreachable");
         req.headers
             .push(("Content-Length".to_string(), "0".to_string()));
@@ -459,7 +454,7 @@ mod tests {
 
     #[test]
     fn transfer_encoding_header_is_rejected() {
-        let driver = HttpDriver::new(Duration::from_secs(5), 1024).expect("build driver");
+        let driver = HttpDriver::new(Duration::from_secs(5), 1024, test_handle()).expect("build driver");
         let mut req = request("http://127.0.0.1:1/unreachable");
         req.headers
             .push(("Transfer-Encoding".to_string(), "chunked".to_string()));
@@ -472,7 +467,7 @@ mod tests {
 
     #[test]
     fn connection_header_is_rejected() {
-        let driver = HttpDriver::new(Duration::from_secs(5), 1024).expect("build driver");
+        let driver = HttpDriver::new(Duration::from_secs(5), 1024, test_handle()).expect("build driver");
         let mut req = request("http://127.0.0.1:1/unreachable");
         req.headers
             .push(("Connection".to_string(), "keep-alive".to_string()));
@@ -485,7 +480,7 @@ mod tests {
 
     #[test]
     fn upgrade_header_is_rejected() {
-        let driver = HttpDriver::new(Duration::from_secs(5), 1024).expect("build driver");
+        let driver = HttpDriver::new(Duration::from_secs(5), 1024, test_handle()).expect("build driver");
         let mut req = request("http://127.0.0.1:1/unreachable");
         req.headers
             .push(("Upgrade".to_string(), "websocket".to_string()));
@@ -498,7 +493,7 @@ mod tests {
 
     #[test]
     fn proxy_prefixed_header_is_rejected() {
-        let driver = HttpDriver::new(Duration::from_secs(5), 1024).expect("build driver");
+        let driver = HttpDriver::new(Duration::from_secs(5), 1024, test_handle()).expect("build driver");
         let mut req = request("http://127.0.0.1:1/unreachable");
         req.headers.push((
             "Proxy-Authorization".to_string(),
@@ -513,7 +508,7 @@ mod tests {
 
     #[test]
     fn header_rejection_is_case_insensitive() {
-        let driver = HttpDriver::new(Duration::from_secs(5), 1024).expect("build driver");
+        let driver = HttpDriver::new(Duration::from_secs(5), 1024, test_handle()).expect("build driver");
         let mut req = request("http://127.0.0.1:1/unreachable");
         req.headers
             .push(("hOsT".to_string(), "evil.example.com".to_string()));

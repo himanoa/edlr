@@ -681,9 +681,10 @@ pub struct PluginHost {
 }
 
 impl PluginHost {
-    pub fn new() -> anyhow::Result<PluginHost> {
+    /// `handle` はデーモンの tokio runtime のもの(`SharedDrivers::new` 参照)。
+    pub fn new(handle: tokio::runtime::Handle) -> anyhow::Result<PluginHost> {
         let engine = EpochEngine::new()?;
-        let drivers = SharedDrivers::new(HTTP_TIMEOUT)?;
+        let drivers = SharedDrivers::new(HTTP_TIMEOUT, handle)?;
 
         Ok(PluginHost { engine, drivers })
     }
@@ -899,7 +900,7 @@ mod tests {
 
     fn test_http_driver() -> Arc<edlr_driver_http::HttpDriver> {
         Arc::new(
-            edlr_driver_http::HttpDriver::new(HTTP_TIMEOUT, HTTP_MAX_BODY)
+            edlr_driver_http::HttpDriver::new(HTTP_TIMEOUT, HTTP_MAX_BODY, crate::host::drivers::test_handle())
                 .expect("build test http driver"),
         )
     }
@@ -1273,7 +1274,7 @@ mod tests {
             Arc::new(Mutex::new(bus_json_string(entries))),
             bus,
             Arc::new(
-                edlr_driver_http::HttpDriver::new(HTTP_TIMEOUT, HTTP_MAX_BODY)
+                edlr_driver_http::HttpDriver::new(HTTP_TIMEOUT, HTTP_MAX_BODY, crate::host::drivers::test_handle())
                     .expect("http driver builds"),
             ),
             Arc::new(edlr_driver_process::ProcessDriver::new(

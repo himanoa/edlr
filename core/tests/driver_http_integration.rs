@@ -28,10 +28,10 @@ use axum::Router;
 ///
 /// Running the server on its own thread/runtime (rather than inside a
 /// `#[tokio::test]` runtime shared with the test body) matters here: the
-/// driver under test uses `reqwest::blocking`, and the tests below call it
-/// synchronously from a plain `#[test]` function. Keeping the server fully
-/// independent avoids any risk of the blocking call and the server sharing
-/// (and contending for) the same runtime thread.
+/// driver under test blocks on its own runtime handle (`test_handle()`), and
+/// the tests below call it synchronously from a plain `#[test]` function.
+/// Keeping the server fully independent avoids any risk of the blocking call
+/// and the server sharing (and contending for) the same runtime thread.
 fn spawn_test_server() -> String {
     let listener = StdTcpListener::bind("127.0.0.1:0").expect("bind test server");
     let addr = listener.local_addr().expect("local_addr");
@@ -111,8 +111,22 @@ fn ctx_with_driver(driver: Arc<HttpDriver>, hosts: &[&str]) -> HostCtx {
     )
 }
 
+/// テスト全体で共有する runtime の Handle。`HttpDriver` の同期 `send` は
+/// この runtime で `block_on` する。テスト本体は plain `#[test]`(非ランタイム
+/// スレッド)なので合法。関数ローカルの Runtime だと drop 後の `block_on` で
+/// panic するため static に生かす。
+fn test_handle() -> tokio::runtime::Handle {
+    static RT: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
+    RT.get_or_init(|| tokio::runtime::Runtime::new().expect("build test runtime"))
+        .handle()
+        .clone()
+}
+
 fn default_driver() -> Arc<HttpDriver> {
-    Arc::new(HttpDriver::new(HTTP_TIMEOUT, HTTP_MAX_BODY).expect("build default http driver"))
+    Arc::new(
+        HttpDriver::new(HTTP_TIMEOUT, HTTP_MAX_BODY, test_handle())
+            .expect("build default http driver"),
+    )
 }
 
 fn request(
@@ -223,7 +237,7 @@ fn oversized_body_is_a_transport_error() {
     // Small cap so the test doesn't need to move megabytes to prove the
     // point; the `/big` handler serves 10_000 bytes, well over this.
     let small_cap_driver =
-        Arc::new(HttpDriver::new(HTTP_TIMEOUT, 1024).expect("build small-cap http driver"));
+        Arc::new(HttpDriver::new(HTTP_TIMEOUT, 1024, test_handle()).expect("build small-cap http driver"));
     let mut ctx = ctx_with_driver(small_cap_driver, &[base.as_str()]);
 
     let err = ctx

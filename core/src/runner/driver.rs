@@ -453,7 +453,7 @@ mod tests {
             FilesystemConfigStore::new(tmp.path().join("settings"), vec![tmp.path().to_path_buf()]),
             GrantsStore::new_for_drivers(tmp.path().join("grants")),
             edlr_driver_channel::Bus::new(),
-            DriverHost::new().expect("wasmtime engine builds"),
+            DriverHost::new(crate::host::drivers::test_handle()).expect("wasmtime engine builds"),
         )
     }
 }

@@ -34,9 +34,14 @@ pub(crate) struct SharedDrivers {
 }
 
 impl SharedDrivers {
-    pub(crate) fn new(http_timeout: Duration) -> anyhow::Result<SharedDrivers> {
+    /// `handle` はデーモンの tokio runtime のもの。`HttpDriver` の同期 `send`
+    /// がこれで `block_on` する(プラグイン/ドライバスレッドから呼ばれる前提)。
+    pub(crate) fn new(
+        http_timeout: Duration,
+        handle: tokio::runtime::Handle,
+    ) -> anyhow::Result<SharedDrivers> {
         let http = Arc::new(
-            edlr_driver_http::HttpDriver::new(http_timeout, HTTP_MAX_BODY)
+            edlr_driver_http::HttpDriver::new(http_timeout, HTTP_MAX_BODY, handle)
                 .map_err(|e| anyhow::anyhow!("failed to build http driver: {e}"))?,
         );
         let process = Arc::new(edlr_driver_process::ProcessDriver::new(
@@ -65,4 +70,15 @@ impl SharedDrivers {
     pub(crate) fn fs(&self) -> Arc<edlr_driver_fs::FsDriver> {
         self.fs.clone()
     }
+}
+
+/// テスト全体で共有する runtime の Handle。tokio 外の `#[test]` から
+/// `PluginHost::new` / `DriverHost::new` を呼ぶためのもの。関数ローカルの
+/// Runtime だと drop 後の `block_on` で panic するため static に生かす。
+#[cfg(test)]
+pub(crate) fn test_handle() -> tokio::runtime::Handle {
+    static RT: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
+    RT.get_or_init(|| tokio::runtime::Runtime::new().expect("build test runtime"))
+        .handle()
+        .clone()
 }

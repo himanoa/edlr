@@ -46,7 +46,7 @@ pub fn empty_driver_registry(tmp_path: &Path) -> DriverRegistry {
         FilesystemConfigStore::new(tmp_path.join("driver-settings"), Vec::new()),
         GrantsStore::new_for_drivers(tmp_path.join("driver-grants")),
         edlr_driver_channel::Bus::new(),
-        DriverHost::new().expect("driver host should build"),
+        DriverHost::new(test_handle()).expect("driver host should build"),
     )
 }
 
@@ -155,7 +155,7 @@ pub fn http_caller_registry() -> (tempfile::TempDir, Registry) {
     let filesystem_config_store =
         FilesystemConfigStore::new(tmp.path().join("settings"), Vec::new());
     let router = Router::new(16);
-    let host = PluginHost::new().expect("host should start");
+    let host = PluginHost::new(test_handle()).expect("host should start");
 
     let registry = edlr_core::runner::plugin::start_plugins(
         &plugins_dir,
@@ -232,7 +232,7 @@ pub fn sidecar_env(name: &str, port: u16, scalable: bool) -> Env {
         &router,
         edlr_driver_channel::Bus::new(),
         empty_driver_registry(tmp.path()),
-        PluginHost::new().expect("plugin host"),
+        PluginHost::new(test_handle()).expect("plugin host"),
     );
 
     Env { registry, tmp }
@@ -272,7 +272,7 @@ pub fn two_plugin_sidecar_env(sidecar_name: &str, port_a: u16, port_b: u16) -> E
         &router,
         edlr_driver_channel::Bus::new(),
         empty_driver_registry(tmp.path()),
-        PluginHost::new().expect("plugin host"),
+        PluginHost::new(test_handle()).expect("plugin host"),
     );
 
     Env { registry, tmp }
@@ -324,7 +324,7 @@ pub fn filesystem_env(name: &str, mode: &str) -> Env {
         &router,
         edlr_driver_channel::Bus::new(),
         empty_driver_registry(tmp.path()),
-        PluginHost::new().expect("plugin host"),
+        PluginHost::new(test_handle()).expect("plugin host"),
     );
 
     Env { registry, tmp }
@@ -335,4 +335,15 @@ pub fn filesystem_env(name: &str, mode: &str) -> Env {
 #[allow(dead_code)]
 pub fn filesystem_buffer(registry: &Registry, id: &str) -> String {
     registry.filesystem_buffer(id).unwrap_or_default()
+}
+
+/// テスト全体で共有する runtime の Handle。`PluginHost::new` /
+/// `DriverHost::new` が要求する(`HttpDriver` の同期 `send` の `block_on` 先)。
+/// 関数ローカルの Runtime だと drop 後の `block_on` で panic するため
+/// static に生かす。
+pub fn test_handle() -> tokio::runtime::Handle {
+    static RT: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
+    RT.get_or_init(|| tokio::runtime::Runtime::new().expect("build test runtime"))
+        .handle()
+        .clone()
 }

@@ -27,7 +27,7 @@ fn empty_driver_registry(tmp_path: &Path) -> DriverRegistry {
         FilesystemConfigStore::new(tmp_path.join("driver-settings"), Vec::new()),
         GrantsStore::new_for_drivers(tmp_path.join("driver-grants")),
         edlr_driver_channel::Bus::new(),
-        DriverHost::new().expect("driver host should build"),
+        DriverHost::new(test_handle()).expect("driver host should build"),
     )
 }
 
@@ -137,7 +137,7 @@ async fn hello_logger_stays_running_and_busy_loop_gets_disabled_after_publish() 
     let filesystem_config_store =
         FilesystemConfigStore::new(tmp.path().join("settings"), Vec::new());
     let router = Router::new(16);
-    let host = PluginHost::new().expect("host should start");
+    let host = PluginHost::new(test_handle()).expect("host should start");
 
     let registry = start_plugins(
         &plugins_dir,
@@ -249,7 +249,7 @@ async fn broken_manifest_directory_is_skipped_but_others_still_load() {
     let filesystem_config_store =
         FilesystemConfigStore::new(tmp.path().join("settings"), Vec::new());
     let router = Router::new(16);
-    let host = PluginHost::new().expect("host should start");
+    let host = PluginHost::new(test_handle()).expect("host should start");
 
     let registry = start_plugins(
         &plugins_dir,
@@ -285,7 +285,7 @@ async fn nonexistent_plugins_dir_yields_empty_registry() {
     let filesystem_config_store =
         FilesystemConfigStore::new(tmp.path().join("settings"), Vec::new());
     let router = Router::new(16);
-    let host = PluginHost::new().expect("host should start");
+    let host = PluginHost::new(test_handle()).expect("host should start");
 
     let registry = start_plugins(
         &plugins_dir,
@@ -322,7 +322,7 @@ async fn init_failure_registers_disabled_and_starts_no_event_task() {
     let filesystem_config_store =
         FilesystemConfigStore::new(tmp.path().join("settings"), Vec::new());
     let router = Router::new(16);
-    let host = PluginHost::new().expect("host should start");
+    let host = PluginHost::new(test_handle()).expect("host should start");
 
     let registry = start_plugins(
         &plugins_dir,
@@ -403,7 +403,7 @@ async fn list_returns_plugin_info_with_effective_values_matching_manifest_defaul
     let filesystem_config_store =
         FilesystemConfigStore::new(tmp.path().join("settings"), Vec::new());
     let router = Router::new(16);
-    let host = PluginHost::new().expect("host should start");
+    let host = PluginHost::new(test_handle()).expect("host should start");
 
     let registry = start_plugins(
         &plugins_dir,
@@ -453,7 +453,7 @@ async fn set_values_persists_validates_and_updates_shared_settings_json() {
     let filesystem_config_store =
         FilesystemConfigStore::new(tmp.path().join("settings"), Vec::new());
     let router = Router::new(16);
-    let host = PluginHost::new().expect("host should start");
+    let host = PluginHost::new(test_handle()).expect("host should start");
 
     let registry = start_plugins(
         &plugins_dir,
@@ -516,7 +516,7 @@ async fn set_values_with_unknown_key_returns_err_and_leaves_values_unchanged() {
     let filesystem_config_store =
         FilesystemConfigStore::new(tmp.path().join("settings"), Vec::new());
     let router = Router::new(16);
-    let host = PluginHost::new().expect("host should start");
+    let host = PluginHost::new(test_handle()).expect("host should start");
 
     let registry = start_plugins(
         &plugins_dir,
@@ -553,4 +553,14 @@ async fn set_values_with_unknown_key_returns_err_and_leaves_values_unchanged() {
         before, after,
         "rejected update should not change existing values"
     );
+}
+
+/// テスト全体で共有する runtime の Handle(`HttpDriver` の同期 `send` の
+/// `block_on` 先)。関数ローカルの Runtime だと drop 後の `block_on` で
+/// panic するため static に生かす。
+fn test_handle() -> tokio::runtime::Handle {
+    static RT: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
+    RT.get_or_init(|| tokio::runtime::Runtime::new().expect("build test runtime"))
+        .handle()
+        .clone()
 }

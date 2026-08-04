@@ -1026,7 +1026,7 @@ pub(crate) mod tests {
     fn bare_registry(bus: edlr_driver_channel::Bus) -> DriverRegistry {
         let tmp = tempfile::tempdir().unwrap();
         DriverRegistry::new(
-            Arc::new(DriverHost::new().expect("wasmtime engine builds")),
+            Arc::new(DriverHost::new(crate::host::drivers::test_handle()).expect("wasmtime engine builds")),
             Arc::new(SettingsStore::new(tmp.path().join("settings"))),
             Arc::new(GrantsStore::new_for_drivers(tmp.path().join("grants"))),
             Arc::new(SidecarConfigStore::new(tmp.path().join("settings"))),
@@ -1079,7 +1079,7 @@ pub(crate) mod tests {
     {
         let tmp = tempfile::tempdir().unwrap();
         let registry = DriverRegistry::new(
-            Arc::new(DriverHost::new().expect("wasmtime engine builds")),
+            Arc::new(DriverHost::new(crate::host::drivers::test_handle()).expect("wasmtime engine builds")),
             Arc::new(SettingsStore::new(tmp.path().join("settings"))),
             Arc::new(GrantsStore::new_for_drivers(tmp.path().join("grants"))),
             Arc::new(SidecarConfigStore::new(tmp.path().join("settings"))),

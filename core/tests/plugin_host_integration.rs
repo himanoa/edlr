@@ -56,7 +56,7 @@ fn ctx(settings_json: &str) -> (HostCtx, Arc<Mutex<String>>) {
 /// works; reuse the production constants purely to avoid a second
 /// hardcoded timeout/cap drifting from `core/src/plugin/host.rs`.
 fn test_http_driver() -> Arc<edlr_driver_http::HttpDriver> {
-    Arc::new(HttpDriver::new(HTTP_TIMEOUT, HTTP_MAX_BODY).expect("build test http driver"))
+    Arc::new(HttpDriver::new(HTTP_TIMEOUT, HTTP_MAX_BODY, test_handle()).expect("build test http driver"))
 }
 
 fn ctx_with_capabilities(
@@ -110,7 +110,7 @@ fn load_with_capabilities(
 #[test]
 fn load_and_init_ok() {
     let wasm = hello_logger_wasm();
-    let host = PluginHost::new().expect("host should start");
+    let host = PluginHost::new(test_handle()).expect("host should start");
     let (mut instance, _settings) = load(&host, &wasm, r#"{"enabled": true}"#);
 
     instance.call_init().expect("call_init should succeed");
@@ -119,7 +119,7 @@ fn load_and_init_ok() {
 #[test]
 fn on_event_ok() {
     let wasm = hello_logger_wasm();
-    let host = PluginHost::new().expect("host should start");
+    let host = PluginHost::new(test_handle()).expect("host should start");
     let (mut instance, _settings) = load(&host, &wasm, r#"{"enabled": true}"#);
 
     instance.call_init().expect("call_init should succeed");
@@ -131,7 +131,7 @@ fn on_event_ok() {
 #[test]
 fn on_event_ok_after_settings_swap() {
     let wasm = hello_logger_wasm();
-    let host = PluginHost::new().expect("host should start");
+    let host = PluginHost::new(test_handle()).expect("host should start");
     let (mut instance, settings) = load(&host, &wasm, r#"{"enabled": true}"#);
 
     instance.call_init().expect("call_init should succeed");
@@ -148,7 +148,7 @@ fn on_event_ok_after_settings_swap() {
 
 #[test]
 fn load_nonexistent_path_returns_err() {
-    let host = PluginHost::new().expect("host should start");
+    let host = PluginHost::new(test_handle()).expect("host should start");
     let (ctx, _settings) = ctx(r#"{}"#);
 
     let result = host.load(Path::new("/nonexistent/path/does-not-exist.wasm"), ctx);
@@ -159,7 +159,7 @@ fn load_nonexistent_path_returns_err() {
 #[test]
 fn busy_loop_on_event_hits_deadline() {
     let wasm = busy_loop_wasm();
-    let host = PluginHost::new().expect("host should start");
+    let host = PluginHost::new(test_handle()).expect("host should start");
     let (mut instance, _settings) = load(&host, &wasm, r#"{}"#);
 
     let start = Instant::now();
@@ -187,7 +187,7 @@ fn busy_loop_on_event_hits_deadline() {
 #[test]
 fn memory_hog_on_event_hits_memory_limit() {
     let wasm = memory_hog_wasm();
-    let host = PluginHost::new().expect("host should start");
+    let host = PluginHost::new(test_handle()).expect("host should start");
     let (mut instance, _settings) = load(&host, &wasm, r#"{}"#);
 
     instance.call_init().expect("call_init should succeed");
@@ -215,7 +215,7 @@ fn memory_hog_on_event_hits_memory_limit() {
 #[test]
 fn http_caller_on_event_does_not_trap_when_ungranted() {
     let wasm = http_caller_wasm();
-    let host = PluginHost::new().expect("host should start");
+    let host = PluginHost::new(test_handle()).expect("host should start");
     let (mut instance, _settings, _capabilities) =
         load_with_capabilities(&host, &wasm, r#"{}"#, NO_CAPABILITIES);
 
@@ -234,7 +234,7 @@ fn http_caller_on_event_does_not_trap_when_ungranted() {
 #[test]
 fn http_caller_on_event_does_not_trap_when_granted_for_allowed_host() {
     let wasm = http_caller_wasm();
-    let host = PluginHost::new().expect("host should start");
+    let host = PluginHost::new(test_handle()).expect("host should start");
 
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind throwaway listener");
     let addr = listener.local_addr().expect("local_addr");
@@ -257,7 +257,7 @@ fn http_caller_on_event_does_not_trap_when_granted_for_allowed_host() {
 #[test]
 fn http_caller_on_event_does_not_trap_when_granted_for_other_host() {
     let wasm = http_caller_wasm();
-    let host = PluginHost::new().expect("host should start");
+    let host = PluginHost::new(test_handle()).expect("host should start");
     let capabilities_json = r#"{"granted":true,"hosts":["https://other.example.com"]}"#;
     let (mut instance, _settings, _capabilities) =
         load_with_capabilities(&host, &wasm, r#"{}"#, capabilities_json);
@@ -266,4 +266,14 @@ fn http_caller_on_event_does_not_trap_when_granted_for_other_host() {
     instance
         .call_on_event("journal", None, Some("FSDJump"), "{}", false)
         .expect("on-event should not trap when granted for an unrelated host");
+}
+
+/// テスト全体で共有する runtime の Handle(`HttpDriver` の同期 `send` の
+/// `block_on` 先)。関数ローカルの Runtime だと drop 後の `block_on` で
+/// panic するため static に生かす。
+fn test_handle() -> tokio::runtime::Handle {
+    static RT: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
+    RT.get_or_init(|| tokio::runtime::Runtime::new().expect("build test runtime"))
+        .handle()
+        .clone()
 }

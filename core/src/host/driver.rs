@@ -471,9 +471,10 @@ pub struct DriverHost {
 }
 
 impl DriverHost {
-    pub fn new() -> anyhow::Result<DriverHost> {
+    /// `handle` はデーモンの tokio runtime のもの(`SharedDrivers::new` 参照)。
+    pub fn new(handle: tokio::runtime::Handle) -> anyhow::Result<DriverHost> {
         let engine = EpochEngine::new()?;
-        let drivers = SharedDrivers::new(DRIVER_HTTP_TIMEOUT)?;
+        let drivers = SharedDrivers::new(DRIVER_HTTP_TIMEOUT, handle)?;
 
         Ok(DriverHost { engine, drivers })
     }
@@ -639,7 +640,7 @@ mod tests {
             Arc::new(Mutex::new("[]".to_string())),
             bus,
             Arc::new(
-                edlr_driver_http::HttpDriver::new(DRIVER_HTTP_TIMEOUT, HTTP_MAX_BODY)
+                edlr_driver_http::HttpDriver::new(DRIVER_HTTP_TIMEOUT, HTTP_MAX_BODY, crate::host::drivers::test_handle())
                     .expect("http driver builds"),
             ),
             Arc::new(edlr_driver_process::ProcessDriver::new(
@@ -662,7 +663,7 @@ mod tests {
             Arc::new(Mutex::new(filesystem_json.to_string())),
             edlr_driver_channel::Bus::new(),
             Arc::new(
-                edlr_driver_http::HttpDriver::new(DRIVER_HTTP_TIMEOUT, HTTP_MAX_BODY)
+                edlr_driver_http::HttpDriver::new(DRIVER_HTTP_TIMEOUT, HTTP_MAX_BODY, crate::host::drivers::test_handle())
                     .expect("http driver builds"),
             ),
             Arc::new(edlr_driver_process::ProcessDriver::new(

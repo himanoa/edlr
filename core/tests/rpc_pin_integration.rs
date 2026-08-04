@@ -98,7 +98,7 @@ fn ed_state_driver_registry() -> (tempfile::TempDir, DriverRegistry) {
     let filesystem_config_store =
         FilesystemConfigStore::new(tmp.path().join("driver-settings"), Vec::new());
     let grants_store = GrantsStore::new_for_drivers(tmp.path().join("driver-grants"));
-    let host = DriverHost::new().expect("driver host should build");
+    let host = DriverHost::new(support::test_handle()).expect("driver host should build");
 
     let drivers = start_drivers(
         &drivers_dir,
@@ -161,7 +161,7 @@ fn secret_driver_registry() -> (tempfile::TempDir, DriverRegistry) {
     let filesystem_config_store =
         FilesystemConfigStore::new(tmp.path().join("driver-settings"), Vec::new());
     let grants_store = GrantsStore::new_for_drivers(tmp.path().join("driver-grants"));
-    let host = DriverHost::new().expect("driver host should build");
+    let host = DriverHost::new(support::test_handle()).expect("driver host should build");
 
     let drivers = start_drivers(
         &drivers_dir,
