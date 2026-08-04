@@ -13,6 +13,7 @@ use edlr_driver_channel::{Bus, Delivery};
 
 use crate::event::Event;
 use crate::manifest::{matches_event, Manifest};
+use crate::runner::plugin::queue::{PluginWorkSender, PushError};
 use crate::runtime::bus::parse_bus;
 use crate::runtime::dropped::DropCounters;
 
@@ -57,7 +58,7 @@ const BUS_SUBSCRIBER_SHUTDOWN_POLL_INTERVAL: Duration = Duration::from_millis(20
 pub(super) fn spawn_event_subscriber(
     manifest: Manifest,
     mut rx: broadcast::Receiver<Arc<Event>>,
-    work_tx: std_mpsc::SyncSender<PluginWork>,
+    work_tx: PluginWorkSender,
     drops: Arc<DropCounters>,
 ) {
     tokio::spawn(async move {
@@ -67,9 +68,9 @@ pub(super) fn spawn_event_subscriber(
                     if !matches_event(&manifest.events, &event) {
                         continue;
                     }
-                    match work_tx.try_send(PluginWork::Event(event)) {
+                    match work_tx.push(PluginWork::Event(event)) {
                         Ok(()) => {}
-                        Err(std_mpsc::TrySendError::Full(_)) => {
+                        Err(PushError::Dropped) => {
                             // journal の読み取り位置は配送の成否と独立に進むので、
                             // ここで捨てたイベントは replay でも戻らない。
                             // `plugins/list` に出すために数えておく。
@@ -80,7 +81,7 @@ pub(super) fn spawn_event_subscriber(
                                  dropping event for a slow/blocked plugin"
                             );
                         }
-                        Err(std_mpsc::TrySendError::Disconnected(_)) => {
+                        Err(PushError::Disconnected) => {
                             // プラグインスレッドが終了(disabled)済み。
                             break;
                         }
@@ -150,7 +151,7 @@ pub(super) fn spawn_bus_subscriber(
     manifest: Manifest,
     bus_json: Arc<Mutex<String>>,
     delivery_rx: std_mpsc::Receiver<Delivery>,
-    work_tx: std_mpsc::SyncSender<PluginWork>,
+    work_tx: PluginWorkSender,
     shutdown: Arc<AtomicBool>,
     drops: Arc<DropCounters>,
 ) {
@@ -182,9 +183,9 @@ pub(super) fn spawn_bus_subscriber(
             // 起点のプッシュ配信なので呼び出し元に返すエラーが無い。
             continue;
         }
-        match work_tx.try_send(PluginWork::Message(delivery)) {
+        match work_tx.push(PluginWork::Message(delivery)) {
             Ok(()) => {}
-            Err(std_mpsc::TrySendError::Full(_)) => {
+            Err(PushError::Dropped) => {
                 // バス配信は再送されないので、ここで捨てた分は失われる。
                 drops.record_bus_delivery_drop();
                 tracing::warn!(
@@ -193,7 +194,7 @@ pub(super) fn spawn_bus_subscriber(
                      dropping a bus delivery for a slow/blocked plugin"
                 );
             }
-            Err(std_mpsc::TrySendError::Disconnected(_)) => {
+            Err(PushError::Disconnected) => {
                 // プラグインスレッドが終了(disabled)済み。
                 break;
             }

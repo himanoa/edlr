@@ -9,11 +9,11 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc as std_mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use crate::runner::plugin::queue::{PluginWorkSender, PushError};
 use crate::runner::plugin::PluginWork;
 use crate::runtime::dropped::{DropCounters, DroppedCounts};
 use crate::schedule::ScheduleView;
@@ -32,7 +32,7 @@ const PLUGIN_STOP_JOIN_POLL_INTERVAL: Duration = Duration::from_millis(20);
 
 /// `ThreadSupervisor::plugin_threads` の 1 エントリ。`shutdown_all` 専用。
 struct PluginThreadHandle {
-    work_tx: std_mpsc::SyncSender<PluginWork>,
+    work_tx: PluginWorkSender,
     handle: thread::JoinHandle<()>,
     /// `Stop` のアウトオブバンド経路。ランナーループが毎周期(ワークキューを
     /// 読む前に)確認するので、有界キューに積まれた先行ワークを追い越せる。
@@ -102,7 +102,7 @@ impl ThreadSupervisor {
     pub(crate) fn register_thread(
         &self,
         id: &str,
-        work_tx: std_mpsc::SyncSender<PluginWork>,
+        work_tx: PluginWorkSender,
         handle: thread::JoinHandle<()>,
         stop_flag: Arc<AtomicBool>,
     ) {
@@ -226,13 +226,13 @@ impl ThreadSupervisor {
             thread_handle.stop_flag.store(true, Ordering::SeqCst);
 
             // 補助経路: `recv_timeout` で待ちに入っているスレッドを起こす。
-            match thread_handle.work_tx.try_send(PluginWork::Stop) {
+            match thread_handle.work_tx.push(PluginWork::Stop) {
                 Ok(()) => {}
-                Err(std_mpsc::TrySendError::Full(_)) => {
+                Err(PushError::Dropped) => {
                     // キューが満杯 = スレッドは待ちに入っていないので、
                     // 起こす必要が無い。次の周回でフラグを見る。
                 }
-                Err(std_mpsc::TrySendError::Disconnected(_)) => {
+                Err(PushError::Disconnected) => {
                     // プラグインスレッドは既に(trap などで)終了済み。
                 }
             }

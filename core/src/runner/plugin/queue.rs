@@ -20,7 +20,7 @@ fn admit(queue_len: usize, _work: &PluginWork) -> Admit {
     }
 }
 
-pub(super) fn channel() -> (PluginWorkSender, PluginWorkReceiver) {
+pub(crate) fn channel() -> (PluginWorkSender, PluginWorkReceiver) {
     let shared_state = Arc::new(SharedState {
         state: Mutex::new(QueueState {
             queue: VecDeque::new(),
@@ -46,7 +46,7 @@ struct SharedState {
     cond: Condvar,
 }
 
-pub struct PluginWorkSender(Arc<SharedState>);
+pub(crate) struct PluginWorkSender(Arc<SharedState>);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum PushError {
@@ -55,7 +55,7 @@ pub(crate) enum PushError {
 }
 
 impl PluginWorkSender {
-    pub(super) fn push(&self, work: PluginWork) -> Result<(), PushError> {
+    pub(crate) fn push(&self, work: PluginWork) -> Result<(), PushError> {
         let mut state = self.0.state.lock().unwrap_or_else(|p| p.into_inner());
 
         if !state.receiver_alive {
@@ -94,7 +94,7 @@ impl Drop for PluginWorkSender {
     }
 }
 
-pub struct PluginWorkReceiver(Arc<SharedState>);
+pub(crate) struct PluginWorkReceiver(Arc<SharedState>);
 
 impl Drop for PluginWorkReceiver {
     fn drop(&mut self) {
@@ -106,7 +106,7 @@ impl Drop for PluginWorkReceiver {
     }
 }
 impl PluginWorkReceiver {
-    pub(super) fn recv_timeout(
+    pub(crate) fn recv_timeout(
         &self,
         timeout: Duration,
     ) -> Result<PluginWork, std::sync::mpsc::RecvTimeoutError> {

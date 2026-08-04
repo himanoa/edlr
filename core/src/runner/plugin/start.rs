@@ -16,6 +16,7 @@ use crate::registry::driver::DriverRegistry;
 use crate::registry::plugin::{PluginEntry, PluginState, Registry};
 use crate::router::Router;
 use crate::runner::bootstrap::{build_initial_buffers, InitialBuffers};
+use crate::runner::plugin::queue::channel;
 use crate::runtime::bus::{bus_json_string, BusRuntimeEntry};
 use crate::runtime::dropped::DropCounters;
 use crate::schedule::store::ScheduleStore;
@@ -27,7 +28,7 @@ use super::event_loop::run_plugin_thread;
 use super::subscriber::{
     spawn_bus_subscriber, spawn_event_subscriber, subscribe_with_initial_value,
 };
-use super::{PluginWork, PLUGIN_WORK_QUEUE_CAPACITY};
+use super::PLUGIN_WORK_QUEUE_CAPACITY;
 
 /// `plugins_dir` を走査し、各プラグインをロードして専用タスクで駆動する。
 ///
@@ -205,9 +206,7 @@ fn load_and_run_plugin(
         .collect();
     let bus_json = Arc::new(Mutex::new(bus_json_string(&bus_entries)));
 
-    // journal イベントとバス配信を混ぜる 1 本の作業キュー(`PluginWork` の
-    // ドキュメントコメント参照)。
-    let (work_tx, work_rx) = std_mpsc::sync_channel::<PluginWork>(PLUGIN_WORK_QUEUE_CAPACITY);
+    let (work_tx, work_rx) = channel();
     let (ready_tx, ready_rx) = std_mpsc::channel::<PluginState>();
 
     // `Stop` のアウトオブバンド経路(`Registry::shutdown_plugins` が立てる)。

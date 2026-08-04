@@ -4,6 +4,7 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
+#[cfg(test)]
 use std::sync::mpsc as std_mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -23,6 +24,8 @@ use crate::registry::grants::DiskGrantService;
 use crate::registry::settings::DiskSettingsService;
 use crate::registry::sidecar::DiskSidecarService;
 use crate::registry::supervisor::ThreadSupervisor;
+use crate::runner::plugin::queue::PluginWorkSender;
+#[cfg(test)]
 use crate::runner::plugin::PluginWork;
 use crate::runtime::dropped::{DropCounters, DroppedCounts};
 use crate::schedule::{Clock, ScheduleState, ScheduleView};
@@ -299,7 +302,7 @@ impl Registry {
     pub(crate) fn register_plugin_thread(
         &self,
         id: &str,
-        work_tx: std_mpsc::SyncSender<PluginWork>,
+        work_tx: PluginWorkSender,
         handle: thread::JoinHandle<()>,
         stop_flag: Arc<AtomicBool>,
     ) {
@@ -794,12 +797,15 @@ pub(crate) mod tests {
             FilesystemConfigStore::new(tmp.join("driver-settings"), Vec::new()),
             GrantsStore::new_for_drivers(tmp.join("driver-grants")),
             edlr_driver_channel::Bus::new(),
-            crate::host::driver::DriverHost::new(crate::host::drivers::test_handle()).expect("driver host should build"),
+            crate::host::driver::DriverHost::new(crate::host::drivers::test_handle())
+                .expect("driver host should build"),
         )
     }
 
     fn empty_registry() -> Registry {
-        let host = Arc::new(PluginHost::new(crate::host::drivers::test_handle()).expect("host should start"));
+        let host = Arc::new(
+            PluginHost::new(crate::host::drivers::test_handle()).expect("host should start"),
+        );
         let tmp = tempfile::tempdir().unwrap();
         let settings_store = Arc::new(SettingsStore::new(tmp.path().join("settings")));
         let grants_store = Arc::new(GrantsStore::new(tmp.path().join("grants")));
@@ -909,7 +915,9 @@ pub(crate) mod tests {
     /// `options-from` の select を 1 件だけ持つプラグイン `speaky` を、渡された
     /// `Bus` 付きで載せた `Registry`。
     fn test_registry_with_dynamic_select(bus: edlr_driver_channel::Bus) -> Registry {
-        let host = Arc::new(PluginHost::new(crate::host::drivers::test_handle()).expect("host should start"));
+        let host = Arc::new(
+            PluginHost::new(crate::host::drivers::test_handle()).expect("host should start"),
+        );
         let tmp = tempfile::tempdir().unwrap();
         let settings_store = Arc::new(SettingsStore::new(tmp.path().join("settings")));
         let grants_store = Arc::new(GrantsStore::new(tmp.path().join("grants")));
@@ -1024,7 +1032,9 @@ pub(crate) mod tests {
     pub(crate) fn test_registry_with_bus_request_using(
         driver_registry: DriverRegistry,
     ) -> Registry {
-        let host = Arc::new(PluginHost::new(crate::host::drivers::test_handle()).expect("host should start"));
+        let host = Arc::new(
+            PluginHost::new(crate::host::drivers::test_handle()).expect("host should start"),
+        );
         let tmp = tempfile::tempdir().unwrap();
         let settings_store = Arc::new(SettingsStore::new(tmp.path().join("settings")));
         let grants_store = Arc::new(GrantsStore::new(tmp.path().join("grants")));
@@ -1069,7 +1079,9 @@ pub(crate) mod tests {
     /// 有無を呼び出し元が操作できる(fixture が `TempDir` を drop すると
     /// ディレクトリごと消えるため、所有権ごと返す)。
     pub(crate) fn test_registry_with_dashboard() -> (Registry, tempfile::TempDir) {
-        let host = Arc::new(PluginHost::new(crate::host::drivers::test_handle()).expect("host should start"));
+        let host = Arc::new(
+            PluginHost::new(crate::host::drivers::test_handle()).expect("host should start"),
+        );
         let tmp = tempfile::tempdir().unwrap();
         let settings_store = Arc::new(SettingsStore::new(tmp.path().join("settings")));
         let grants_store = Arc::new(GrantsStore::new(tmp.path().join("grants")));
@@ -1187,7 +1199,9 @@ pub(crate) mod tests {
     /// `list()`/`values()` に効く。
     fn test_registry_with_secret() -> (Registry, tempfile::TempDir) {
         let tmp = tempfile::tempdir().unwrap();
-        let host = Arc::new(PluginHost::new(crate::host::drivers::test_handle()).expect("host should start"));
+        let host = Arc::new(
+            PluginHost::new(crate::host::drivers::test_handle()).expect("host should start"),
+        );
         let settings_store = Arc::new(SettingsStore::new(tmp.path().join("settings")));
         let grants_store = Arc::new(GrantsStore::new(tmp.path().join("grants")));
         let sidecar_config_store = Arc::new(SidecarConfigStore::new(tmp.path().join("settings")));
@@ -1584,7 +1598,9 @@ pub(crate) mod tests {
     /// ファイルアクセスの取消が共有バッファへ速やかに反映されることを見る。
     #[test]
     fn revoking_filesystem_access_is_not_blocked_by_a_sidecar_stop_in_progress() {
-        let host = Arc::new(PluginHost::new(crate::host::drivers::test_handle()).expect("host should start"));
+        let host = Arc::new(
+            PluginHost::new(crate::host::drivers::test_handle()).expect("host should start"),
+        );
         let tmp = tempfile::tempdir().unwrap();
         let settings_store = Arc::new(SettingsStore::new(tmp.path().join("settings")));
         let grants_store = Arc::new(GrantsStore::new(tmp.path().join("grants")));
@@ -2127,7 +2143,9 @@ pub(crate) mod tests {
     /// so no amount of scheduling luck can reintroduce a disagreement.
     #[test]
     fn concurrent_set_capabilities_keeps_shared_buffer_consistent_with_disk() {
-        let host = Arc::new(PluginHost::new(crate::host::drivers::test_handle()).expect("host should start"));
+        let host = Arc::new(
+            PluginHost::new(crate::host::drivers::test_handle()).expect("host should start"),
+        );
         let tmp = tempfile::tempdir().unwrap();
         let settings_store = Arc::new(SettingsStore::new(tmp.path().join("settings")));
         let grants_store = Arc::new(GrantsStore::new(tmp.path().join("grants")));
@@ -2299,12 +2317,12 @@ pub(crate) mod tests {
         let registry = empty_registry();
         push_running_entry(&registry, "stoppable");
 
-        let (work_tx, work_rx) = std_mpsc::sync_channel::<PluginWork>(4);
+        let (work_tx, work_rx) = crate::runner::plugin::queue::channel();
         let stopped = Arc::new(AtomicBool::new(false));
         let handle = {
             let stopped = stopped.clone();
             thread::spawn(move || {
-                if let Ok(PluginWork::Stop) = work_rx.recv() {
+                if let Ok(PluginWork::Stop) = work_rx.recv_timeout(Duration::from_secs(5)) {
                     stopped.store(true, Ordering::SeqCst);
                 }
             })
@@ -2337,13 +2355,15 @@ pub(crate) mod tests {
         let registry = empty_registry();
         push_running_entry(&registry, "full-queue");
 
-        let (work_tx, work_rx) = std_mpsc::sync_channel::<PluginWork>(1);
-        // キューを埋めて `try_send(Stop)` が `Full` になるようにする。
-        work_tx
-            .try_send(PluginWork::Event(Arc::new(Event::Status {
-                raw: serde_json::json!({}),
-            })))
-            .expect("capacity-1 channel should accept the first send");
+        let (work_tx, work_rx) = crate::runner::plugin::queue::channel();
+        // キューを埋めて `push(Stop)` が `Dropped` になるようにする。
+        for _ in 0..crate::runner::plugin::PLUGIN_WORK_QUEUE_CAPACITY {
+            work_tx
+                .push(PluginWork::Event(Arc::new(Event::Status {
+                    raw: serde_json::json!({}),
+                })))
+                .expect("filling the queue up to capacity should succeed");
+        }
 
         let stop_flag = Arc::new(AtomicBool::new(false));
         let flushed = Arc::new(AtomicBool::new(false));

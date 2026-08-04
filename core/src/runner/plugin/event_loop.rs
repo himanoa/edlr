@@ -17,6 +17,7 @@ use crate::registry::plugin::{PluginState, Registry};
 use crate::schedule::store::ScheduleStore;
 use crate::schedule::{Clock, ScheduleState, ScheduleView};
 
+use super::queue::PluginWorkReceiver;
 use super::PluginWork;
 
 /// スケジュールが 1 件も無いプラグイン向けのフォールバックタイムアウト。
@@ -76,7 +77,7 @@ pub(super) fn run_plugin_thread(
     bus_json: Arc<Mutex<String>>,
     bus: Bus,
     registry: Registry,
-    work_rx: std_mpsc::Receiver<PluginWork>,
+    work_rx: PluginWorkReceiver,
     ready_tx: std_mpsc::Sender<PluginState>,
     stop_flag: Arc<AtomicBool>,
     schedule_store: Arc<ScheduleStore>,

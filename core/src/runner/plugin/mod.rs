@@ -37,7 +37,7 @@
 //! 関数 `next_action`/`LoopAction` に切り出してある。
 
 mod event_loop;
-mod queue;
+pub(crate) mod queue;
 mod start;
 mod subscriber;
 
@@ -111,7 +111,7 @@ use subscriber::{spawn_bus_subscriber, spawn_event_subscriber, subscribe_with_in
 /// 非ゼロのときだけ表示される)。この数値をチューニングする際は、まず
 /// そのカウンタを見ること -- 実際に何か捨てられているかも分からないまま
 /// 容量だけをいじるのは当て推量でしかない。
-const PLUGIN_WORK_QUEUE_CAPACITY: usize = 64;
+pub(crate) const PLUGIN_WORK_QUEUE_CAPACITY: usize = 64;
 
 /// プラグイン専用スレッドが処理する仕事。journal イベントとバスの配信を
 /// 1 本のキューに混ぜることで、wasm 呼び出しが 1 スレッドに直列化される
@@ -173,7 +173,7 @@ mod tests {
     #[tokio::test]
     async fn slow_plugin_channel_stays_bounded_and_publishing_does_not_block() {
         let (broadcast_tx, broadcast_rx) = broadcast::channel::<Arc<Event>>(4096);
-        let (work_tx, work_rx) = std_mpsc::sync_channel::<PluginWork>(PLUGIN_WORK_QUEUE_CAPACITY);
+        let (work_tx, work_rx) = queue::channel();
 
         let drops = DropCounters::new();
         spawn_event_subscriber(test_manifest(), broadcast_rx, work_tx, drops.clone());
@@ -199,7 +199,7 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(200)).await;
 
         let mut queued = 0usize;
-        while work_rx.try_recv().is_ok() {
+        while work_rx.recv_timeout(Duration::ZERO).is_ok() {
             queued += 1;
         }
 
@@ -322,7 +322,7 @@ mod tests {
         // 3. 同じ購読のまま再度 emit → 届かない
         let bus_json = Arc::new(Mutex::new(granted_entry(true)));
         let (delivery_tx, delivery_rx) = std_mpsc::sync_channel(4);
-        let (work_tx, work_rx) = std_mpsc::sync_channel::<PluginWork>(4);
+        let (work_tx, work_rx) = queue::channel();
         bus.subscribe("translator", "ed-state", "current-system", delivery_tx);
         spawn_bus_subscriber(
             test_manifest(),
@@ -336,7 +336,7 @@ mod tests {
         bus.emit("ed-state", "current-system", b"Sol".to_vec())
             .unwrap();
         tokio::time::sleep(Duration::from_millis(50)).await;
-        match work_rx.try_recv() {
+        match work_rx.recv_timeout(Duration::ZERO) {
             Ok(PluginWork::Message(delivery)) => assert_eq!(delivery.payload, b"Sol".to_vec()),
             other => panic!("expected a granted delivery to reach the plugin queue, got {other:?}"),
         }
@@ -350,7 +350,7 @@ mod tests {
             .unwrap();
         tokio::time::sleep(Duration::from_millis(50)).await;
         assert!(
-            work_rx.try_recv().is_err(),
+            work_rx.recv_timeout(Duration::ZERO).is_err(),
             "revoking the grant on the same running subscriber must stop further \
              deliveries immediately, without re-subscribing"
         );
@@ -382,7 +382,7 @@ mod tests {
             .expect("tokio runtime should build");
 
         let (delivery_tx, delivery_rx) = std_mpsc::sync_channel::<Delivery>(4);
-        let (work_tx, _work_rx) = std_mpsc::sync_channel::<PluginWork>(4);
+        let (work_tx, _work_rx) = queue::channel();
         let shutdown = Arc::new(AtomicBool::new(false));
 
         rt.block_on(async {
