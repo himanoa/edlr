@@ -37,6 +37,7 @@
 //! 関数 `next_action`/`LoopAction` に切り出してある。
 
 mod event_loop;
+mod queue;
 mod start;
 mod subscriber;
 
@@ -64,7 +65,9 @@ use crate::manifest::Manifest;
 use crate::runtime::dropped::DropCounters;
 
 #[cfg(test)]
-use event_loop::{deadline_verdict, next_action, DeadlineVerdict, LoopAction, CALL_DEADLINE_STRIKES};
+use event_loop::{
+    deadline_verdict, next_action, DeadlineVerdict, LoopAction, CALL_DEADLINE_STRIKES,
+};
 #[cfg(test)]
 use subscriber::{spawn_bus_subscriber, spawn_event_subscriber, subscribe_with_initial_value};
 
