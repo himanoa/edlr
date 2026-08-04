@@ -23,6 +23,7 @@ axum = { version = "0.8", features = ["ws"] }
 tower-http = { version = "0.6", features = ["fs"] }
 wasmtime = { version = "47.0.2", features = ["component-model"] }
 anyhow = "1.0.104"
+base64 = "0.22"
 wasmtime-wasi = "47.0.2"
 url = "2.5.8"
 sha2 = "0.10"

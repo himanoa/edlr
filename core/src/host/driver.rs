@@ -240,6 +240,20 @@ impl DriverHttpHost for DriverCtx {
                 edlr_driver_http::HttpError::Transport(msg) => WitDriverError::Transport(msg),
             })
     }
+
+    /// ドライバ側は未対応(issue http-driver-9znv の領分)。`interface
+    /// driver-http` は plugin/driver 両 world で共有されているため trait には
+    /// 現れるが、ドライバには完了通知の届け先(`on-job-complete` 相当の
+    /// export)がまだ無い。同期 `send` を使うこと。
+    fn submit_send(
+        &mut self,
+        _req: WitRequest,
+        _timeout_ms: Option<u32>,
+    ) -> Result<u64, WitDriverError> {
+        Err(WitDriverError::InvalidRequest(
+            "submit-send is not available to drivers yet; use send".to_string(),
+        ))
+    }
 }
 
 /// `bus-error` を関数を持たない型だけの interface(`bus-types`)に切り出した

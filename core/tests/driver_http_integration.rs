@@ -8,9 +8,11 @@
 //! the same path a real guest call would.
 
 use edlr_core::host::plugin::{
-    capabilities_json_string, HostCtx, WitDriverHttpHost as _, WitHttpError, WitHttpRequest,
-    FS_LIST_LIMIT, FS_READ_LIMIT, HTTP_MAX_BODY, HTTP_TIMEOUT,
+    capabilities_json_string, HostCtx, PluginJobs, WitDriverHttpHost as _, WitHttpError,
+    WitHttpRequest, FS_LIST_LIMIT, FS_READ_LIMIT, HTTP_MAX_BODY, HTTP_TIMEOUT,
 };
+use edlr_core::runner::plugin::queue::PluginWorkReceiver;
+use edlr_core::runner::plugin::PluginWork;
 use edlr_driver_http::HttpDriver;
 use std::net::TcpListener as StdTcpListener;
 use std::sync::{Arc, Mutex};
@@ -92,9 +94,23 @@ fn app() -> Router {
 /// mirroring how `runner.rs` builds one for a real plugin (minus settings,
 /// which these tests don't touch).
 fn ctx_with_driver(driver: Arc<HttpDriver>, hosts: &[&str]) -> HostCtx {
+    let (ctx, rx) = ctx_with_driver_and_queue(driver, hosts);
+    // submit 系を使わないテストでは受信側を forget で生かしたままにする
+    // (drop すると push が Disconnected になるため)。
+    std::mem::forget(rx);
+    ctx
+}
+
+/// `ctx_with_driver` の submit 系テスト用: 作業キューの受信側も返す。
+/// `submit-send` の完了通知(`PluginWork::JobComplete`)はこの受信側に届く。
+fn ctx_with_driver_and_queue(
+    driver: Arc<HttpDriver>,
+    hosts: &[&str],
+) -> (HostCtx, PluginWorkReceiver) {
     let hosts: Vec<String> = hosts.iter().map(|h| h.to_string()).collect();
     let capabilities_json = capabilities_json_string(&hosts);
-    HostCtx::new(
+    let (work_tx, work_rx) = edlr_core::runner::plugin::queue::channel();
+    let ctx = HostCtx::new(
         "test-plugin".to_string(),
         Arc::new(Mutex::new("{}".to_string())),
         Arc::new(Mutex::new(capabilities_json)),
@@ -108,7 +124,10 @@ fn ctx_with_driver(driver: Arc<HttpDriver>, hosts: &[&str]) -> HostCtx {
             Duration::from_secs(1),
         )),
         Arc::new(edlr_driver_fs::FsDriver::new(FS_READ_LIMIT, FS_LIST_LIMIT)),
-    )
+        work_tx,
+        PluginJobs::new(),
+    );
+    (ctx, work_rx)
 }
 
 /// テスト全体で共有する runtime の Handle。`HttpDriver` の同期 `send` は
@@ -264,4 +283,84 @@ fn unreachable_address_is_a_transport_error() {
         .expect_err("connection to a closed port should fail");
 
     assert!(matches!(err, WitHttpError::Transport(_)));
+}
+
+/// submit-send: 許可済みホストへの submit は即 job-id を返し、完了通知
+/// (`PluginWork::JobComplete`)が作業キューへ届く。届いた `result-json` は
+/// `{"ok":{"status":..,"headers":..,"body-base64":..}}` の形で、body は
+/// base64 で運ばれる。
+#[test]
+fn submit_send_delivers_a_job_complete_to_the_work_queue() {
+    use base64::Engine as _;
+
+    let base = spawn_test_server();
+    let (mut ctx, work_rx) = ctx_with_driver_and_queue(default_driver(), &[base.as_str()]);
+
+    let job_id = ctx
+        .submit_send(request("GET", &format!("{base}/echo-get"), Vec::new(), None), None)
+        .expect("submit to a granted host should be accepted");
+    assert_eq!(job_id, 1, "job ids start at 1");
+
+    let work = work_rx
+        .recv_timeout(Duration::from_secs(10))
+        .expect("the spawned job must push a completion to the work queue");
+    let PluginWork::JobComplete {
+        generation,
+        job_id: completed_id,
+        result_json,
+    } = work
+    else {
+        panic!("expected PluginWork::JobComplete, got {work:?}");
+    };
+    assert_eq!(generation, 0, "first instance generation is 0");
+    assert_eq!(completed_id, job_id);
+
+    let value: serde_json::Value = serde_json::from_str(&result_json).expect("valid result json");
+    assert_eq!(value["ok"]["status"], 200);
+    let body = base64::engine::general_purpose::STANDARD
+        .decode(value["ok"]["body-base64"].as_str().expect("body-base64"))
+        .expect("valid base64 body");
+    assert_eq!(body, b"hello from GET");
+}
+
+/// submit-send: 許可の無いホストは同期の permission-denied(spawn すら
+/// されず、job-id も消費されない)。
+#[test]
+fn submit_send_without_a_grant_is_a_synchronous_permission_denied() {
+    let base = spawn_test_server();
+    let (mut ctx, work_rx) = ctx_with_driver_and_queue(default_driver(), &[]);
+
+    let err = ctx
+        .submit_send(request("GET", &format!("{base}/echo-get"), Vec::new(), None), None)
+        .expect_err("submit without a grant must be rejected synchronously");
+    assert!(matches!(err, WitHttpError::PermissionDenied(_)));
+
+    // 完了通知も何も届かない(ジョブ自体が始まっていない)。
+    assert!(work_rx.recv_timeout(Duration::from_millis(100)).is_err());
+}
+
+/// submit-send のエラー結果も `on-job-complete` 経路で届く(同期エラーに
+/// なるのは受付時の判定だけ)。閉じたポートへの submit は受付は成功し、
+/// 完了通知が `{"err":{"kind":"transport",..}}` で届く。
+#[test]
+fn submit_send_transport_failures_arrive_as_err_results() {
+    let listener = StdTcpListener::bind("127.0.0.1:0").expect("bind throwaway listener");
+    let addr = listener.local_addr().expect("local_addr");
+    drop(listener);
+
+    let url = format!("http://{addr}/");
+    let (mut ctx, work_rx) =
+        ctx_with_driver_and_queue(default_driver(), &[format!("http://{addr}").as_str()]);
+
+    ctx.submit_send(request("GET", &url, Vec::new(), None), None)
+        .expect("submission itself succeeds; the failure arrives asynchronously");
+
+    let work = work_rx
+        .recv_timeout(Duration::from_secs(10))
+        .expect("the failed job must still push a completion");
+    let PluginWork::JobComplete { result_json, .. } = work else {
+        panic!("expected PluginWork::JobComplete, got {work:?}");
+    };
+    let value: serde_json::Value = serde_json::from_str(&result_json).expect("valid result json");
+    assert_eq!(value["err"]["kind"], "transport");
 }

@@ -105,7 +105,26 @@ impl HttpDriver {
         })
     }
 
+    /// デーモンの tokio runtime のハンドル。`submit` 系の呼び出し元
+    /// (`core` の `HostCtx::submit_send`)が非同期送信タスクを spawn する
+    /// のに使う。ドライバ自身の同期 `send` が `block_on` に使うものと同じ。
+    pub fn handle(&self) -> &Handle {
+        &self.handle
+    }
+
     /// Performs `req` and returns the response, or a typed error.
+    ///
+    /// `send_async` の同期ラッパ。呼び出し元はプラグイン/ドライバスレッド
+    /// (非ランタイムスレッド)である前提 — ランタイムのワーカースレッド上
+    /// から呼ぶと panic する。
+    pub fn send(&self, req: HttpRequest) -> Result<HttpResponse, HttpError> {
+        self.handle.clone().block_on(self.send_async(req, None))
+    }
+
+    /// Performs `req` and returns the response, or a typed error.
+    ///
+    /// `timeout` が `Some` なら、クライアント既定のタイムアウトの代わりに
+    /// このリクエストだけへ適用する(`submit-send` の timeout-ms 用)。
     ///
     /// Response bodies are read chunk by chunk with the size cap enforced
     /// before each chunk is appended: the driver never buffers more than
@@ -115,7 +134,11 @@ impl HttpDriver {
     /// cannot force unbounded memory growth. When the server *does* send a
     /// `Content-Length` header up front that already exceeds the cap, that
     /// is checked first as a fast path so nothing is downloaded at all.
-    pub fn send(&self, req: HttpRequest) -> Result<HttpResponse, HttpError> {
+    pub async fn send_async(
+        &self,
+        req: HttpRequest,
+        timeout: Option<Duration>,
+    ) -> Result<HttpResponse, HttpError> {
         let method: reqwest::Method = req.method.parse().map_err(|e| {
             HttpError::InvalidRequest(format!("invalid method {:?}: {e}", req.method))
         })?;
@@ -141,6 +164,9 @@ impl HttpDriver {
         }
 
         let mut builder = self.client.request(method, url);
+        if let Some(timeout) = timeout {
+            builder = builder.timeout(timeout);
+        }
         for (name, value) in &req.headers {
             builder = builder.header(name.as_str(), value.as_str());
         }
@@ -148,7 +174,7 @@ impl HttpDriver {
             builder = builder.body(body);
         }
 
-        self.handle.block_on(async {
+        {
             let mut response = builder
                 .send()
                 .await
@@ -199,7 +225,7 @@ impl HttpDriver {
                 headers,
                 body,
             })
-        })
+        }
     }
 }
 

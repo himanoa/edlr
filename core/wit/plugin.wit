@@ -1,4 +1,4 @@
-package edlr:plugin@0.4.0;
+package edlr:plugin@0.5.0;
 
 interface host-log {
   enum level { debug, info, warn, error }
@@ -27,6 +27,10 @@ interface driver-http {
     transport(string),
   }
   send: func(req: request) -> result<response, driver-error>;
+  // 非同期 submit。即 return し、ホストは中で await しない。結果は
+  // `on-job-complete` export へ job-id 付きで届く。
+  // timeout-ms: none なら 30_000。上限 60_000 にクランプ。
+  submit-send: func(req: request, timeout-ms: option<u32>) -> result<u64, driver-error>;
 }
 
 interface driver-process {
@@ -141,6 +145,7 @@ world plugin {
   export on-message: func(driver: string, topic: string, payload: list<u8>);
   // manifest の `[[schedule]]` エントリごとに、その name を渡して呼ばれる。
   export on-schedule: func(name: string);
+  export on-job-complete: func(job-id: u64, result-json: string);
   // デーモンの graceful shutdown 時に一度だけ呼ばれる。trap による
   // 無効化(disable)の後には呼ばれない。
   export on-stop: func();

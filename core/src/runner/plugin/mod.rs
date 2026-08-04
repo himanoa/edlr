@@ -37,7 +37,7 @@
 //! 関数 `next_action`/`LoopAction` に切り出してある。
 
 mod event_loop;
-pub(crate) mod queue;
+pub mod queue;
 mod start;
 mod subscriber;
 
@@ -125,9 +125,21 @@ pub(crate) const PLUGIN_WORK_QUEUE_CAPACITY: usize = 64;
 /// 送れないことがある -- `Registry::shutdown_plugins` が `try_send` の
 /// 失敗を warn ログにして諦める理由)。
 #[derive(Debug)]
-pub(crate) enum PluginWork {
+pub enum PluginWork {
     Event(Arc<Event>),
     Message(Delivery),
+    /// `driver-http.submit-send` 系ジョブの完了通知
+    /// (`crate::host::plugin::HostCtx::submit_send` が spawn したタスクが
+    /// push する)。`generation` はジョブ submit 時点のインスタンス世代
+    /// (`crate::host::plugin::PluginJobs`)で、インスタンス再作成後に届いた
+    /// 旧世代の完了は `event_loop` が捨てる。`queue::admit` は他の種別と
+    /// 違いこの variant を常に受け入れる(上界は容量 64 +
+    /// `SUBMIT_IN_FLIGHT_LIMIT` で有界のまま)。
+    JobComplete {
+        generation: u64,
+        job_id: u64,
+        result_json: String,
+    },
     Stop,
 }
 

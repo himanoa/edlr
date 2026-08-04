@@ -12,15 +12,23 @@ enum Admit {
     DropNewest,
 }
 
-fn admit(queue_len: usize, _work: &PluginWork) -> Admit {
-    if queue_len >= PLUGIN_WORK_QUEUE_CAPACITY {
-        Admit::DropNewest
-    } else {
-        Admit::Accept
+fn admit(queue_len: usize, work: &PluginWork) -> Admit {
+    match work {
+        // 完了通知は捨てない: 捨てるとプラグインから見て「submit は成功
+        // したのに結果が永遠に来ない」になる。総量は容量 64 +
+        // `SUBMIT_IN_FLIGHT_LIMIT`(未完了 submit の上限)で有界のまま。
+        PluginWork::JobComplete { .. } => Admit::Accept,
+        PluginWork::Event(_) | PluginWork::Message(_) | PluginWork::Stop => {
+            if queue_len >= PLUGIN_WORK_QUEUE_CAPACITY {
+                Admit::DropNewest
+            } else {
+                Admit::Accept
+            }
+        }
     }
 }
 
-pub(crate) fn channel() -> (PluginWorkSender, PluginWorkReceiver) {
+pub fn channel() -> (PluginWorkSender, PluginWorkReceiver) {
     let shared_state = Arc::new(SharedState {
         state: Mutex::new(QueueState {
             queue: VecDeque::new(),
@@ -46,16 +54,16 @@ struct SharedState {
     cond: Condvar,
 }
 
-pub(crate) struct PluginWorkSender(Arc<SharedState>);
+pub struct PluginWorkSender(Arc<SharedState>);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum PushError {
+pub enum PushError {
     Dropped,
     Disconnected,
 }
 
 impl PluginWorkSender {
-    pub(crate) fn push(&self, work: PluginWork) -> Result<(), PushError> {
+    pub fn push(&self, work: PluginWork) -> Result<(), PushError> {
         let mut state = self.0.state.lock().unwrap_or_else(|p| p.into_inner());
 
         if !state.receiver_alive {
@@ -94,7 +102,7 @@ impl Drop for PluginWorkSender {
     }
 }
 
-pub(crate) struct PluginWorkReceiver(Arc<SharedState>);
+pub struct PluginWorkReceiver(Arc<SharedState>);
 
 impl Drop for PluginWorkReceiver {
     fn drop(&mut self) {
@@ -106,7 +114,7 @@ impl Drop for PluginWorkReceiver {
     }
 }
 impl PluginWorkReceiver {
-    pub(crate) fn recv_timeout(
+    pub fn recv_timeout(
         &self,
         timeout: Duration,
     ) -> Result<PluginWork, std::sync::mpsc::RecvTimeoutError> {
@@ -173,6 +181,21 @@ mod tests {
         fn at_capacity_drops_newest() {
             let verdict = admit(PLUGIN_WORK_QUEUE_CAPACITY, &PluginWork::Stop);
             assert_eq!(verdict, Admit::DropNewest);
+        }
+
+        /// `JobComplete` だけは満杯でも受け入れる(issue-sizx 決定 2)。
+        /// 捨てると「submit は成功したのに結果が永遠に来ない」になるため。
+        #[test]
+        fn job_complete_is_accepted_even_at_capacity() {
+            let verdict = admit(
+                PLUGIN_WORK_QUEUE_CAPACITY,
+                &PluginWork::JobComplete {
+                    generation: 0,
+                    job_id: 1,
+                    result_json: "{}".to_string(),
+                },
+            );
+            assert_eq!(verdict, Admit::Accept);
         }
     }
 

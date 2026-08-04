@@ -3,12 +3,16 @@
 //! interruption so a runaway guest traps instead of hanging the kernel.
 
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use wasmtime::component::{Component, HasSelf, Linker, ResourceTable};
 use wasmtime::{Store, StoreLimits, StoreLimitsBuilder, Trap};
 use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
+
+use crate::runner::plugin::queue::PluginWorkSender;
+use crate::runner::plugin::PluginWork;
 
 use super::drivers::SharedDrivers;
 use super::engine::{deadline_ticks, EpochEngine};
@@ -149,9 +153,121 @@ const PLUGIN_MEMORY_LIMIT: usize = 64 * 1024 * 1024;
 const PLUGIN_INSTANCE_LIMIT: usize = 8;
 const PLUGIN_TABLE_LIMIT: usize = 8;
 
+/// `driver-http.submit-send` 系ジョブの、1 プラグイン(スレッド)ぶんの
+/// 共有状態。
+///
+/// `HostCtx` はインスタンス再作成(deadline 復帰、`runner::plugin::event_loop`
+/// の `handle_call_result!` 参照)のたびに作り直されるため、この状態は
+/// `HostCtx` 自身ではなく `Arc` でプラグイン専用スレッドと共有する:
+/// job id は再作成をまたいで一意のまま、`generation` は再作成の検出に使う。
+pub struct PluginJobs {
+    /// 次に採番する job id(1 始まり。0 は「無効」用に空けておく)。
+    next_job_id: AtomicU64,
+    /// 現在のインスタンス世代。`bump_generation`(再作成時に runner が呼ぶ)
+    /// で進む。submit 時点の値を `PluginWork::JobComplete` に写し、受信側は
+    /// 現在値と一致しない完了を捨てる -- 再作成前のインスタンスが submit した
+    /// ジョブの結果を、状態を失った新インスタンスへ届けないため。
+    generation: AtomicU64,
+    /// 未完了 submit の数。`SUBMIT_IN_FLIGHT_LIMIT` で頭打ちにする。
+    in_flight: AtomicU64,
+}
+
+impl PluginJobs {
+    #[allow(clippy::new_without_default)]
+    pub fn new() -> Arc<PluginJobs> {
+        Arc::new(PluginJobs {
+            next_job_id: AtomicU64::new(1),
+            generation: AtomicU64::new(0),
+            in_flight: AtomicU64::new(0),
+        })
+    }
+
+    pub fn current_generation(&self) -> u64 {
+        self.generation.load(Ordering::Acquire)
+    }
+
+    /// インスタンス再作成時に runner が呼ぶ。以後、旧世代の
+    /// `PluginWork::JobComplete` は配送されない。
+    pub fn bump_generation(&self) {
+        self.generation.fetch_add(1, Ordering::AcqRel);
+    }
+
+    /// 「上限未満なら 1 枠取る」を原子的に行う。上限到達なら `Err`。
+    fn try_acquire_slot(&self) -> Result<(), ()> {
+        self.in_flight
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
+                (n < SUBMIT_IN_FLIGHT_LIMIT).then_some(n + 1)
+            })
+            .map(|_| ())
+            .map_err(|_| ())
+    }
+
+    fn release_slot(&self) {
+        self.in_flight.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+/// 1 インスタンスが同時に持てる未完了 submit の上限。超過した
+/// `submit-send` は(ブロックせず)即エラーになる。旧 send-async 設計から
+/// 引き継いだ値で、強い根拠は無い -- 「詰まったジョブでメモリと完了通知
+/// キューを際限なく埋めさせない」程度の線。
+pub const SUBMIT_IN_FLIGHT_LIMIT: u64 = 8;
+
+/// `submit-send` の `timeout-ms` 省略時の既定値。
+const SUBMIT_DEFAULT_TIMEOUT_MS: u32 = 30_000;
+
+/// `submit-send` の `timeout-ms` の上限(これを超える指定はクランプ)。
+const SUBMIT_MAX_TIMEOUT_MS: u32 = 60_000;
+
+/// `timeout-ms` 引数を実際のタイムアウトへ解決する(既定 30 秒、上限
+/// 60 秒にクランプ)。`HTTP_TIMEOUT`(1.5 秒)< `CALL_DEADLINE` の const
+/// assert は submit には適用されない -- 呼び出し自体は即返り、待つのは
+/// spawn されたタスクだけなので、ゲスト呼び出しの deadline とは無関係。
+fn submit_timeout(timeout_ms: Option<u32>) -> Duration {
+    let ms = timeout_ms
+        .unwrap_or(SUBMIT_DEFAULT_TIMEOUT_MS)
+        .min(SUBMIT_MAX_TIMEOUT_MS);
+    Duration::from_millis(u64::from(ms))
+}
+
+/// submit 系ジョブの結果を `on-job-complete` の `result-json` 文字列へ
+/// 整形する純関数。
+///
+/// 形は `{"ok":{"status":u16,"headers":[[k,v],..],"body-base64":".."}}` か
+/// `{"err":{"kind":"invalid-request"|"transport","message":".."}}`。
+/// body はバイト列なので base64 で運ぶ(JSON 文字列に生バイトは載らない)。
+/// `permission-denied` はここに来ない -- submit 受付時に同期エラーとして
+/// 返している。
+fn job_result_json(result: Result<edlr_driver_http::HttpResponse, edlr_driver_http::HttpError>) -> String {
+    use base64::Engine as _;
+    let value = match result {
+        Ok(response) => serde_json::json!({
+            "ok": {
+                "status": response.status,
+                "headers": response.headers,
+                "body-base64": base64::engine::general_purpose::STANDARD.encode(&response.body),
+            }
+        }),
+        Err(edlr_driver_http::HttpError::InvalidRequest(message)) => serde_json::json!({
+            "err": { "kind": "invalid-request", "message": message }
+        }),
+        Err(edlr_driver_http::HttpError::Transport(message)) => serde_json::json!({
+            "err": { "kind": "transport", "message": message }
+        }),
+    };
+    value.to_string()
+}
+
 /// Per-plugin-instance host state, exposed to the guest via the generated
 /// `Host` traits.
 pub struct HostCtx {
+    /// このプラグインの作業キューの送信側。`submit_send` が spawn した
+    /// タスクが完了通知(`PluginWork::JobComplete`)を push するのに使う。
+    work_tx: PluginWorkSender,
+    /// submit 系ジョブの共有状態(job id 採番・世代・in-flight 数)。
+    /// インスタンス再作成をまたいで同じ `Arc` を受け取る
+    /// (`PluginJobs` のドキュメントコメント参照)。
+    jobs: Arc<PluginJobs>,
     pub plugin_id: String,
     /// Effective settings JSON string. Wrapped so the runner can swap the
     /// value in place between calls without reloading the plugin.
@@ -236,8 +352,12 @@ impl HostCtx {
         http_driver: Arc<edlr_driver_http::HttpDriver>,
         process_driver: Arc<edlr_driver_process::ProcessDriver>,
         fs_driver: Arc<edlr_driver_fs::FsDriver>,
+        work_tx: PluginWorkSender,
+        jobs: Arc<PluginJobs>,
     ) -> HostCtx {
         HostCtx {
+            work_tx,
+            jobs,
             plugin_id,
             settings_json,
             capabilities_json,
@@ -376,6 +496,67 @@ impl DriverHttpHost for HostCtx {
                 }
                 edlr_driver_http::HttpError::Transport(msg) => WitDriverError::Transport(msg),
             })
+    }
+
+    /// 非同期 submit。`send` と同じ許可判定を**同期で**行ってから、実際の
+    /// 送信は tokio タスクへ spawn して即 `Ok(job-id)` を返す(ホストは中で
+    /// await しない)。結果は spawn したタスクが `PluginWork::JobComplete` と
+    /// して作業キューへ push し、プラグイン専用スレッドが `on-job-complete`
+    /// export で届ける。
+    ///
+    /// - 許可判定は `send` と同一(`capabilities_json` のみが判定材料)。
+    ///   拒否は同期の `permission-denied`
+    /// - in-flight 上限(`SUBMIT_IN_FLIGHT_LIMIT`)超過は同期の `transport`
+    ///   エラー。**ブロックしない**(バックプレッシャ禁止 --
+    ///   docs/async-migration.md 不変条件 3)
+    /// - タイムアウトは `submit_timeout` 参照。レスポンスサイズ上限は
+    ///   同期 `send` と同じ `HTTP_MAX_BODY`(`HttpDriver` が持つ)
+    /// - spawn 内は async のまま完結させる(`block_on` しない)。デーモン
+    ///   終了時に残っていたタスクは `Runtime::drop` で abort されるだけで
+    ///   よく、push の失敗(キュー切断)も静かに捨てる
+    fn submit_send(
+        &mut self,
+        req: WitRequest,
+        timeout_ms: Option<u32>,
+    ) -> Result<u64, WitDriverError> {
+        let raw = self
+            .capabilities_json
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        let hosts = parse_capability_hosts(&raw);
+        check_http_permission(&hosts, &req.url).map_err(WitDriverError::PermissionDenied)?;
+
+        if self.jobs.try_acquire_slot().is_err() {
+            return Err(WitDriverError::Transport(format!(
+                "submit queue full ({SUBMIT_IN_FLIGHT_LIMIT} jobs already in flight)"
+            )));
+        }
+
+        let job_id = self.jobs.next_job_id.fetch_add(1, Ordering::Relaxed);
+        let generation = self.jobs.current_generation();
+        let timeout = submit_timeout(timeout_ms);
+        let driver_request = edlr_driver_http::HttpRequest {
+            method: req.method,
+            url: req.url,
+            headers: req.headers,
+            body: req.body,
+        };
+
+        let http_driver = self.http_driver.clone();
+        let work_tx = self.work_tx.clone();
+        let jobs = self.jobs.clone();
+        self.http_driver.handle().spawn(async move {
+            let result = http_driver.send_async(driver_request, Some(timeout)).await;
+            jobs.release_slot();
+            let _ = work_tx.push(PluginWork::JobComplete {
+                generation,
+                job_id,
+                result_json: job_result_json(result),
+            });
+        });
+
+        Ok(job_id)
     }
 }
 
@@ -873,6 +1054,20 @@ impl PluginInstance {
             .map_err(|e| PluginCallError::classify("on-schedule", e))
     }
 
+    /// `submit-send` 系ジョブの完了を届ける。呼ばれる時点で結果は揃って
+    /// いるので、他の export と同じ同期呼び出し・同じ epoch deadline。
+    pub fn call_on_job_complete(
+        &mut self,
+        job_id: u64,
+        result_json: &str,
+    ) -> Result<(), PluginCallError> {
+        self.store
+            .set_epoch_deadline(deadline_ticks(Self::CALL_DEADLINE));
+        self.bindings
+            .call_on_job_complete(&mut self.store, job_id, result_json)
+            .map_err(|e| PluginCallError::classify("on-job-complete", e))
+    }
+
     /// デーモンの graceful shutdown 時に一度だけ呼ぶ。trap による無効化
     /// (disable)の後には呼ばない -- 呼び出し元(daemon shutdown 経路)の
     /// 責務。
@@ -900,13 +1095,26 @@ mod tests {
 
     fn test_http_driver() -> Arc<edlr_driver_http::HttpDriver> {
         Arc::new(
-            edlr_driver_http::HttpDriver::new(HTTP_TIMEOUT, HTTP_MAX_BODY, crate::host::drivers::test_handle())
-                .expect("build test http driver"),
+            edlr_driver_http::HttpDriver::new(
+                HTTP_TIMEOUT,
+                HTTP_MAX_BODY,
+                crate::host::drivers::test_handle(),
+            )
+            .expect("build test http driver"),
         )
     }
 
     fn test_fs_driver() -> Arc<edlr_driver_fs::FsDriver> {
         Arc::new(edlr_driver_fs::FsDriver::new(FS_READ_LIMIT, FS_LIST_LIMIT))
+    }
+
+    /// submit 系を使わないテスト用の作業キュー送信側。受信側は `forget` で
+    /// 生かしたままにする(drop すると `push` が `Disconnected` になり、
+    /// submit 系のテストが偽の失敗経路を踏むため)。
+    fn test_work_tx() -> crate::runner::plugin::queue::PluginWorkSender {
+        let (tx, rx) = crate::runner::plugin::queue::channel();
+        std::mem::forget(rx);
+        tx
     }
 
     fn ctx(capabilities_json: &str) -> HostCtx {
@@ -924,6 +1132,8 @@ mod tests {
                 SIDECAR_SPAWN_MIN_INTERVAL,
             )),
             test_fs_driver(),
+            test_work_tx(),
+            PluginJobs::new(),
         )
     }
 
@@ -1008,6 +1218,8 @@ mod tests {
                 Duration::from_secs(1),
             )),
             test_fs_driver(),
+            test_work_tx(),
+            PluginJobs::new(),
         )
     }
 
@@ -1026,6 +1238,8 @@ mod tests {
                 Duration::from_secs(1),
             )),
             test_fs_driver(),
+            test_work_tx(),
+            PluginJobs::new(),
         )
     }
 
@@ -1230,6 +1444,8 @@ mod tests {
                 Duration::from_secs(1),
             )),
             test_fs_driver(),
+            test_work_tx(),
+            PluginJobs::new(),
         );
 
         ctx.ensure_started("tts".to_string()).expect("start");
@@ -1274,14 +1490,20 @@ mod tests {
             Arc::new(Mutex::new(bus_json_string(entries))),
             bus,
             Arc::new(
-                edlr_driver_http::HttpDriver::new(HTTP_TIMEOUT, HTTP_MAX_BODY, crate::host::drivers::test_handle())
-                    .expect("http driver builds"),
+                edlr_driver_http::HttpDriver::new(
+                    HTTP_TIMEOUT,
+                    HTTP_MAX_BODY,
+                    crate::host::drivers::test_handle(),
+                )
+                .expect("http driver builds"),
             ),
             Arc::new(edlr_driver_process::ProcessDriver::new(
                 SIDECAR_SHUTDOWN_GRACE,
                 SIDECAR_SPAWN_MIN_INTERVAL,
             )),
             Arc::new(edlr_driver_fs::FsDriver::new(FS_READ_LIMIT, FS_LIST_LIMIT)),
+            test_work_tx(),
+            PluginJobs::new(),
         )
     }
 
@@ -1374,5 +1596,88 @@ mod tests {
             ctx.get("ed-state".into(), "ship-status".into()),
             Err(WitBusError::PermissionDenied(_))
         ));
+    }
+
+    /// `submit_timeout` は `timeout-ms` 引数の解決だけを行う純関数。
+    /// 既定 30 秒・上限 60 秒クランプの 3 点を確認する。
+    mod submit_timeout_tests {
+        use super::*;
+
+        #[test]
+        fn none_uses_the_default() {
+            assert_eq!(submit_timeout(None), Duration::from_millis(30_000));
+        }
+
+        #[test]
+        fn explicit_values_pass_through() {
+            assert_eq!(submit_timeout(Some(500)), Duration::from_millis(500));
+        }
+
+        #[test]
+        fn values_above_the_cap_are_clamped() {
+            assert_eq!(submit_timeout(Some(120_000)), Duration::from_millis(60_000));
+        }
+    }
+
+    /// `job_result_json` は submit 結果 → `result-json` 文字列の整形だけを
+    /// 行う純関数。ok / err 両形と body の base64 を確認する。
+    mod job_result_json_tests {
+        use super::*;
+        use base64::Engine as _;
+
+        #[test]
+        fn ok_carries_status_headers_and_base64_body() {
+            let json = job_result_json(Ok(edlr_driver_http::HttpResponse {
+                status: 201,
+                headers: vec![("x-a".to_string(), "b".to_string())],
+                body: b"\x00\x01binary".to_vec(),
+            }));
+            let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+            assert_eq!(value["ok"]["status"], 201);
+            assert_eq!(value["ok"]["headers"][0][0], "x-a");
+            let body = base64::engine::general_purpose::STANDARD
+                .decode(value["ok"]["body-base64"].as_str().unwrap())
+                .unwrap();
+            assert_eq!(body, b"\x00\x01binary");
+        }
+
+        #[test]
+        fn transport_errors_carry_kind_and_message() {
+            let json = job_result_json(Err(edlr_driver_http::HttpError::Transport(
+                "boom".to_string(),
+            )));
+            let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+            assert_eq!(value["err"]["kind"], "transport");
+            assert_eq!(value["err"]["message"], "boom");
+        }
+
+        #[test]
+        fn invalid_request_errors_carry_kind() {
+            let json = job_result_json(Err(edlr_driver_http::HttpError::InvalidRequest(
+                "bad".to_string(),
+            )));
+            let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+            assert_eq!(value["err"]["kind"], "invalid-request");
+        }
+    }
+
+    /// in-flight 上限の枠取り(`PluginJobs::try_acquire_slot`)の境界。
+    /// ネットワークを触らずに「上限まで取れる・上限で弾く・解放で戻る」を
+    /// 確認する。
+    #[test]
+    fn in_flight_slots_are_bounded_and_released() {
+        let jobs = PluginJobs::new();
+        for _ in 0..SUBMIT_IN_FLIGHT_LIMIT {
+            assert!(jobs.try_acquire_slot().is_ok());
+        }
+        assert!(
+            jobs.try_acquire_slot().is_err(),
+            "acquiring past SUBMIT_IN_FLIGHT_LIMIT must fail"
+        );
+        jobs.release_slot();
+        assert!(
+            jobs.try_acquire_slot().is_ok(),
+            "a released slot must become acquirable again"
+        );
     }
 }

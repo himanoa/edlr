@@ -116,7 +116,7 @@ Documentation under `docs/` is currently written in Japanese.
 ## Status
 
 edlr is under active development and has no stable release yet. The plugin ABI
-(WIT package `edlr:plugin`, currently `@0.4.0`) is still evolving and breaks
+(WIT package `edlr:plugin`, currently `@0.5.0`) is still evolving and breaks
 between versions — plugins must be rebuilt against the current `core/wit` when
 the version bumps.
 

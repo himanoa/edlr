@@ -44,6 +44,8 @@ impl Guest for HelloLogger {
         );
     }
 
+    fn on_job_complete(_job_id: u64, _result_json: String) {}
+
     fn on_schedule(_name: String) {}
 
     fn on_stop() {}

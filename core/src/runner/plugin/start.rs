@@ -225,6 +225,10 @@ fn load_and_run_plugin(
         let registry = registry.clone();
         let stop_flag = stop_flag.clone();
         let schedule_store = schedule_store.clone();
+        // `submit-send` の完了通知(`PluginWork::JobComplete`)を自分の
+        // キューへ push するため、スレッド自身も送信側を持つ
+        // (`HostCtx::submit_send` が spawn するタスクへ配る)。
+        let work_tx = work_tx.clone();
         move || {
             run_plugin_thread(
                 host,
@@ -238,6 +242,7 @@ fn load_and_run_plugin(
                 bus,
                 registry,
                 work_rx,
+                work_tx,
                 ready_tx,
                 stop_flag,
                 schedule_store,

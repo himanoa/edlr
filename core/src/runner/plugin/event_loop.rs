@@ -11,13 +11,13 @@ use std::time::Duration;
 use edlr_driver_channel::Bus;
 
 use crate::event::Event;
-use crate::host::plugin::{HostCtx, PluginCallError, PluginHost, PluginInstance};
+use crate::host::plugin::{HostCtx, PluginCallError, PluginHost, PluginInstance, PluginJobs};
 use crate::manifest::Manifest;
 use crate::registry::plugin::{PluginState, Registry};
 use crate::schedule::store::ScheduleStore;
 use crate::schedule::{Clock, ScheduleState, ScheduleView};
 
-use super::queue::PluginWorkReceiver;
+use super::queue::{PluginWorkReceiver, PluginWorkSender};
 use super::PluginWork;
 
 /// スケジュールが 1 件も無いプラグイン向けのフォールバックタイムアウト。
@@ -63,6 +63,26 @@ pub(super) fn deadline_verdict(strikes: u32) -> DeadlineVerdict {
     }
 }
 
+/// `PluginWork::JobComplete` を届けるか捨てるかの判定(純関数)。
+///
+/// インスタンス再作成(deadline 復帰)で `PluginJobs::bump_generation` が
+/// 世代を進めるため、submit 時点の世代と現在の世代が一致しない完了は
+/// 「旧インスタンスのジョブ」であり、状態を失った新インスタンスへは
+/// 届けない(issue-sizx 決定 6)。
+#[derive(Debug, PartialEq)]
+enum JobCompletionVerdict {
+    Deliver,
+    DropStale,
+}
+
+fn job_completion_verdict(job_generation: u64, current_generation: u64) -> JobCompletionVerdict {
+    if job_generation == current_generation {
+        JobCompletionVerdict::Deliver
+    } else {
+        JobCompletionVerdict::DropStale
+    }
+}
+
 /// プラグイン専用スレッドの本体。`load` → `call_init` → イベントループを
 /// 直列に実行する。すべての wasm 呼び出しはこのスレッド上でのみ発生する。
 #[allow(clippy::too_many_arguments)]
@@ -78,10 +98,15 @@ pub(super) fn run_plugin_thread(
     bus: Bus,
     registry: Registry,
     work_rx: PluginWorkReceiver,
+    work_tx: PluginWorkSender,
     ready_tx: std_mpsc::Sender<PluginState>,
     stop_flag: Arc<AtomicBool>,
     schedule_store: Arc<ScheduleStore>,
 ) {
+    // submit 系ジョブの共有状態。インスタンス再作成をまたいで同じ `Arc` を
+    // 各 `HostCtx` へ配る(`PluginJobs` のドキュメントコメント参照)。
+    let jobs = PluginJobs::new();
+
     // trap 時にこのプラグインの購読を `Bus` の購読表から取り除くために手元に
     // 残しておく(`ctx` へ渡す方は `HostCtx::new` に move する)。
     // `edlr_driver_channel::Bus::unsubscribe_plugin` のドキュメントコメント
@@ -105,6 +130,8 @@ pub(super) fn run_plugin_thread(
             host.http_driver(),
             host.process_driver(),
             host.fs_driver(),
+            work_tx.clone(),
+            jobs.clone(),
         );
         let mut instance = host
             .load(&entry_path, ctx)
@@ -203,6 +230,11 @@ pub(super) fn run_plugin_thread(
                              not fit the deadline)"
                         ));
                     }
+                    // 再作成の前に世代を進める: 旧インスタンスが submit した
+                    // ジョブの完了(`PluginWork::JobComplete`)は、wasm 線形
+                    // メモリごと状態を失った新インスタンスには届けない
+                    // (`PluginJobs::generation` のドキュメントコメント参照)。
+                    jobs.bump_generation();
                     match load_instance() {
                         Ok(fresh) => {
                             tracing::warn!(
@@ -293,6 +325,26 @@ pub(super) fn run_plugin_thread(
                         &delivery.topic,
                         &delivery.payload,
                     ),
+                    PluginWork::JobComplete {
+                        generation,
+                        job_id,
+                        result_json,
+                    } => match job_completion_verdict(*generation, jobs.current_generation()) {
+                        JobCompletionVerdict::Deliver => {
+                            instance.call_on_job_complete(*job_id, result_json)
+                        }
+                        JobCompletionVerdict::DropStale => {
+                            // 旧世代のインスタンスが submit したジョブ。新
+                            // インスタンスはそのジョブを知らない(wasm 線形
+                            // メモリごと状態を失っている)ので、呼ばずに捨てる。
+                            tracing::debug!(
+                                plugin_id = %manifest.id,
+                                job_id,
+                                "dropping a job completion from a previous instance generation"
+                            );
+                            Ok(())
+                        }
+                    },
                     // `next_action` は `PluginWork::Stop` を `LoopAction::Handle`
                     // ではなく専用の `LoopAction::Stop` に振り分けるので、ここに
                     // 来ることはない。
@@ -423,5 +475,43 @@ fn event_params(event: &Event) -> (&'static str, Option<String>, Option<String>,
             *replay,
         ),
         Event::Status { raw } => ("status", None, None, raw.to_string(), false),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `job_completion_verdict` は「旧世代の完了を捨てる」判定だけの純関数
+    /// (issue-sizx 決定 6)。trap/deadline でインスタンスが再作成された後、
+    /// 旧インスタンスが submit したジョブの完了が新インスタンスに届かない
+    /// ことの芯になる。
+    mod job_completion_verdict_tests {
+        use super::*;
+
+        #[test]
+        fn matching_generation_delivers() {
+            assert_eq!(job_completion_verdict(0, 0), JobCompletionVerdict::Deliver);
+            assert_eq!(job_completion_verdict(3, 3), JobCompletionVerdict::Deliver);
+        }
+
+        #[test]
+        fn stale_generation_is_dropped() {
+            // 再作成で bump された後、旧世代のジョブは捨てられる。
+            assert_eq!(
+                job_completion_verdict(0, 1),
+                JobCompletionVerdict::DropStale
+            );
+        }
+
+        #[test]
+        fn future_generation_is_also_dropped() {
+            // 起こらないはずの組み合わせだが、等値以外は全部捨てる
+            // (「一致したときだけ届ける」が仕様)。
+            assert_eq!(
+                job_completion_verdict(2, 1),
+                JobCompletionVerdict::DropStale
+            );
+        }
     }
 }

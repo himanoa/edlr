@@ -1,5 +1,6 @@
 use edlr_core::host::plugin::{
-    HostCtx, PluginHost, PluginInstance, FS_LIST_LIMIT, FS_READ_LIMIT, HTTP_MAX_BODY, HTTP_TIMEOUT,
+    HostCtx, PluginHost, PluginInstance, PluginJobs, FS_LIST_LIMIT, FS_READ_LIMIT, HTTP_MAX_BODY,
+    HTTP_TIMEOUT,
 };
 use edlr_driver_http::HttpDriver;
 use std::path::{Path, PathBuf};
@@ -80,10 +81,20 @@ fn ctx_with_capabilities(
                 std::time::Duration::from_secs(1),
             )),
             Arc::new(edlr_driver_fs::FsDriver::new(FS_READ_LIMIT, FS_LIST_LIMIT)),
+            test_work_tx(),
+            PluginJobs::new(),
         ),
         settings,
         capabilities,
     )
+}
+
+/// submit 系を使わないテスト用の作業キュー送信側。受信側は `forget` で
+/// 生かしたままにする(`core/src/host/plugin.rs` のテストと同じ流儀)。
+fn test_work_tx() -> edlr_core::runner::plugin::queue::PluginWorkSender {
+    let (tx, rx) = edlr_core::runner::plugin::queue::channel();
+    std::mem::forget(rx);
+    tx
 }
 
 fn load(

@@ -115,6 +115,8 @@ impl Guest for Component {
         );
     }
 
+    fn on_job_complete(_job_id: u64, _result_json: String) {}
+
     fn on_schedule(name: String) {
         if name != "flush" {
             host_log::log(host_log::Level::Warn, &format!("unknown schedule: {name}"));
