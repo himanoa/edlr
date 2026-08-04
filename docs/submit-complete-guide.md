@@ -35,11 +35,14 @@ issue-sizx を人間の手で実装するための着手順。2026-08-04 時点�
 
 ### Phase 1: work queue の自作化(WIT に触らない準備工事)
 
-**対象**: `core/src/runner/plugin.rs`
+**対象**: `core/src/runner/plugin/`(分割済み: `mod.rs` = 共有の
+`PluginWork`/容量定数、`start.rs` = ロード・起動、`event_loop.rs` =
+受信ループ、`subscriber.rs` = 購読タスク)
 
 - 現状: `std_mpsc::sync_channel::<PluginWork>(PLUGIN_WORK_QUEUE_CAPACITY)`
-  (`:354` 付近)。受信ループは `work_rx.recv_timeout(timeout)`(`:675`)で
-  ブロックし、`next_action`/`LoopAction`(`:821` 付近の純関数)が次の動作を決める。
+  (`start.rs:210`)。受信ループは `work_rx.recv_timeout(timeout)`
+  (`event_loop.rs:267`)でブロックし、`next_action`/`LoopAction`
+  (`event_loop.rs:382` 付近の純関数)が次の動作を決める。
 - やること:
   1. 受け入れ判定を純関数で書く:
      `fn admit(queue_len: usize, work: &PluginWork) -> Admit`
@@ -49,9 +52,11 @@ issue-sizx を人間の手で実装するための着手順。2026-08-04 時点�
      公開面は今の channel と同じ 3 操作に揃えると差し替えが機械的になる:
      `push(work) -> Result<(), Dropped>`(admit を内側で呼ぶ)/
      `recv_timeout(dur)` (Condvar の `wait_timeout` で再現)/ sender 側 clone。
-     `PluginWork::Delivery` 側の channel(`:448`)は当面そのまま
-  3. `try_send` 呼び出し箇所を新キューの `push` に置換。drop 時の
-     `DropCounters` 計上(`:80` 付近のコメント参照)は今と同じ場所で行う
+     `Delivery` 側の channel(`start.rs:304`)は当面そのまま
+  3. `try_send` 呼び出し箇所(`subscriber.rs` の両購読タスク)を新キューの
+     `push` に置換。drop 時の `DropCounters` 計上
+     (`mod.rs` の `PLUGIN_WORK_QUEUE_CAPACITY` ドキュメント参照)は
+     今と同じ場所で行う
 - **触ってはいけないもの**: `next_action` / `LoopAction` の構造、
   `recv_timeout` ベースのループ構造(→ async-migration.md 不変条件 1)。
   bus subscriber の `recv_timeout(200ms)` + `AtomicBool` も見た目が似ているが
@@ -92,7 +97,7 @@ issue-sizx を人間の手で実装するための着手順。2026-08-04 時点�
 
 ### Phase 3: ホスト側 submit-http(`HostCtx`)
 
-**対象**: `core/src/host/plugin.rs`、`core/src/runner/plugin.rs`(配線元)
+**対象**: `core/src/host/plugin.rs`、`core/src/runner/plugin/start.rs`(配線元)
 
 - `HostCtx` に足すもの:
   - work queue の送信側クローン(Phase 1 の自作キュー)
@@ -119,7 +124,8 @@ issue-sizx を人間の手で実装するための着手順。2026-08-04 時点�
 
 ### Phase 4: runner 配線(JobComplete の消費)
 
-**対象**: `core/src/runner/plugin.rs`
+**対象**: `core/src/runner/plugin/mod.rs`(`PluginWork`)、
+`core/src/runner/plugin/event_loop.rs`(受信ループ)
 
 - `PluginWork` に `JobComplete { generation, job_id, payload }` を追加
 - `next_action` に腕を足し、`LoopAction` 経由で
