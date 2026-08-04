@@ -1,11 +1,21 @@
 use crate::journal::position::{Position, PositionStore};
-use crate::journal::{parser, tailer::JournalTailer};
+use crate::journal::{
+    parser,
+    tailer::{JournalLine, JournalTailer},
+};
 use crate::router::Router;
 use crate::status::StatusReader;
 use crate::watch::wake_source;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
+
+struct Sources {
+    tailer: JournalTailer,
+    status: StatusReader,
+    position_saver: PositionSaver,
+    router: Router,
+}
 
 /// 監視ループ本体。wake のたびに Journal と Status.json を poll して配信する。
 /// エラーで panic せず、ログして継続する。
@@ -20,49 +30,98 @@ pub async fn run(
     positions: Option<Arc<PositionStore>>,
 ) {
     let saved = positions.as_ref().and_then(|store| store.load(&dir));
-    let mut tailer = JournalTailer::resume_from(dir.clone(), saved);
-    let mut status = StatusReader::new(dir.join("Status.json"));
     let mut wake = wake_source(&dir, interval);
-    // 保存失敗の warn を 1 度だけ出すためのフラグ(毎 poll ごとにログを溢れさせない)。
-    let mut warned_about_saving = false;
+    let mut sources = Sources {
+        tailer: JournalTailer::resume_from(dir.clone(), saved),
+        status: StatusReader::new(dir.join("Status.json")),
+        position_saver: PositionSaver::new(dir, positions),
+        router,
+    };
+
+    while wake.rx.recv().await.is_some() {
+        let new_sources = tokio::task::spawn_blocking(move || {
+            let lines = sources.tailer.poll();
+            let status = sources.status.poll();
+
+            match lines {
+                Ok(lines) => {
+                    publish_lines(&sources.router, lines);
+                    sources
+                        .position_saver
+                        .save_if_moved(sources.tailer.position());
+                }
+                Err(e) => tracing::warn!("journal poll failed (will retry): {e}"),
+            }
+
+            if let Some(s) = status {
+                sources
+                    .router
+                    .publish(crate::event::Event::Status { raw: s });
+            }
+
+            sources
+        })
+        .await
+        // JoinError はクロージャ自体が panic したときだけ。従来も poll 内の
+        // panic は監視タスクを殺していたので、そのまま伝播させる。
+        .expect("monitor poll task panicked");
+
+        sources = new_sources;
+    }
+}
+
+/// tail した行をパースして配信する。パースできない行は警告して飛ばす。
+fn publish_lines(router: &Router, lines: Vec<JournalLine>) {
+    for line in lines {
+        match parser::parse_line(&line.text, line.replay) {
+            Some(event) => router.publish(event),
+            None => tracing::warn!("skipping unparsable journal line: {}", line.text),
+        }
+    }
+}
+
+/// 読み取り位置の永続化。位置が動いたときだけ書き、保存に失敗しても
+/// デーモンは止めず、警告を 1 度だけ出して続行する。
+struct PositionSaver {
+    dir: PathBuf,
+    store: Option<Arc<PositionStore>>,
+    // warn を 1 度だけ出すためのフラグ(毎 poll ごとにログを溢れさせない)。
+    warned: bool,
     // 直近に保存を試みた位置。wake は追記が無くても poll_interval_ms ごとに
     // 起きるため、これが無いとゲームを起動していない間もずっと同じ位置を
     // 書き続けてしまう(read + write + rename を 1 秒ごとに、情報量ゼロで)。
     // 成否に関わらず更新する: 書けない状況で毎秒失敗し続けるのを避け、
     // 位置が動いたときだけ再試行する。
-    let mut last_saved: Option<Position> = None;
+    last_saved: Option<Position>,
+}
 
-    while wake.rx.recv().await.is_some() {
-        match tailer.poll() {
-            Ok(lines) => {
-                for line in lines {
-                    match parser::parse_line(&line.text, line.replay) {
-                        Some(event) => router.publish(event),
-                        None => tracing::warn!("skipping unparsable journal line: {}", line.text),
-                    }
-                }
-                // 配信した後に保存する(at-least-once)。保存に失敗しても
-                // デーモンは止めず、警告を 1 度だけ出して続行する。
-                if let (Some(store), Some(position)) = (positions.as_ref(), tailer.position()) {
-                    if last_saved.as_ref() != Some(&position) {
-                        if let Err(e) = store.save(&dir, &position) {
-                            if !warned_about_saving {
-                                tracing::warn!(
-                                    "failed to persist the journal position ({e}); \
-                                     will retry when the position changes"
-                                );
-                                warned_about_saving = true;
-                            }
-                        }
-                        last_saved = Some(position);
-                    }
-                }
+impl PositionSaver {
+    fn new(dir: PathBuf, store: Option<Arc<PositionStore>>) -> Self {
+        Self {
+            dir,
+            store,
+            warned: false,
+            last_saved: None,
+        }
+    }
+
+    fn save_if_moved(&mut self, position: Option<Position>) {
+        let (Some(store), Some(position)) = (self.store.as_ref(), position) else {
+            return;
+        };
+        if self.last_saved.as_ref() == Some(&position) {
+            return;
+        }
+        if let Err(e) = store.save(&self.dir, &position) {
+            if !self.warned {
+                tracing::warn!(
+                    "failed to persist the journal position ({e}); \
+                     will retry when the position changes"
+                );
+                self.warned = true;
             }
-            Err(e) => tracing::warn!("journal poll failed (will retry): {e}"),
         }
-        if let Some(raw) = status.poll() {
-            router.publish(crate::event::Event::Status { raw });
-        }
+        self.last_saved = Some(position);
     }
 }
 
