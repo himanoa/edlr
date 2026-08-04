@@ -5,7 +5,7 @@ summary: lifecycle 呼び出しの中で I/O を待つ設計をやめ、submit_j
 status: open
 labels: 人間がやる
 created: 2026-07-28T14:10:44Z
-updated: 2026-08-01T04:18:13Z
+updated: 2026-08-04T14:21:58Z
 ---
 
 
@@ -127,6 +127,9 @@ driver 抽象化の狙い(暗黙のプロトコルドリフト防止)とむし�
 
 ## 関連
 
+- **実装ガイド: `docs/submit-complete-guide.md`**(2026-08-04 作成。フェーズ順の
+  着手手順。非ブロッキング HTTP は本プロトコル上の `submit-http` として実装する
+  ことが確定 — `docs/async-migration.md` Step 2b 参照)
 - `core/src/plugin/runner.rs`(専用スレッド、`PluginWork`、`fire_all_due`)
 - `core/src/plugin/host.rs`(`CALL_DEADLINE`、`HTTP_TIMEOUT`)
 - `core/wit/plugin.wit`
