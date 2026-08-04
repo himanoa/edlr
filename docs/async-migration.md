@@ -35,94 +35,50 @@ edlr を段階的に非同期化するときの、着手順と根拠のメモ。
 
 ### Step 2: drivers/http の非同期化 + プラグイン向け非ブロッキング HTTP API
 
-設計は議論済み(2026-08-04)。以下が確定した仕様。手で移植するとき用に
-実装順も含めて書いておく。
+**2026-08-04 改訂**: 当初ここにあった「`send-async` が u64 の ID を返し、既存
+`on-message` に予約ドライバ名 `"http"` で JSON+base64 の payload を配送する」
+設計は**破棄した**。あの形の唯一の存在理由は「export を足すと既存ゲストが
+全部ロード不能になるので非破壊で済ませる」だったが、issue-sizx
+(submit/complete プロトコル)で ABI 破壊 OK・`on-job-complete` export の追加・
+`world plugin` 0.5.0 化と全ゲスト一斉再生成が決定済みになったため、完了配送の
+仕組みを 2 系統(on-message ハックと専用 export)並べる意味がなくなった。
+予約ドライバ名の manifest 検証・payload の JSON 組み立て/パース・base64・
+ユーザーの on-message ハンドラとの demux もすべて不要になる。
 
-**前提となる事実**: ホスト内部をいくら async にしても、ゲスト(wasm)から見た
-`driver-http.send` は同期呼び出しのまま(素の同期 export/import + epoch 割り込み
-の設計であり、component model の async ABI は使っていない)。ゲストに
-非ブロッキング HTTP を提供するには API の形を変える必要がある。そこで
-コールバック型の `send-async` を**追加**する(既存 `send` は残す)。
+#### 2a. ホスト内部の async 化(先行可能。issue: http-driver-9znv)
 
-#### 2a. WIT(非破壊)
-
-`core/wit/plugin.wit` の `interface driver-http` に関数を 1 つ足すだけ:
-
-```wit
-// timeout-ms: none なら 30_000。上限 60_000 にクランプ。
-send-async: func(req: request, timeout-ms: option<u32>) -> result<u64, driver-error>;
-```
-
-- **触ってはいけないもの**: 既存の `request`/`response` record、`driver-error`
-  variant、export 群。record へのフィールド追加も variant へのケース追加も
-  構造的型が変わって既存コンパイル済みゲストが壊れる。関数(import)の追加
-  だけは非破壊。だから timeout は record ではなく引数、エラーは既存の
-  `transport(...)` に載せる。バージョンも `@0.4.0` のまま。
-- 対象は plugin world / driver world 両方(どちらも `driver-http` を import
-  しているので WIT 変更は上の 1 行で両方に効く)。
-- 返り値 `u64` はインスタンスごとの連番リクエスト ID(AtomicU64、1 始まり)。
-- permission チェック(`check_http_permission`、`core/src/host/plugin.rs:357`)と
-  in-flight 上限(8/インスタンス)の判定は `send-async` 内で同期に行い、
-  その場で `result` として返す。
-
-#### 2b. レスポンス配送(既存 on-message に乗せる)
-
-新 export は追加しない(world の export は必須なので、追加すると既存ゲストが
-ロード不能になる)。既存の `on-message` に予約ドライバ名 `"http"` で配送する:
-
-- plugin: `on-message(driver: "http", topic: "response", payload: <JSON>)`
-- driver: `on-message(from: "http", topic: "response", payload: <JSON>)`
-- payload(body は base64):
-  - 成功 `{"id": 42, "ok": {"status": 200, "headers": [["k","v"]], "body_b64": "..."}}`
-  - 失敗 `{"id": 43, "err": {"kind": "transport", "message": "timeout"}}`
-- `"http"` はドライバ ID として予約し、manifest 検証で実ドライバが名乗れない
-  ようにする(検証 + テスト)。
-- payload の組み立て(response/error → JSON)は値イン値アウトの純粋関数に
-  切り出す(`.claude/rules/` の純粋/命令的境界に従う)。
-
-#### 2c. ホスト側
+submit/complete と独立に、今すぐ着手できる部分:
 
 - `drivers/http`: `reqwest::blocking::Client` → async `reqwest::Client` +
   `tokio::runtime::Handle` 保持に置換。
-  - 既存の同期 `send` は `handle.block_on(...)` 実装に変える。呼び出し元は
-    プラグイン/ドライバスレッド(非ランタイムスレッド)なので合法。
-    タイムアウト 1.5s/25s(`core/src/host/plugin.rs:92`、`driver.rs:55`)と
-    epoch `CALL_DEADLINE` の const assert は現状維持。
-  - `send_async` は Future を返し、呼び出し元が `handle.spawn` する。
-  - blocking Client 生成のスレッドハック(`drivers/http/src/lib.rs:109`)は削除。
-- `HostCtx`(plugin/driver 両方)に追加:
-  - 自分の work queue の送信側クローン
-    (plugin: `SyncSender<PluginWork>`(`core/src/runner/plugin.rs:355`)、
-    driver: `SyncSender<Message>`(`core/src/runner/driver.rs:213`))
-  - `Handle`、リクエスト ID カウンタ、in-flight カウンタ
-- 完了したタスクは合成した Delivery/Message(driver=`"http"`)を **`try_send`**
-  で積む。Bus は経由しない。レスポンスサイズ上限は同期 send と同じ。
-
-#### 2d. エラー・シャットダウン方針
-
-- queue full: 既存イベントと同じく drop 記録 + warn。ゲストは自前タイムアウトで
-  諦める前提(ドキュメントに明記)。`send().await` によるバックプレッシャは
-  導入しない(不変条件 3 参照)。
-- プラグイン停止/trap 後に完了したレスポンス: try_send 失敗 → 静かに破棄。
-- デーモン終了: spawn タスクは `Runtime::drop` で abort されるだけ。
-  新しいシャットダウン不変条件は増えない。
+- 既存の同期 `send` は `handle.block_on(...)` 実装に変える。呼び出し元は
+  プラグイン/ドライバスレッド(非ランタイムスレッド)なので合法。
+  タイムアウト 1.5s/25s(`core/src/host/plugin.rs:92`、`driver.rs:55`)と
+  epoch `CALL_DEADLINE` の const assert は現状維持。
+- blocking Client 生成のスレッドハック(`drivers/http/src/lib.rs:109`)は削除。
 - shutdown で abandon された残留スレッドが同期 `send` を呼ぶと
   `Handle::block_on` が panic しうるが、終了間際のデタッチ済みスレッドなので許容。
 
-#### 2e. 手で移植するときの順序
+#### 2b. 非ブロッキング HTTP は submit/complete に乗せる(issue-sizx 待ち)
 
-1. `drivers/http` を async Client + `Handle` 化し、同期 `send` を `block_on` で
-   維持(既存テストが通ることを確認)。スレッドハック削除。
-2. payload JSON 組み立ての純粋関数 + unit テスト。
-3. WIT に `send-async` 追加 → ホスト側 bindgen 追従、plugin 側 `HostCtx` 配線
-   (ID 採番・in-flight 上限・spawn・try_send)。
-4. driver 側 `HostCtx` に同じ配線。
-5. manifest の予約名 `"http"` 拒否 + テスト。
-6. 統合テスト: `core/tests/driver_http_integration.rs` を拡張し、
-   `send-async` → `on-message` 到着を plugin/driver 両方で検証。
-7. examples(`http-caller`)に使用例追加、`docs/plugins.md` / `docs/drivers.md` に
-   API とセマンティクス(順序保証なし・drop されうる・ID 相関)を追記。
-   チュートリアル 3 言語の本文更新は任意(import 追加なので既存生成物は壊れない)。
+ゲスト向けのノンブロッキング HTTP API は、issue-sizx の submit/complete
+プロトコルの上に**型付き submit** として実装する:
+
+- `submit-http(request, timeout-ms) -> result<job-id, driver-error>`
+  (untyped な `submit(kind, payload)` は「暗黙のプロトコルドリフト防止」思想と
+  衝突するため。issue-sizx の実装時補足を参照)
+- 結果は `on-job-complete` で配送。キューの自作(種別ごとの削除ルール)、
+  in-flight 上限、インスタンス世代管理などの設計・決定事項はすべて
+  issue-sizx に従う。
+- permission チェック(`check_http_permission`、`core/src/host/plugin.rs:357`)と
+  in-flight 上限の判定は submit 時に同期に行い、その場で `result` として返す
+  (旧設計から引き継ぐ)。
+- 既存の同期 `send` は残す。「lifecycle の中で待つのは自己責任」の契約を
+  ドキュメントに明記する(issue-sizx の検討事項)。
+- ゲスト SDK に job-id → await ヘルパーを載せる:
+  issue sdk-send-async-response-await-lvn3。
+
+実装順は「2a(いつでも)→ issue-sizx 本体 → 2b」。
 
 ### Step 3: drivers/process の監視スレッドを tokio 化
 
