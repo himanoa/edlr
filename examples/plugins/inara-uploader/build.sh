@@ -10,12 +10,12 @@
 # 必要なもの:
 #   - TinyGo 0.34 以降(https://tinygo.org、0.41.1 で確認)
 #   - Go 1.23 以降(TinyGo が内部で使う)
-#   - 生成済みバインディング(gen/。再生成は README の「バインディングの再生成」参照)
+#   - WIT バインディングは sdk/go が同梱している(gen/ の自前生成は不要)
 
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-wit="$here/../../../core/wit"
+wit="$here/../../../sdk/go/wit"
 out="${1:-$here/plugin.wasm}"
 
 if ! command -v tinygo >/dev/null 2>&1; then

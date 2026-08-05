@@ -12,12 +12,12 @@ import (
 
 	"go.bytecodealliance.org/cm"
 
-	bus "github.com/himanoa/edlr/examples/plugins/tutorial-jump-log-go/gen/edlr/plugin/bus"
-	bustypes "github.com/himanoa/edlr/examples/plugins/tutorial-jump-log-go/gen/edlr/plugin/bus-types"
-	driverhttp "github.com/himanoa/edlr/examples/plugins/tutorial-jump-log-go/gen/edlr/plugin/driver-http"
-	hostlog "github.com/himanoa/edlr/examples/plugins/tutorial-jump-log-go/gen/edlr/plugin/host-log"
-	hostsettings "github.com/himanoa/edlr/examples/plugins/tutorial-jump-log-go/gen/edlr/plugin/host-settings"
-	plugin "github.com/himanoa/edlr/examples/plugins/tutorial-jump-log-go/gen/edlr/plugin/plugin"
+	"github.com/himanoa/edlr/sdk/go/edlrplugin"
+	bus "github.com/himanoa/edlr/sdk/go/gen/edlr/plugin/bus"
+	bustypes "github.com/himanoa/edlr/sdk/go/gen/edlr/plugin/bus-types"
+	driverhttp "github.com/himanoa/edlr/sdk/go/gen/edlr/plugin/driver-http"
+	hostlog "github.com/himanoa/edlr/sdk/go/gen/edlr/plugin/host-log"
+	hostsettings "github.com/himanoa/edlr/sdk/go/gen/edlr/plugin/host-settings"
 	"github.com/himanoa/edlr/examples/plugins/tutorial-jump-log-go/jumplog"
 )
 
@@ -35,14 +35,13 @@ var pending *jumplog.Queue
 
 // init で export を登録する。ホストはここで登録した関数を直接呼ぶ。
 func init() {
-	plugin.Exports.Init = onInit
-	plugin.Exports.OnEvent = onEvent
-	plugin.Exports.OnMessage = onMessage
-	plugin.Exports.OnSchedule = onSchedule
-	plugin.Exports.OnStop = onStop
-	// submit-send は使っていないので何もしない(export 自体は WIT 0.5.0 で
-	// 必須になった)。
-	plugin.Exports.OnJobComplete = func(jobID uint64, resultJSON string) {}
+	edlrplugin.Register(edlrplugin.Hooks{
+		Init:       onInit,
+		OnEvent:    onEvent,
+		OnMessage:  onMessage,
+		OnSchedule: onSchedule,
+		OnStop:     onStop,
+	})
 }
 
 // main は TinyGo がコンポーネントをビルドするために要る。エントリポイント
@@ -54,7 +53,7 @@ func onInit() {
 	logf(hostlog.LevelInfo, "tutorial-jump-log started")
 }
 
-func onEvent(ev plugin.Event) {
+func onEvent(ev edlrplugin.Event) {
 	// manifest の `events` で絞ってはいるが、購読を増やしたときに壊れない
 	// よう、ここでも名前を確かめる。
 	if name := ev.Name.Some(); name == nil || *name != "FSDJump" {
@@ -94,8 +93,8 @@ func onEvent(ev plugin.Event) {
 
 // onMessage はドライバが last-system へ流し直した値を受け取る
 // (manifest の `[[bus]]` の subscribe に書いたトピックだけが届く)。
-func onMessage(driver string, topic string, payload cm.List[uint8]) {
-	logf(hostlog.LevelInfo, "%s/%s = %s", driver, topic, string(payload.Slice()))
+func onMessage(driver string, topic string, payload []byte) {
+	logf(hostlog.LevelInfo, "%s/%s = %s", driver, topic, string(payload))
 }
 
 func onSchedule(name string) {

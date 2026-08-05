@@ -69,17 +69,11 @@ cp plugin.wasm manifest.toml ~/.config/edlr/plugins/inara-uploader/
    送信が `permission-denied` になり、イベントはキューに残る
 3. 動作確認が済むまでは `isBeingDeveloped`(既定 true)を そのままにしておく
 
-### バインディングの再生成
+### バインディング
 
-`core/wit/plugin.wit` を変更したときだけ必要。生成物(`gen/`)はリポジトリに
-コミットしてあるので、通常のビルドには不要。
-
-```
-go install go.bytecodealliance.org/cmd/wit-bindgen-go@v0.6.2
-wit-bindgen-go generate --world plugin --out gen ../../../core/wit
-```
-
-`wit-bindgen-go` は `wasm-tools` を PATH に要求する。
+WIT バインディング(`gen/`)は `sdk/go`(`edlrplugin`)が同梱しているので、
+このプラグイン側での生成・コミットは不要。再生成が要る場合は
+`sdk/go/README.md` を参照。
 
 ## 設定
 

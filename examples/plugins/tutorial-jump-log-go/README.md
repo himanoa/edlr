@@ -25,10 +25,8 @@ go vet ./...
 配置後はデーモンの再起動と、GUI の Plugins ページでの承認(HTTP capability と
 bus 接続)が要る。
 
-## バインディングの再生成
+## バインディング
 
-`core/wit` を変えたときだけ必要(生成物 `gen/` はコミットしてある):
-
-```
-wit-bindgen-go generate --world plugin --out gen ../../../core/wit
-```
+WIT バインディング(`gen/`)は `sdk/go`(`edlrplugin`)が同梱しているので、
+このプラグイン側での生成・コミットは不要。再生成が要る場合は
+`sdk/go/README.md` を参照。

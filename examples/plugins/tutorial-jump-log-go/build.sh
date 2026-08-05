@@ -13,7 +13,7 @@
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-wit="$here/../../../core/wit"
+wit="$here/../../../sdk/go/wit"
 out="${1:-$here/plugin.wasm}"
 
 if ! command -v tinygo >/dev/null 2>&1; then

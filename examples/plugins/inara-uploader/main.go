@@ -22,10 +22,10 @@ import (
 
 	"go.bytecodealliance.org/cm"
 
-	driverhttp "github.com/himanoa/edlr/examples/plugins/inara-uploader/gen/edlr/plugin/driver-http"
-	hostlog "github.com/himanoa/edlr/examples/plugins/inara-uploader/gen/edlr/plugin/host-log"
-	hostsettings "github.com/himanoa/edlr/examples/plugins/inara-uploader/gen/edlr/plugin/host-settings"
-	plugin "github.com/himanoa/edlr/examples/plugins/inara-uploader/gen/edlr/plugin/plugin"
+	"github.com/himanoa/edlr/sdk/go/edlrplugin"
+	driverhttp "github.com/himanoa/edlr/sdk/go/gen/edlr/plugin/driver-http"
+	hostlog "github.com/himanoa/edlr/sdk/go/gen/edlr/plugin/host-log"
+	hostsettings "github.com/himanoa/edlr/sdk/go/gen/edlr/plugin/host-settings"
 	"github.com/himanoa/edlr/examples/plugins/inara-uploader/settings"
 	"github.com/himanoa/edlr/examples/plugins/inara-uploader/uploader"
 )
@@ -38,13 +38,12 @@ const inaraEndpoint = "https://inara.cz/inapi/v1/"
 var up *uploader.Uploader
 
 func init() {
-	plugin.Exports.Init = onInit
-	plugin.Exports.OnEvent = onEvent
-	plugin.Exports.OnSchedule = onSchedule
-	plugin.Exports.OnStop = onStop
-	// submit-send は使っていないので何もしない(export 自体は WIT 0.5.0 で
-	// 必須になった)。
-	plugin.Exports.OnJobComplete = func(jobID uint64, resultJSON string) {}
+	edlrplugin.Register(edlrplugin.Hooks{
+		Init:       onInit,
+		OnEvent:    onEvent,
+		OnSchedule: onSchedule,
+		OnStop:     onStop,
+	})
 }
 
 // main は TinyGo が component をビルドするために必要。エントリポイントとしては
@@ -56,7 +55,7 @@ func onInit() {
 	logf(hostlog.LevelInfo, "inara-uploader initialized")
 }
 
-func onEvent(ev plugin.Event) {
+func onEvent(ev edlrplugin.Event) {
 	cfg := settings.Parse(hostsettings.GetAll())
 	report(cfg, up.Handle(cfg, uploader.Event{
 		Kind:      ev.Kind,
