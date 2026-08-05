@@ -89,6 +89,30 @@ fn write_driver_with_sidecar(drivers_dir: &Path, wasm_src: &Path, port: u16) {
     .unwrap();
 }
 
+/// `pid` のプロセスが `deadline` 内に消えるまでポーリングする。
+///
+/// デーモンは停止時にプロセスグループへ SIGTERM/SIGKILL を送るが、`wait`
+/// できるのは直接の子だけで、孫(サイドカーが spawn したプロセス)の死は
+/// デーモンの exit と**並行**に起きる。デーモン exit 直後の一発
+/// `kill(pid, 0)` 判定は、CPU 競合でシグナル配送・スケジューリングが遅れる
+/// と誤検知する(cargo test --workspace の並列負荷で実際に flaky だった —
+/// issue daemon-signal-shutdown-integration-works-kay8)。孫が本当に
+/// 孤児化していれば `sleep 60` が deadline を超えて生き残るので、
+/// ポーリングにしても検出力は変わらない。
+fn process_exits_within(pid: i32, deadline: Duration) -> bool {
+    let due = Instant::now() + deadline;
+    loop {
+        // SAFETY: existence check only, no signal sent.
+        if unsafe { libc::kill(pid, 0) } != 0 {
+            return true;
+        }
+        if Instant::now() >= due {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
 fn daemon_running(addr: &str) -> bool {
     use std::net::TcpStream;
     match addr.parse::<std::net::SocketAddr>() {
@@ -179,8 +203,13 @@ async fn sigterm_to_daemon_stops_running_sidecars_including_grandchildren() {
     let sidecar_script = tmp.path().join("sidecar.sh");
     fs::write(
         &sidecar_script,
+        // サブシェル形 `(sleep 60 & echo $! > pid); wait` は誤り: sleep は
+        // サブシェルの背景ジョブなので、外側 sh の `wait` には待つ子がなく
+        // sh は即座に exit してしまう(サイドカーが "exited" になり、孤児の
+        // sleep だけがプロセスグループに残る)。sh 自身が wait でぶら下がる
+        // この形が正(issue daemon-signal-shutdown-integration-works-kay8)。
         format!(
-            "#!/bin/sh\n(sleep 60 & echo $! > {}); wait\n",
+            "#!/bin/sh\nsleep 60 & echo $! > {}; wait\n",
             pidfile.display()
         ),
     )
@@ -297,10 +326,8 @@ async fn sigterm_to_daemon_stops_running_sidecars_including_grandchildren() {
     }
     assert!(exited, "daemon did not exit within 10s of SIGTERM");
 
-    // SAFETY: existence check only.
-    let grandchild_alive = unsafe { libc::kill(grandchild_pid, 0) } == 0;
     assert!(
-        !grandchild_alive,
+        process_exits_within(grandchild_pid, Duration::from_secs(5)),
         "grandchild {grandchild_pid} survived daemon SIGTERM; sidecars were orphaned"
     );
 
@@ -346,8 +373,13 @@ async fn sigterm_to_daemon_stops_running_driver_sidecars() {
     let sidecar_script = tmp.path().join("sidecar.sh");
     fs::write(
         &sidecar_script,
+        // サブシェル形 `(sleep 60 & echo $! > pid); wait` は誤り: sleep は
+        // サブシェルの背景ジョブなので、外側 sh の `wait` には待つ子がなく
+        // sh は即座に exit してしまう(サイドカーが "exited" になり、孤児の
+        // sleep だけがプロセスグループに残る)。sh 自身が wait でぶら下がる
+        // この形が正(issue daemon-signal-shutdown-integration-works-kay8)。
         format!(
-            "#!/bin/sh\n(sleep 60 & echo $! > {}); wait\n",
+            "#!/bin/sh\nsleep 60 & echo $! > {}; wait\n",
             pidfile.display()
         ),
     )
@@ -466,10 +498,8 @@ async fn sigterm_to_daemon_stops_running_driver_sidecars() {
     }
     assert!(exited, "daemon did not exit within 10s of SIGTERM");
 
-    // SAFETY: existence check only.
-    let grandchild_alive = unsafe { libc::kill(grandchild_pid, 0) } == 0;
     assert!(
-        !grandchild_alive,
+        process_exits_within(grandchild_pid, Duration::from_secs(5)),
         "grandchild {grandchild_pid} survived daemon SIGTERM; driver sidecars were orphaned"
     );
 }
