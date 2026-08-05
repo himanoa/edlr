@@ -23,6 +23,7 @@ pub mod bindings {
     wit_bindgen::generate!({
         path: "../../core/wit",
         world: "plugin",
+        pub_export_macro: true,
     });
 }
 
@@ -70,6 +71,6 @@ macro_rules! register {
                 <$plugin as $crate::Plugin>::on_stop()
             }
         }
-        $crate::bindings::export!(__EdlrSdkShim);
+        $crate::bindings::export!(__EdlrSdkShim with_types_in $crate::bindings);
     };
 }
