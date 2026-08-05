@@ -96,6 +96,12 @@ pub fn on_schedule(name : String) -> Unit {
   }
 }
 
+///| `driver-http.submit-send` の完了通知。このプラグインは submit を
+/// 使っていないので何もしない(export 自体は WIT 0.5.0 で必須になった)。
+pub fn on_job_complete(_job_id : UInt64, _result_json : String) -> Unit {
+
+}
+
 ///| デーモンの graceful shutdown 時に一度だけ呼ばれる。trap による
 /// 無効化(disable)の後には呼ばれない。
 pub fn on_stop() -> Unit {

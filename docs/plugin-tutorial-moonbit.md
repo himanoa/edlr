@@ -75,6 +75,7 @@ TinyGo なら [plugin-tutorial-tinygo.md](plugin-tutorial-tinygo.md) を参照
 | `on-event` | 購読した Journal / Status イベントが届いたとき |
 | `on-message` | 購読中のドライバのトピックに値が流れたとき |
 | `on-schedule` | manifest で宣言した定期実行の時刻 |
+| `on-job-complete` | `driver-http.submit-send` したジョブが完了したとき |
 | `on-stop` | デーモンの graceful shutdown 時に 1 回(best-effort) |
 
 プラグイン 1 つは `<plugins-dir>/<id>/` というディレクトリで、中身は
@@ -161,7 +162,7 @@ import を足す。まずはログだけ:
 
 ### コード
 
-`gen/world/plugin/stub.mbt` に 5 つの export の `...` が並んでいる。
+`gen/world/plugin/stub.mbt` に 6 つの export の `...` が並んでいる。
 これを実装で置き換える:
 
 ```moonbit
@@ -208,12 +209,17 @@ pub fn on_schedule(_name : String) -> Unit {
 }
 
 ///|
+pub fn on_job_complete(_job_id : UInt64, _result_json : String) -> Unit {
+
+}
+
+///|
 pub fn on_stop() -> Unit {
 
 }
 ```
 
-- **5 つとも実装すること**(使わないものは空でよい)。`...` が残っていると
+- **6 つとも実装すること**(使わないものは空でよい)。`...` が残っていると
   `declaration_unimplemented` 警告のまま、呼ばれた時に trap する
 - `@json.parse` を使うので `gen/world/plugin/moon.pkg.json` の import に
   `"moonbitlang/core/json"` も足す(この章のうちだけ。3 章で JSON の処理は
@@ -280,7 +286,7 @@ wasm-tools validate --features all plugin.wasm
 wasm-tools component wit plugin.wasm | grep export
 ```
 
-`init` / `on-event` / `on-message` / `on-schedule` / `on-stop` の 5 つが
+`init` / `on-event` / `on-message` / `on-schedule` / `on-job-complete` / `on-stop` の 6 つが
 export されていれば正しい。import に `wasi:` が並んでいないのも見ておくと
 よい(未使用の import はコンポーネント化で落ちる)。
 

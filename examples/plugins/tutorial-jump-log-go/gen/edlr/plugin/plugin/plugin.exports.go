@@ -6,7 +6,7 @@ import (
 	"go.bytecodealliance.org/cm"
 )
 
-// Exports represents the caller-defined exports from "edlr:plugin/plugin@0.4.0".
+// Exports represents the caller-defined exports from "edlr:plugin/plugin@0.5.0".
 var Exports struct {
 	// Init represents the caller-defined, exported function "init".
 	//
@@ -29,6 +29,11 @@ var Exports struct {
 	//
 	//	on-schedule: func(name: string)
 	OnSchedule func(name string)
+
+	// OnJobComplete represents the caller-defined, exported function "on-job-complete".
+	//
+	//	on-job-complete: func(job-id: u64, result-json: string)
+	OnJobComplete func(jobID uint64, resultJSON string)
 
 	// OnStop represents the caller-defined, exported function "on-stop".
 	//

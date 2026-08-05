@@ -33,7 +33,7 @@ WASI 自体はホストが `wasmtime_wasi` の `add_to_linker_sync` で提供す
 
 ### WIT パッケージのバージョン
 
-WIT パッケージは `edlr:plugin@0.4.0`。
+WIT パッケージは `edlr:plugin@0.5.0`。
 
 - `0.1.0` → `0.2.0`: Journal 読み取り位置の永続化に伴い、`event` レコードへ
   `replay: bool` を追加した ABI 破壊的変更
@@ -42,6 +42,9 @@ WIT パッケージは `edlr:plugin@0.4.0`。
   `bus` import 追加)に伴う ABI 破壊的変更
 - `0.3.0` → `0.4.0`: 定期実行・終了フックの追加(`plugin` world への
   `on-schedule` / `on-stop` export 追加)に伴う ABI 破壊的変更
+- `0.4.0` → `0.5.0`: 非同期 HTTP の追加(`driver-http` への `submit-send`、
+  `plugin` world への `on-job-complete` export 追加)に伴う ABI 破壊的変更
+  (下記「非同期 HTTP」参照)
 
 **旧 world でビルド済みのプラグインは新しいホストへのロードに失敗する**。
 プラグインを新しい `core/wit` に対して再ビルドすること(Rust は
@@ -77,6 +80,58 @@ WIT パッケージは `edlr:plugin@0.4.0`。
 プラグイン単位でレベルを変える口は今のところ無い(`RUST_LOG` の
 ターゲット指定はホスト側モジュール名に対するもので、プラグイン id では
 絞れない)。
+
+## 非同期 HTTP(`driver-http.submit-send` / `on-job-complete`)
+
+```wit
+// interface driver-http
+submit-send: func(req: request, timeout-ms: option<u32>) -> result<u64, driver-error>;
+
+// world plugin
+export on-job-complete: func(job-id: u64, result-json: string);
+```
+
+`submit-send` はリクエストを受け付けて**即座に** job-id(u64、1 始まり)を
+返す。ホストは呼び出しの中で HTTP を待たないので、同期 `send` と違い
+呼び出し期限(2 秒)を通信時間で消費しない。結果は完了後に
+`on-job-complete` export へ届く。
+
+**同期で返るエラー**(受け付け自体の拒否。この場合ジョブは始まらず、
+`on-job-complete` も呼ばれない):
+
+- `permission-denied` — `send` と同一の承認判定(`[[capabilities]]` の
+  hosts 許可リスト)
+- `transport`(キュー満杯の旨)— 未完了の submit が **8 件**(1 インスタンス
+  あたりの上限)ある間の新規 submit。ブロックはしない。完了を待ってから
+  再試行すること
+
+**`result-json` の形**(`on-job-complete` の第 2 引数):
+
+```json
+{"ok": {"status": 200, "headers": [["content-type", "application/json"]], "body-base64": "..."}}
+{"err": {"kind": "transport", "message": "..."}}
+```
+
+- body はバイト列なので base64 で運ぶ。`kind` は `transport` か
+  `invalid-request`(承認拒否は同期エラーになるためここには現れない)
+- タイムアウト: `timeout-ms` を省略(`none`)すると 30_000ms。上限
+  60_000ms でクランプ。レスポンスサイズ上限は同期 `send` と同じ
+- **順序保証**: 完了通知は journal イベント・バス配信と同じ 1 本の作業
+  キューに FIFO で混ざり、他の export 呼び出しと直列に届く。複数ジョブの
+  完了順は HTTP の完了順であって submit 順ではない
+- **旧世代の破棄**: プラグインインスタンスがホストにより作り直された場合
+  (呼び出し期限超過からの復帰)、それ以前に submit したジョブの完了は
+  **届かない**(wasm 線形メモリごと状態が失われているため)。届かなかった
+  ジョブを追跡したい場合は、submit した内容をプラグイン側で永続化しておく
+  こと
+
+**同期 `send` は残る**。ただし `send` は呼び出し期限(2 秒)の中で応答を
+待つので、lifecycle 呼び出し(`init` / `on-event` / `on-schedule` など)の
+中で遅いホストを同期的に待つのは自己責任 — 期限を使い切ると呼び出しは
+中断され、繰り返せばプラグインは無効化される。応答が 1.5 秒(同期 send の
+タイムアウト)を超えうる相手には `submit-send` を使うこと。
+
+使用例は `examples/plugins/http-caller` を参照。
 
 ## plugins-dir のレイアウト
 

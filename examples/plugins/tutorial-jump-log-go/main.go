@@ -40,6 +40,9 @@ func init() {
 	plugin.Exports.OnMessage = onMessage
 	plugin.Exports.OnSchedule = onSchedule
 	plugin.Exports.OnStop = onStop
+	// submit-send は使っていないので何もしない(export 自体は WIT 0.5.0 で
+	// 必須になった)。
+	plugin.Exports.OnJobComplete = func(jobID uint64, resultJSON string) {}
 }
 
 // main は TinyGo がコンポーネントをビルドするために要る。エントリポイント

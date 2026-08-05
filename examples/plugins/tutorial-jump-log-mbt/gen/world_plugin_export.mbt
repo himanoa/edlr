@@ -58,6 +58,14 @@ pub fn wasmExportOnSchedule(p0 : Int, p1 : Int) -> Unit {
 
 }
 
+pub fn wasmExportOnJobComplete(p0 : Int64, p1 : Int, p2 : Int) -> Unit {
+
+      let result = @ffi.ptr2str(p1, p2)
+
+      let _ = @plugin.on_job_complete((p0).reinterpret_as_uint64(), result);
+
+}
+
 pub fn wasmExportOnStop() -> Unit {
 
       let _ = @plugin.on_stop();

@@ -31,3 +31,19 @@ func lower_Request(v Request) (f0 *uint8, f1 uint32, f2 *uint8, f3 uint32, f4 *[
 	f6, f7, f8 = lower_OptionListU8(v.Body)
 	return
 }
+
+// DriverErrorShape is used for storage in variant or result types.
+type DriverErrorShape struct {
+	_     cm.HostLayout
+	shape [unsafe.Sizeof(DriverError{})]byte
+}
+
+func lower_OptionU32(v cm.Option[uint32]) (f0 uint32, f1 uint32) {
+	some := v.Some()
+	if some != nil {
+		f0 = 1
+		v1 := (uint32)(*some)
+		f1 = (uint32)(v1)
+	}
+	return
+}

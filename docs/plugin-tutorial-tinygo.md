@@ -73,6 +73,7 @@ MoonBit なら [plugin-tutorial-moonbit.md](plugin-tutorial-moonbit.md) を参�
 | `on-event` | 購読した Journal / Status イベントが届いたとき |
 | `on-message` | 購読中のドライバのトピックに値が流れたとき |
 | `on-schedule` | manifest で宣言した定期実行の時刻 |
+| `on-job-complete` | `driver-http.submit-send` したジョブが完了したとき |
 | `on-stop` | デーモンの graceful shutdown 時に 1 回(best-effort) |
 
 プラグイン 1 つは `<plugins-dir>/<id>/` というディレクトリで、中身は
@@ -141,6 +142,7 @@ func init() {
 	plugin.Exports.OnMessage = func(string, string, cm.List[uint8]) {}
 	plugin.Exports.OnSchedule = func(string) {}
 	plugin.Exports.OnStop = func() {}
+	plugin.Exports.OnJobComplete = func(jobID uint64, resultJSON string) {}
 }
 
 // main は TinyGo がコンポーネントをビルドするために要る。エントリポイント
@@ -166,7 +168,7 @@ func onEvent(ev plugin.Event) {
 ```
 
 - **export は `init()` の中で `plugin.Exports.*` に代入して登録する**。
-  5 つとも埋めること(使わないものは空の関数でよい)
+  6 つとも埋めること(使わないものは空の関数でよい)
 - `main` は空でよいが、無いとビルドできない
 - `option<string>` は `cm.Option[string]` になる。中身は `.Some()` が返す
   ポインタで取り出す(`nil` なら値なし)
@@ -223,7 +225,7 @@ wasm-tools validate --features all plugin.wasm
 wasm-tools component wit plugin.wasm | grep export
 ```
 
-`init` / `on-event` / `on-message` / `on-schedule` / `on-stop` の 5 つが
+`init` / `on-event` / `on-message` / `on-schedule` / `on-job-complete` / `on-stop` の 6 つが
 export されていれば正しい。
 
 ### 動かす

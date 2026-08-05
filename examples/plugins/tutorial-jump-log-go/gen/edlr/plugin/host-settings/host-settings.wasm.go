@@ -2,8 +2,8 @@
 
 package hostsettings
 
-// This file contains wasmimport and wasmexport declarations for "edlr:plugin@0.4.0".
+// This file contains wasmimport and wasmexport declarations for "edlr:plugin@0.5.0".
 
-//go:wasmimport edlr:plugin/host-settings@0.4.0 get-all
+//go:wasmimport edlr:plugin/host-settings@0.5.0 get-all
 //go:noescape
 func wasmimport_GetAll(result *string)

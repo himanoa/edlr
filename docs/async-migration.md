@@ -59,7 +59,15 @@ submit/complete と独立に、今すぐ着手できる部分:
 - shutdown で abandon された残留スレッドが同期 `send` を呼ぶと
   `Handle::block_on` が panic しうるが、終了間際のデタッチ済みスレッドなので許容。
 
-#### 2b. 非ブロッキング HTTP は submit/complete に乗せる(issue-sizx 待ち)
+#### 2b. 非ブロッキング HTTP は submit/complete に乗せる(**実装済み 2026-08-05**)
+
+**このステップは issue-sizx 本体と併せて実装済み**。WIT 0.5.0 の
+`driver-http.submit-send` + `on-job-complete` として入った(名前は下記
+原案の `submit-http` から、interface が既に `driver-http` なので
+`submit-send` に変更)。API とセマンティクスは docs/plugins.md
+「非同期 HTTP」を参照。残タスクはゲスト SDK の await ヘルパー
+(issue sdk-send-async-response-await-lvn3)とドライバ側 submit
+(issue http-driver-9znv)のみ。以下は当時の設計メモ。
 
 ゲスト向けのノンブロッキング HTTP API は、issue-sizx の submit/complete
 プロトコルの上に**型付き submit** として実装する:

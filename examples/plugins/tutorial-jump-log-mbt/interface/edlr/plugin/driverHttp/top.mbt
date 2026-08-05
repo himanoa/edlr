@@ -104,4 +104,94 @@ pub fn send(req : Request) -> Result[Response, DriverError] {
       return lifted25
 
 }
+/// 非同期 submit。即 return し、ホストは中で await しない。結果は
+/// `on-job-complete` export へ job-id 付きで届く。
+/// timeout-ms: none なら 30_000。上限 60_000 にクランプ。
+pub fn submit_send(req : Request, timeout_ms : UInt?) -> Result[UInt64, DriverError] {
+      let cleanupList : Array[@ffi.Cleanup] = []
+      let ignoreList : Array[&@ffi.Any] = []
+
+      let address = @ffi.malloc(((req).headers).length() * 16);
+      for index = 0; index < ((req).headers).length(); index = index + 1 {
+            let element : (String, String) = ((req).headers)[(index)]
+            let base = address + (index * 16);
+            @ffi.store32((base) + 4, (element).0.length())
+            @ffi.store32((base) + 0, @ffi.str2ptr((element).0))
+            @ffi.store32((base) + 12, (element).1.length())
+            @ffi.store32((base) + 8, @ffi.str2ptr((element).1))
+            ignoreList.push((element).0)
+            ignoreList.push((element).1)
+
+      }
+
+      let (lowered, lowered5, lowered6) = match (((req).body)) {
+            None => {
+
+                  ((0), 0, 0)
+            }
+            Some(payload4) => {
+                  ignoreList.push(payload4)
+
+                  ((1), @ffi.bytes2ptr(payload4), payload4.length())
+            }
+      }
+
+      let (lowered13, lowered14) = match ((timeout_ms)) {
+            None => {
+
+                  ((0), 0)
+            }
+            Some(payload12) => {
+
+                  ((1), (payload12).reinterpret_as_int())
+            }
+      }
+      let return_area = @ffi.malloc(24)
+      wasmImportSubmitSend(@ffi.str2ptr((req).method_), (req).method_.length(), @ffi.str2ptr((req).url), (req).url.length(), address, ((req).headers).length(), lowered, lowered5, lowered6, lowered13, lowered14, return_area);
+
+      let lifted27 = match (@ffi.load8_u((return_area) + 0)) {
+            0 => {
+
+                  Result::Ok((@ffi.load64((return_area) + 8)).reinterpret_as_uint64())
+            }
+            1 => {
+
+                  let lifted = match (@ffi.load8_u((return_area) + 8)) {
+                        0 => {
+
+                              let result = @ffi.ptr2str(@ffi.load32((return_area) + 12), @ffi.load32((return_area) + 16))
+
+                              DriverError::PermissionDenied(result)
+                        }
+                        1 => {
+
+                              let result23 = @ffi.ptr2str(@ffi.load32((return_area) + 12), @ffi.load32((return_area) + 16))
+
+                              DriverError::InvalidRequest(result23)
+                        }
+                        2 => {
+
+                              let result26 = @ffi.ptr2str(@ffi.load32((return_area) + 12), @ffi.load32((return_area) + 16))
+
+                              DriverError::Transport(result26)
+                        }
+                        _ => panic()
+                  }
+
+                  Result::Err(lifted)
+            }
+            _ => panic()
+      }
+      ignore((req).method_)
+      ignore((req).url)
+      @ffi.free(address)
+      @ffi.free(return_area)
+
+      cleanupList.each(fn(cleanup) {
+            @ffi.free(cleanup.address);
+      })
+      ignore(ignoreList)
+      return lifted27
+
+}
 

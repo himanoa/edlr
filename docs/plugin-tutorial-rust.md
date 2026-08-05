@@ -70,6 +70,7 @@ MoonBit なら [plugin-tutorial-moonbit.md](plugin-tutorial-moonbit.md) を参�
 | `on-event` | 購読した Journal / Status イベントが届いたとき |
 | `on-message` | 購読中のドライバのトピックに値が流れたとき |
 | `on-schedule` | manifest で宣言した定期実行の時刻 |
+| `on-job-complete` | `driver-http.submit-send` したジョブが完了したとき |
 | `on-stop` | デーモンの graceful shutdown 時に 1 回(best-effort) |
 
 プラグイン 1 つは `<plugins-dir>/<id>/` というディレクトリで、中身は
@@ -144,6 +145,7 @@ impl Guest for Component {
     }
 
     fn on_message(_driver: String, _topic: String, _payload: Vec<u8>) {}
+    fn on_job_complete(_job_id: u64, _result_json: String) {}
     fn on_schedule(_name: String) {}
     fn on_stop() {}
 }
@@ -152,7 +154,7 @@ export!(Component);
 ```
 
 `generate!` が `Guest` トレイトと `Event` 型を生成し、`export!` がそれを
-ホストから見える export として繋ぐ。**5 つの関数は全部実装しないとコンパイル
+ホストから見える export として繋ぐ。**6 つの関数は全部実装しないとコンパイル
 できない**(使わないものは空でよい)。
 
 `path:` はディレクトリを指しているので、`core/wit` を更新したら次のビルドで
