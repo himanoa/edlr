@@ -6,6 +6,7 @@ ui/frontend/*.tsbuildinfo
 ui/src-tauri/gen/
 examples/plugins/*/target/
 examples/drivers/*/target/
+sdk/rust/target/
 examples/plugins/*/_build/
 examples/drivers/*/_build/
 .worktrees/

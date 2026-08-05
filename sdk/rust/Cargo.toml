@@ -1,0 +1,16 @@
+[workspace]
+
+[package]
+name = "edlr-plugin-sdk"
+version = "0.5.0"
+edition = "2021"
+description = "edlr プラグインを書くための SDK。WIT バインディングを内包する"
+license = "MIT"
+
+[dependencies]
+wit-bindgen = "0.60.0"
+serde_json = "1"
+base64 = "0.22"
+
+[lib]
+crate-type = ["rlib"]
