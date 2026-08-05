@@ -1,11 +1,11 @@
 ---
 id: sdk-send-async-response-await-lvn3
 title: ゲスト SDK に submit-http の結果を await できるヘルパーを足す
-summary: 非ブロッキング HTTP は submit-http(job-id 返却)+ on-job-complete 配送に決定(2026-08-04、on-message 配送案は破棄)。ゲスト SDK 側で job-id→promise/future に変換し response 型で await できるヘルパーを提供する / issue-sizx 依存・実装未着手
+summary: コールバック式で実装完了(future/promise ではなくゲスト側 pending マップ)。Rust は sdk/rust/src/http.rs、Go は sdk/go/edlrplugin/jobs.go
 status: open
 labels: sdk
 created: 2026-08-04T13:52:09Z
-updated: 2026-08-04T13:57:25Z
+updated: 2026-08-05T04:10:37Z
 ---
 
 ## 背景
@@ -48,3 +48,32 @@ promise/future/コールバック登録に変換し、response 型で受け取�
 - 前提: `submit-http` の実装(`docs/async-migration.md` Step 2b)
 - 関連: http-driver-9znv(ホスト内部の async 化 = Step 2a、これは独立に先行可)
 - 関連: golang-rust-sdk-9h8l(SDK 自体の新設)
+
+## 実装
+
+設計: `docs/superpowers/specs/2026-08-05-guest-sdk-design.md`。使い方は
+`docs/sdk.md`。
+
+**future ではなくコールバックにした理由**: ゲスト(wasm)はシングルスレッド
+かつ component model の async ABI を使わない同期実行のため、await 可能な
+future/promise を実装しても実行を止めて待つ相手(イベントループ)が存在
+しない。素直な形はホストからの次の export 呼び出し(`on-job-complete`)で
+起動されるコールバックであり、この形で実装した。
+
+- Rust(`sdk/rust/src/http.rs`): `http::submit(request, timeout_ms,
+  callback) -> Result<u64, DriverError>`。job-id → `Box<dyn FnOnce(..)>`
+  の pending マップを `thread_local! { RefCell<HashMap<..>> } }` で持つ。
+  `register!` の `on-job-complete` shim(`dispatch_job_complete`)が pending
+  を引き、無ければ `Plugin::on_job_complete` へ委譲(未知 job-id への委譲)
+- Go(`sdk/go/edlrplugin/jobs.go`): `SubmitHTTP(req, timeoutMS, cb) (uint64,
+  error)`。pending はゲストがシングルスレッドなので素の `map[uint64]` で
+  足りる。`Register` が配線する `dispatchJobComplete` が同様に pending →
+  `Hooks.OnJobComplete` の順で解決する
+- `result-json`(`{"ok":{status,headers,body-base64}}` /
+  `{"err":{kind,message}}`)のデコードは両言語とも値イン値アウトの純関数に
+  切り出し、ok/err/base64 破損/JSON 破損のケースを unit テストでカバー
+  (`parse_job_result` / `parseJobResult`)
+- demux は job 種別に依存せず job-id だけで解決するため、HTTP 以外の job
+  種別が将来増えても構造は変わらない
+- 実地テストは `examples/plugins/http-caller`(Rust)の `sdk::http::submit`
+  呼び出しで兼ねる
