@@ -64,7 +64,8 @@ test("renders log entries with level badge and message", () => {
   ];
   const { getByText } = render(<Logs />);
   expect(getByText("watch out")).toBeTruthy();
-  expect(getByText("warn")).toBeTruthy();
+  // ツールバーのレベルトグルにも "warn" があるので、バッジの span に限定する。
+  expect(getByText("warn", { selector: "span" })).toBeTruthy();
 });
 
 test("kind filter checkboxes hide unchecked kinds", async () => {
@@ -79,5 +80,23 @@ test("kind filter checkboxes hide unchecked kinds", async () => {
     await userEvent.click(getByRole("checkbox", { name: "log" }));
   });
   expect(queryByText("daemon log line")).toBeNull();
+  expect(getByText("FSDJump")).toBeTruthy();
+});
+
+test("level filter checkboxes hide unchecked levels for log entries only", async () => {
+  const userEvent = (await import("@testing-library/user-event")).default;
+  mockEntries = [
+    { id: 1, kind: "journal", timestamp: "t", event: "FSDJump", raw: {} },
+    { id: 2, kind: "log", timestamp: "t", level: "debug", message: "noisy debug line", raw: {} },
+    { id: 3, kind: "log", timestamp: "t", level: "warn", message: "watch out", raw: {} },
+  ];
+  const { getByText, queryByText, getByRole } = render(<Logs />);
+  expect(getByText("noisy debug line")).toBeTruthy();
+  await act(async () => {
+    await userEvent.click(getByRole("checkbox", { name: "debug" }));
+  });
+  expect(queryByText("noisy debug line")).toBeNull();
+  // レベルフィルタは kind=log 以外には効かない。
+  expect(getByText("watch out")).toBeTruthy();
   expect(getByText("FSDJump")).toBeTruthy();
 });

@@ -29,6 +29,18 @@ function Row({ entry }: { entry: LogEntry }) {
 const KINDS = ["journal", "status", "log"] as const;
 type Kind = (typeof KINDS)[number];
 
+const LEVELS = ["error", "warn", "info", "debug", "trace"] as const;
+type Level = (typeof LEVELS)[number];
+
+/** kind=log のみレベルで絞る。未知・欠損レベルは隠さず出す(隠すと気付けない)。 */
+function levelShown(entry: LogEntry, levels: Record<Level, boolean>): boolean {
+  if (entry.kind !== "log") {
+    return true;
+  }
+  const level = entry.level as Level | undefined;
+  return level === undefined || !(level in levels) || levels[level];
+}
+
 export default function Logs() {
   const { entries, connection } = useEventStream(defaultWsUrl());
   const [query, setQuery] = useState("");
@@ -38,8 +50,17 @@ export default function Logs() {
     status: true,
     log: true,
   });
+  const [levels, setLevels] = useState<Record<Level, boolean>>({
+    error: true,
+    warn: true,
+    info: true,
+    debug: true,
+    trace: true,
+  });
   const bottomRef = useRef<HTMLDivElement>(null);
-  const shown = filterEntries(entries, query).filter((e) => kinds[e.kind]);
+  const shown = filterEntries(entries, query)
+    .filter((e) => kinds[e.kind])
+    .filter((e) => levelShown(e, levels));
 
   useEffect(() => {
     if (follow && bottomRef.current?.scrollIntoView) {
@@ -66,6 +87,17 @@ export default function Logs() {
               onChange={(e) => setKinds((prev) => ({ ...prev, [k]: e.target.checked }))}
             />
             {k}
+          </label>
+        ))}
+        {LEVELS.map((lv) => (
+          <label key={lv} className={`logs-kind-toggle log-level-${lv}`}>
+            <input
+              type="checkbox"
+              aria-label={lv}
+              checked={levels[lv]}
+              onChange={(e) => setLevels((prev) => ({ ...prev, [lv]: e.target.checked }))}
+            />
+            {lv}
           </label>
         ))}
         <label>
