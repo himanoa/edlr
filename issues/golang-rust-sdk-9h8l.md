@@ -2,7 +2,7 @@
 id: golang-rust-sdk-9h8l
 title: golangやRust向けのsdkを作って更新を簡単にできるようにする
 summary: sdk/rust(crate edlr-plugin-sdk)・sdk/go(module .../sdk/go)を新設し実装完了。既存 examples 全 9 個(Rust 7 / Go 2)を移行済み
-status: open
+status: closed
 labels: 
 created: 2026-07-29T05:46:52Z
 updated: 2026-08-05T04:10:37Z
