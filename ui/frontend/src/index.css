@@ -1,373 +1,130 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
+@import "@fontsource-variable/geist";
+
+@custom-variant dark (&:is(.dark *));
+
 :root {
   color-scheme: dark;
-  font-family: system-ui, sans-serif;
+  --background: oklch(1 0 0);
+  --foreground: oklch(0.145 0 0);
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.145 0 0);
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.145 0 0);
+  --primary: oklch(0.205 0 0);
+  --primary-foreground: oklch(0.985 0 0);
+  --secondary: oklch(0.97 0 0);
+  --secondary-foreground: oklch(0.205 0 0);
+  --muted: oklch(0.97 0 0);
+  --muted-foreground: oklch(0.556 0 0);
+  --accent: oklch(0.97 0 0);
+  --accent-foreground: oklch(0.205 0 0);
+  --destructive: oklch(0.577 0.245 27.325);
+  --border: oklch(0.922 0 0);
+  --input: oklch(0.922 0 0);
+  --ring: oklch(0.708 0 0);
+  --chart-1: oklch(0.87 0 0);
+  --chart-2: oklch(0.556 0 0);
+  --chart-3: oklch(0.439 0 0);
+  --chart-4: oklch(0.371 0 0);
+  --chart-5: oklch(0.269 0 0);
+  --radius: 0.625rem;
+  --sidebar: oklch(0.985 0 0);
+  --sidebar-foreground: oklch(0.145 0 0);
+  --sidebar-primary: oklch(0.205 0 0);
+  --sidebar-primary-foreground: oklch(0.985 0 0);
+  --sidebar-accent: oklch(0.97 0 0);
+  --sidebar-accent-foreground: oklch(0.205 0 0);
+  --sidebar-border: oklch(0.922 0 0);
+  --sidebar-ring: oklch(0.708 0 0);
 }
-body {
-  margin: 0;
-  background: #14171c;
-  color: #d8dee9;
-}
-.app {
-  display: flex;
-  flex-direction: column;
-  height: 100vh;
-}
-.tabs {
-  display: flex;
-  gap: 0.25rem;
-  padding: 0.5rem;
-  border-bottom: 1px solid #2b313b;
-}
-.tab {
-  background: none;
-  border: none;
-  color: #8a93a2;
-  padding: 0.4rem 0.9rem;
-  cursor: pointer;
-  border-radius: 4px;
-}
-.tab.active {
-  background: #2b313b;
-  color: #e8edf4;
-}
-.page {
-  flex: 1;
-  overflow: auto;
-  padding: 1rem;
-}
-.logs-toolbar {
-  display: flex;
-  gap: 0.75rem;
-  align-items: center;
-  margin-bottom: 0.5rem;
-}
-.logs-toolbar input[type="text"],
-.logs-toolbar input:not([type]) {
-  background: #1c2129;
-  border: 1px solid #2b313b;
-  color: inherit;
-  padding: 0.35rem 0.6rem;
-  border-radius: 4px;
-  width: 18rem;
-}
-.badge {
-  padding: 0.15rem 0.5rem;
-  border-radius: 999px;
-  font-size: 0.8rem;
-}
-.badge-open { background: #1d3b2a; color: #7fd8a2; }
-.badge-connecting { background: #3b331d; color: #d8c37f; }
-.badge-closed { background: #3b1d1d; color: #d87f7f; }
-.log-list {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  font-family: ui-monospace, monospace;
-  font-size: 0.85rem;
-}
-.log-row {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.75rem;
-  padding: 0.25rem 0.5rem;
-  border-bottom: 1px solid #1c2129;
-  cursor: pointer;
-}
-.log-row:hover { background: #1c2129; }
-.log-time { color: #6d7787; }
-.log-kind-journal { color: #7fb3d8; }
-.log-kind-status { color: #b3a1e0; }
-.log-raw {
-  flex-basis: 100%;
-  margin: 0.25rem 0 0;
-  padding: 0.5rem;
-  background: #10131a;
-  border-radius: 4px;
-  overflow-x: auto;
-}
-.logs-count { margin-left: auto; color: #6d7787; }
-.note { color: #8a93a2; font-size: 0.9rem; }
-.plugin-card {
-  background: #1c2129;
-  border: 1px solid #2b313b;
-  border-radius: 8px;
-  padding: 1rem 1.25rem;
-  margin-bottom: 1rem;
-  max-width: 40rem;
-}
-.plugin-card h2 { margin-top: 0; }
-.form-row {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 1rem;
-  padding: 0.35rem 0;
-}
-.form-row input[type="text"],
-.form-row input[type="number"],
-.form-row select {
-  background: #14171c;
-  border: 1px solid #2b313b;
-  color: inherit;
-  padding: 0.3rem 0.5rem;
-  border-radius: 4px;
-  width: 14rem;
-}
-.map-field {
-  border: 1px solid #2b313b;
-  border-radius: 6px;
-  padding: 0.5rem 0.75rem 0.75rem;
-  margin: 0.35rem 0;
-}
-.map-field legend {
-  padding: 0 0.4rem;
-  color: #7fb3d8;
-  font-weight: 600;
-}
-.map-row {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-  padding: 0.2rem 0;
-}
-.map-row input[type="text"] {
-  background: #14171c;
-  border: 1px solid #2b313b;
-  color: inherit;
-  padding: 0.3rem 0.5rem;
-  border-radius: 4px;
-  flex: 1 1 0;
-  min-width: 0;
-}
-.badge-plugin-running { background: #1d3b2a; color: #7fd8a2; }
-.badge-plugin-disabled { background: #3b1d1d; color: #d87f7f; }
-.plugin-card h2 {
-  display: flex;
-  align-items: center;
-  gap: 0.6rem;
-  font-size: 1.1rem;
-}
-.form-error {
-  color: #d87f7f;
-  font-size: 0.85rem;
-  margin: 0.4rem 0 0;
-}
-.capability-section {
-  margin-top: 0.75rem;
-  padding-top: 0.75rem;
-  border-top: 1px solid #2b313b;
-}
-.capability-list {
-  list-style: none;
-  margin: 0 0 0.5rem;
-  padding: 0;
-  font-size: 0.85rem;
-}
-.capability-request {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.5rem;
-  padding: 0.2rem 0;
-  color: #8a93a2;
-}
-.capability-kind {
-  background: #1c2129;
-  border-radius: 4px;
-  padding: 0.05rem 0.4rem;
-  color: #7fb3d8;
-}
-.capability-hosts {
-  font-family: ui-monospace, monospace;
-}
-.capability-notice {
-  color: #d8c37f;
-  font-size: 0.85rem;
-  margin: 0.4rem 0 0;
-}
-.capability-warning {
-  color: #d8c37f;
-  font-size: 0.85rem;
-  margin: 0.4rem 0 0;
-  font-weight: 600;
-}
-.capability-pending {
-  color: #8a93a2;
-  font-size: 0.8rem;
-  margin-left: 0.4rem;
-}
-.sidecar-section {
-  margin-top: 0.75rem;
-  padding-top: 0.75rem;
-  border-top: 1px solid #2b313b;
-}
-.sidecar-card {
-  border: 1px solid #2b313b;
-  border-radius: 6px;
-  padding: 0.75rem 1rem;
-  margin-bottom: 0.75rem;
-}
-.sidecar-card legend {
-  padding: 0 0.4rem;
-  color: #7fb3d8;
-  font-weight: 600;
-}
-.sidecar-reason {
-  color: #8a93a2;
-  font-size: 0.85rem;
-  margin: 0 0 0.5rem;
-}
-.sidecar-card textarea {
-  background: #14171c;
-  border: 1px solid #2b313b;
-  color: inherit;
-  padding: 0.3rem 0.5rem;
-  border-radius: 4px;
-  width: 14rem;
-  min-height: 3.5rem;
-  font-family: ui-monospace, monospace;
-}
-.sidecar-grant-toggle {
-  margin-top: 0.5rem;
-}
-.sidecar-instances {
-  list-style: none;
-  margin: 0.5rem 0;
-  padding: 0;
-  font-size: 0.85rem;
-  font-family: ui-monospace, monospace;
-  color: #8a93a2;
-}
-.sidecar-controls {
-  display: flex;
-  gap: 0.5rem;
-  margin-top: 0.5rem;
-}
-.filesystem-section {
-  margin-top: 0.75rem;
-  padding-top: 0.75rem;
-  border-top: 1px solid #2b313b;
-}
-.filesystem-card {
-  border: 1px solid #2b313b;
-  border-radius: 6px;
-  padding: 0.75rem 1rem;
-  margin-bottom: 0.75rem;
-}
-.filesystem-card legend {
-  padding: 0 0.4rem;
-  color: #7fb3d8;
-  font-weight: 600;
-}
-.filesystem-reason {
-  color: #8a93a2;
-  font-size: 0.85rem;
-  margin: 0 0 0.5rem;
-}
-.filesystem-grant-toggle {
-  margin-top: 0.5rem;
-}
-.badge-filesystem-mode {
-  background: #1c2129;
-  border-radius: 4px;
-  padding: 0.05rem 0.4rem;
-  color: #7fb3d8;
+@theme inline {
+  --font-heading: var(--font-sans);
+  --font-sans: 'Geist Variable', sans-serif;
+  --color-sidebar-ring: var(--sidebar-ring);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar: var(--sidebar);
+  --color-chart-5: var(--chart-5);
+  --color-chart-4: var(--chart-4);
+  --color-chart-3: var(--chart-3);
+  --color-chart-2: var(--chart-2);
+  --color-chart-1: var(--chart-1);
+  --color-ring: var(--ring);
+  --color-input: var(--input);
+  --color-border: var(--border);
+  --color-destructive: var(--destructive);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-accent: var(--accent);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-muted: var(--muted);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-secondary: var(--secondary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-primary: var(--primary);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-popover: var(--popover);
+  --color-card-foreground: var(--card-foreground);
+  --color-card: var(--card);
+  --color-foreground: var(--foreground);
+  --color-background: var(--background);
+  --radius-sm: calc(var(--radius) * 0.6);
+  --radius-md: calc(var(--radius) * 0.8);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) * 1.4);
+  --radius-2xl: calc(var(--radius) * 1.8);
+  --radius-3xl: calc(var(--radius) * 2.2);
+  --radius-4xl: calc(var(--radius) * 2.6);
 }
 
-/* PluginForm: レイアウト付き設定フォーム(セクションのカード化・行の整列) */
-.plugin-form .form-section {
-  background: #1c2129;
-  border: 1px solid #2b313b;
-  border-radius: 8px;
-  padding: 0.85rem 1rem 1rem;
-  margin: 0 0 1rem;
-}
-.plugin-form .form-section:last-child {
-  margin-bottom: 0;
-}
-/* 入れ子セクションは枠を弱め、左インデントのみで区切る */
-.plugin-form .form-section .form-section {
-  background: none;
-  border: none;
-  border-left: 2px solid #2b313b;
-  border-radius: 0;
-  padding: 0.5rem 0 0.5rem 1rem;
-  margin: 0.75rem 0 0;
-}
-.form-section h3 {
-  margin: 0 0 0.6rem;
-  font-size: 1rem;
-  color: #7fb3d8;
-}
-.form-section h4 {
-  margin: 0 0 0.4rem;
-  font-size: 0.9rem;
-  font-weight: 600;
-  color: #7fb3d8;
-}
-.form-section > .note {
-  margin: 0 0 0.6rem;
-}
-/* form-row: ラベルと入力欄を 2 カラムの grid で揃え、行ごとの縦ズレを解消する */
-.plugin-form .form-row {
-  display: grid;
-  grid-template-columns: minmax(8rem, 40%) 1fr;
-  align-items: center;
-  column-gap: 1rem;
-  row-gap: 0.25rem;
-  padding: 0.35rem 0;
-}
-.plugin-form .form-row input[type="text"],
-.plugin-form .form-row input[type="number"],
-.plugin-form .form-row select {
-  width: 100%;
-  max-width: 14rem;
-  justify-self: start;
-}
-.plugin-form .form-row input[type="checkbox"] {
-  justify-self: start;
-}
-.plugin-form .form-row .form-error {
-  grid-column: 1 / -1;
-  margin: 0;
+.dark {
+  --background: oklch(0.145 0 0);
+  --foreground: oklch(0.985 0 0);
+  --card: oklch(0.205 0 0);
+  --card-foreground: oklch(0.985 0 0);
+  --popover: oklch(0.205 0 0);
+  --popover-foreground: oklch(0.985 0 0);
+  --primary: oklch(0.922 0 0);
+  --primary-foreground: oklch(0.205 0 0);
+  --secondary: oklch(0.269 0 0);
+  --secondary-foreground: oklch(0.985 0 0);
+  --muted: oklch(0.269 0 0);
+  --muted-foreground: oklch(0.708 0 0);
+  --accent: oklch(0.269 0 0);
+  --accent-foreground: oklch(0.985 0 0);
+  --destructive: oklch(0.704 0.191 22.216);
+  --border: oklch(1 0 0 / 10%);
+  --input: oklch(1 0 0 / 15%);
+  --ring: oklch(0.556 0 0);
+  --chart-1: oklch(0.87 0 0);
+  --chart-2: oklch(0.556 0 0);
+  --chart-3: oklch(0.439 0 0);
+  --chart-4: oklch(0.371 0 0);
+  --chart-5: oklch(0.269 0 0);
+  --sidebar: oklch(0.205 0 0);
+  --sidebar-foreground: oklch(0.985 0 0);
+  --sidebar-primary: oklch(0.488 0.243 264.376);
+  --sidebar-primary-foreground: oklch(0.985 0 0);
+  --sidebar-accent: oklch(0.269 0 0);
+  --sidebar-accent-foreground: oklch(0.985 0 0);
+  --sidebar-border: oklch(1 0 0 / 10%);
+  --sidebar-ring: oklch(0.556 0 0);
 }
 
-/* Dashboard: プラグインウィジェットのグリッド */
-.widget-grid {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 1rem;
-}
-.widget-card {
-  background: #1c2129;
-  border: 1px solid #2b313b;
-  border-radius: 8px;
-  padding: 0.75rem 1rem;
-  min-width: 0;
-}
-.widget-card h2 {
-  margin-top: 0;
-  font-size: 1rem;
-}
-.widget-placeholder {
-  color: #8a93a2;
-}
-@media (max-width: 900px) {
-  .widget-grid {
-    grid-template-columns: 1fr;
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
   }
-  .widget-card {
-    grid-column: span 1 !important;
+  body {
+    @apply bg-background text-foreground;
+  }
+  html {
+    @apply font-sans;
   }
 }
-
-/* Logs: デーモンログ行 */
-.log-level { min-width: 3.2rem; text-transform: uppercase; font-size: 0.75rem; }
-/* debug/trace は RUST_LOG=debug のときだけ届く(既定は info 以上) */
-.log-level-trace { color: #6d7a86; }
-.log-level-debug { color: #8f9aa6; }
-.log-level-info { color: #7fb3d8; }
-.log-level-warn { color: #e0b429; }
-.log-level-error { color: #e05555; }
-.log-kind-log { color: #b48ce0; }
-.log-message { overflow-wrap: anywhere; }
-.logs-kind-toggle { display: inline-flex; align-items: center; gap: 0.25rem; }

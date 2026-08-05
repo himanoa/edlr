@@ -24,9 +24,9 @@ export function DroppedSection({ dropped }: { dropped: DroppedCounts }) {
   }
 
   return (
-    <div className="dropped-section">
-      <h3>Dropped</h3>
-      <p>
+    <div className="mt-3 border-t border-border pt-3">
+      <h3 className="m-0 mb-2 text-base font-semibold">Dropped</h3>
+      <p className="m-0 text-sm text-yellow-400">
         {items.join(", ")} dropped since the daemon started — the work queue was full.
         These are not replayed.
       </p>

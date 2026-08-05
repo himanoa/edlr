@@ -1,27 +1,56 @@
 import { useEffect, useRef, useState } from "react";
+import { Badge } from "@/components/ui/badge";
+import { Input } from "@/components/ui/input";
 import { filterEntries, type LogEntry } from "../lib/filter";
 import { defaultWsUrl, useEventStream, type ConnectionState } from "../ws";
 
+const CONNECTION_STYLE: Record<ConnectionState, string> = {
+  open: "bg-emerald-950 text-emerald-400",
+  connecting: "bg-yellow-950 text-yellow-400",
+  closed: "bg-red-950 text-red-400",
+};
+
 function ConnectionBadge({ state }: { state: ConnectionState }) {
   const label = { connecting: "接続中…", open: "接続済み", closed: "切断" }[state];
-  return <span className={`badge badge-${state}`}>{label}</span>;
+  return <Badge className={CONNECTION_STYLE[state]}>{label}</Badge>;
 }
+
+const KIND_STYLE: Record<string, string> = {
+  journal: "text-sky-400",
+  status: "text-violet-400",
+  log: "text-foreground",
+};
+
+const LEVEL_STYLE: Record<string, string> = {
+  error: "text-red-400",
+  warn: "text-yellow-400",
+  info: "text-sky-400",
+  debug: "text-muted-foreground",
+  trace: "text-muted-foreground",
+};
 
 function Row({ entry }: { entry: LogEntry }) {
   const [open, setOpen] = useState(false);
   return (
-    <li className="log-row" onClick={() => setOpen((o) => !o)}>
-      <span className="log-time">{entry.timestamp ?? "-"}</span>
-      <span className={`log-kind log-kind-${entry.kind}`}>{entry.kind}</span>
+    <li
+      className="flex cursor-pointer flex-wrap gap-3 border-b border-border/50 px-2 py-1 hover:bg-accent/50"
+      onClick={() => setOpen((o) => !o)}
+    >
+      <span className="text-muted-foreground">{entry.timestamp ?? "-"}</span>
+      <span className={KIND_STYLE[entry.kind] ?? ""}>{entry.kind}</span>
       {entry.kind === "log" ? (
         <>
-          <span className={`log-level log-level-${entry.level}`}>{entry.level}</span>
-          <span className="log-message">{entry.message}</span>
+          <span className={LEVEL_STYLE[entry.level ?? ""] ?? ""}>{entry.level}</span>
+          <span>{entry.message}</span>
         </>
       ) : (
-        <span className="log-event">{entry.event ?? "Status"}</span>
+        <span>{entry.event ?? "Status"}</span>
       )}
-      {open && <pre className="log-raw">{JSON.stringify(entry.raw, null, 2)}</pre>}
+      {open && (
+        <pre className="mt-1 basis-full overflow-x-auto rounded bg-card p-2">
+          {JSON.stringify(entry.raw, null, 2)}
+        </pre>
+      )}
     </li>
   );
 }
@@ -71,15 +100,16 @@ export default function Logs() {
   }, [shown[shown.length - 1]?.id, follow]);
 
   return (
-    <section className="logs">
-      <div className="logs-toolbar">
-        <input
+    <section>
+      <div className="mb-2 flex flex-wrap items-center gap-3 text-sm">
+        <Input
+          className="w-72"
           placeholder="フィルタ(イベント名・内容)"
           value={query}
           onChange={(e) => setQuery(e.target.value)}
         />
         {KINDS.map((k) => (
-          <label key={k} className="logs-kind-toggle">
+          <label key={k} className="flex items-center gap-1.5">
             <input
               type="checkbox"
               aria-label={k}
@@ -90,7 +120,7 @@ export default function Logs() {
           </label>
         ))}
         {LEVELS.map((lv) => (
-          <label key={lv} className={`logs-kind-toggle log-level-${lv}`}>
+          <label key={lv} className={`flex items-center gap-1.5 ${LEVEL_STYLE[lv]}`}>
             <input
               type="checkbox"
               aria-label={lv}
@@ -100,7 +130,7 @@ export default function Logs() {
             {lv}
           </label>
         ))}
-        <label>
+        <label className="flex items-center gap-1.5">
           <input
             type="checkbox"
             checked={follow}
@@ -109,9 +139,11 @@ export default function Logs() {
           自動スクロール
         </label>
         <ConnectionBadge state={connection} />
-        <span className="logs-count">{shown.length} / {entries.length} 件</span>
+        <span className="ml-auto text-muted-foreground">
+          {shown.length} / {entries.length} 件
+        </span>
       </div>
-      <ul className="log-list">
+      <ul className="m-0 list-none p-0 font-mono text-[0.85rem]">
         {shown.map((e) => (
           <Row key={e.id} entry={e} />
         ))}

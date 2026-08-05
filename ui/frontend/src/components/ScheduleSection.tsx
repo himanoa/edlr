@@ -84,9 +84,9 @@ export function ScheduleSection({ schedules }: { schedules: Schedule[] }) {
   }
 
   return (
-    <div className="schedule-section">
-      <h3>Schedules</h3>
-      <ul>
+    <div className="mt-3 border-t border-border pt-3">
+      <h3 className="m-0 mb-2 text-base font-semibold">Schedules</h3>
+      <ul className="m-0 list-none p-0 font-mono text-[0.85rem] text-muted-foreground">
         {schedules.map((schedule) => (
           <li key={schedule.name}>
             {schedule.name} — {schedule.spec} (next {formatNext(schedule.next, now)})

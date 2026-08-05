@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { Badge } from "@/components/ui/badge";
 import { BusSection } from "../components/BusSection";
 import CapabilitySection from "../components/CapabilitySection";
 import { DashboardSection } from "../components/DashboardSection";
@@ -24,12 +25,12 @@ type Status = "loading" | "ready" | "error";
 function StateBadge({ plugin }: { plugin: PluginInfo }) {
   if (plugin.state === "disabled") {
     return (
-      <span className="badge badge-plugin-disabled">
+      <Badge className="bg-red-950 text-red-400">
         無効{plugin.reason ? `: ${plugin.reason}` : ""}
-      </span>
+      </Badge>
     );
   }
-  return <span className="badge badge-plugin-running">有効</span>;
+  return <Badge className="bg-emerald-950 text-emerald-400">有効</Badge>;
 }
 
 export default function Plugins() {
@@ -190,21 +191,23 @@ export default function Plugins() {
 
   return (
     <section>
-      <h1>Plugins</h1>
-      {status === "loading" && <p className="note">読み込み中…</p>}
-      {status === "error" && <p className="form-error">プラグイン一覧の取得に失敗しました: {error}</p>}
+      <h1 className="mb-4 text-2xl font-bold">Plugins</h1>
+      {status === "loading" && <p className="text-sm text-muted-foreground">読み込み中…</p>}
+      {status === "error" && (
+        <p className="mt-1.5 text-sm text-red-400">プラグイン一覧の取得に失敗しました: {error}</p>
+      )}
       {status === "ready" && plugins.length === 0 && (
-        <p className="note">
+        <p className="text-sm text-muted-foreground">
           プラグインが見つかりませんでした。{pluginsDir} にプラグインを配置してください。
         </p>
       )}
       {status === "ready" &&
         plugins.map((p) => (
-          <article key={p.id} className="plugin-card">
-            <h2>
+          <article key={p.id} className="mb-4 max-w-2xl rounded-lg border bg-card px-5 py-4">
+            <h2 className="flex items-center gap-2 text-lg font-semibold">
               {p.name} <StateBadge plugin={p} />
             </h2>
-            <p>{p.description}</p>
+            <p className="my-2">{p.description}</p>
             <PluginForm plugin={p} onChange={handleChange(p.id)} />
             <CapabilitySection
               capabilities={p.capabilities}

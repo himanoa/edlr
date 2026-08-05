@@ -1,7 +1,12 @@
 import { useEffect, useRef, useState } from "react";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { invoke, isTauri, type AppConfigDto } from "../lib/tauri";
 
 type Status = "loading" | "ready" | "unavailable";
+
+const NOTE = "text-sm text-muted-foreground";
+const FORM_ERROR = "mt-1.5 text-sm text-red-400";
 
 export default function Settings() {
   // Plugins.tsx と同じく、await をまたぐ setState をアンマウント後に撃たないよう守る
@@ -102,13 +107,13 @@ export default function Settings() {
   };
 
   return (
-    <section>
-      <h1>Settings</h1>
+    <section className="max-w-2xl space-y-3">
+      <h1 className="text-xl font-semibold">Settings</h1>
 
-      {status === "loading" && <p className="note">読み込み中…</p>}
+      {status === "loading" && <p className={NOTE}>読み込み中…</p>}
 
       {status === "unavailable" && (
-        <p className="note">
+        <p className={NOTE}>
           設定はデスクトップアプリから変更してください。ブラウザからは変更できません。
         </p>
       )}
@@ -116,7 +121,7 @@ export default function Settings() {
       {status === "ready" && (
         <>
           {config?.configError && (
-            <p className="form-error">
+            <p className={FORM_ERROR}>
               設定ファイルを読み込めませんでした: {config.configError}
               <br />
               保存すると新しい内容で上書きされます。
@@ -124,7 +129,7 @@ export default function Settings() {
           )}
 
           {config?.daemonError && (
-            <p className="form-error">
+            <p className={FORM_ERROR}>
               デーモンを起動できませんでした: {config.daemonError}
               <br />
               保存すると再度起動を試みます。
@@ -132,7 +137,7 @@ export default function Settings() {
           )}
 
           {config?.envOverride && (
-            <p className="note">
+            <p className={NOTE}>
               環境変数 EDLR_JOURNAL_DIR が設定されているため、デーモンは現在
               {" "}
               {config.journalDir} を使用しています。ここで編集・保存できるのは設定ファイルの値
@@ -141,45 +146,51 @@ export default function Settings() {
             </p>
           )}
 
-          <label htmlFor="journal-dir">Journal ディレクトリ</label>
-          <input
-            id="journal-dir"
-            type="text"
-            value={draft}
-            onChange={(e) => setDraft(e.target.value)}
-            disabled={saving}
-          />
-          <button type="button" onClick={handlePick} disabled={saving}>
-            選択…
-          </button>
-          <button type="button" onClick={handleSave} disabled={saving || draft === ""}>
-            保存
-          </button>
-          {/* config が null(get_config 失敗)のときは保存済みの値が
-              あるか分からないので出さない。`!== null` だと undefined を
-              拾ってしまうため `!= null` で両方を弾く。 */}
-          {config?.configuredJournalDir != null && (
-            <button type="button" onClick={handleClear} disabled={saving}>
-              自動検出に戻す
-            </button>
-          )}
-          {/* 起動に失敗している間は、保存(draft 必須)もクリア(設定値必須)も
-              押せない状況があり得る。責任は持ち続けている以上、再試行の経路を
-              必ず一つ残す。実体は「現在の実効値で spawn し直す」なので
-              clear_journal_dir と同じ操作。 */}
-          {config?.daemonError && config.configuredJournalDir == null && (
-            <button type="button" onClick={handleClear} disabled={saving}>
-              デーモンの起動を再試行
-            </button>
-          )}
+          <div className="space-y-1.5">
+            <label htmlFor="journal-dir" className="block text-sm font-medium">
+              Journal ディレクトリ
+            </label>
+            <Input
+              id="journal-dir"
+              type="text"
+              value={draft}
+              onChange={(e) => setDraft(e.target.value)}
+              disabled={saving}
+            />
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <Button type="button" variant="secondary" onClick={handlePick} disabled={saving}>
+              選択…
+            </Button>
+            <Button type="button" onClick={handleSave} disabled={saving || draft === ""}>
+              保存
+            </Button>
+            {/* config が null(get_config 失敗)のときは保存済みの値が
+                あるか分からないので出さない。`!== null` だと undefined を
+                拾ってしまうため `!= null` で両方を弾く。 */}
+            {config?.configuredJournalDir != null && (
+              <Button type="button" variant="secondary" onClick={handleClear} disabled={saving}>
+                自動検出に戻す
+              </Button>
+            )}
+            {/* 起動に失敗している間は、保存(draft 必須)もクリア(設定値必須)も
+                押せない状況があり得る。責任は持ち続けている以上、再試行の経路を
+                必ず一つ残す。実体は「現在の実効値で spawn し直す」なので
+                clear_journal_dir と同じ操作。 */}
+            {config?.daemonError && config.configuredJournalDir == null && (
+              <Button type="button" variant="secondary" onClick={handleClear} disabled={saving}>
+                デーモンの起動を再試行
+              </Button>
+            )}
+          </div>
 
-          <p className="note">
+          <p className={NOTE}>
             未設定の場合は Proton の既定パスを自動検出します。自動検出が当たらない環境
             (セカンダリ Steam ライブラリなど)では、ここで明示的に指定してください。
           </p>
 
-          {error && <p className="form-error">{error}</p>}
-          {notice && <p className="note">{notice}</p>}
+          {error && <p className={FORM_ERROR}>{error}</p>}
+          {notice && <p className={NOTE}>{notice}</p>}
         </>
       )}
     </section>

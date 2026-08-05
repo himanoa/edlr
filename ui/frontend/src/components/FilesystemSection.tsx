@@ -1,6 +1,10 @@
 import { useEffect, useState } from "react";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { invoke, isTauri } from "../lib/tauri";
 import type { FilesystemConfig, FilesystemRoot } from "../types/plugin";
+
+const WARNING = "mt-1.5 text-sm font-semibold text-yellow-400";
 
 function FilesystemRootCard({
   root,
@@ -60,34 +64,35 @@ function FilesystemRootCard({
   };
 
   return (
-    <fieldset className="filesystem-card">
-      <legend>{root.name}</legend>
-      <p className="filesystem-reason">{root.reason}</p>
-      <span className="badge badge-filesystem-mode">
+    <fieldset className="mb-3 rounded-md border border-border px-4 py-3">
+      <legend className="px-1.5 font-semibold text-sky-400">{root.name}</legend>
+      <p className="mb-2 text-sm text-muted-foreground">{root.reason}</p>
+      <Badge className="bg-accent text-sky-400">
         {root.mode === "read-write" ? "読み書き" : "読み取りのみ"}
-      </span>
+      </Badge>
 
-      <label className="form-row">
+      <label className="flex items-center justify-between gap-4 py-1.5">
         <span>フォルダ</span>
         <input
           aria-label="フォルダ"
           type="text"
+          className="w-56 rounded border border-border bg-background px-2 py-1 text-foreground disabled:opacity-50"
           value={path}
           onChange={(e) => setPath(e.target.value)}
           disabled={saving}
         />
       </label>
       {isTauri() && (
-        <button type="button" onClick={handlePick} disabled={saving}>
+        <Button type="button" variant="secondary" size="sm" onClick={handlePick} disabled={saving}>
           選択…
-        </button>
+        </Button>
       )}
 
-      <button type="button" onClick={handleSave} disabled={saving}>
+      <Button type="button" variant="secondary" size="sm" onClick={handleSave} disabled={saving}>
         保存
-      </button>
+      </Button>
 
-      <label className="form-row filesystem-grant-toggle">
+      <label className="mt-2 flex items-center justify-between gap-4 py-1.5">
         <span>このフォルダへのアクセスを承認する</span>
         {/*
           `SidecarSection` と同じ規律: `checked` はサーバから返った
@@ -106,30 +111,30 @@ function FilesystemRootCard({
           onChange={(e) => handleGrant(e.target.checked)}
         />
         {grantSaving && (
-          <span className="capability-pending" role="status">
+          <span className="ml-1.5 text-xs text-muted-foreground" role="status">
             確認中…
           </span>
         )}
       </label>
 
       {root.mode === "read-write" ? (
-        <p className="capability-warning">
+        <p className={WARNING}>
           承認すると、このプラグインは選んだフォルダ内のファイルを読み取り・作成・上書き・削除できます
         </p>
       ) : (
-        <p className="capability-warning">
+        <p className={WARNING}>
           承認すると、このプラグインは選んだフォルダ内のファイルを読み取れます
         </p>
       )}
 
       {!root.granted && (
-        <p className="capability-notice">未承認 — このプラグインはファイルにアクセスできません</p>
+        <p className="mt-1.5 text-sm text-yellow-400">
+          未承認 — このプラグインはファイルにアクセスできません
+        </p>
       )}
-      {root.staleGrant && (
-        <p className="capability-warning">要求が変わったため再承認が必要です</p>
-      )}
+      {root.staleGrant && <p className={WARNING}>要求が変わったため再承認が必要です</p>}
 
-      {error && <p className="form-error">{error}</p>}
+      {error && <p className="mt-1.5 text-sm text-red-400">{error}</p>}
     </fieldset>
   );
 }
@@ -148,7 +153,7 @@ export default function FilesystemSection({
   }
 
   return (
-    <div className="filesystem-section">
+    <div className="mt-3 border-t border-border pt-3">
       {roots.map((r) => (
         <FilesystemRootCard
           key={r.name}

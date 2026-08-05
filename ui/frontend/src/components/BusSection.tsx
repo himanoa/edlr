@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { Badge } from "@/components/ui/badge";
 import type { BusRequest } from "../types/plugin";
 
 function BusEntryCard({
@@ -26,21 +27,21 @@ function BusEntryCard({
   };
 
   return (
-    <fieldset className="bus-card">
-      <legend>{entry.driver}</legend>
-      <p className="bus-reason">{entry.reason}</p>
+    <fieldset className="mb-3 rounded-md border border-border px-4 py-3">
+      <legend className="px-1.5 font-semibold text-sky-400">{entry.driver}</legend>
+      <p className="mb-2 text-sm text-muted-foreground">{entry.reason}</p>
 
-      {!entry.resolved && <span className="badge badge-bus-unresolved">未解決</span>}
-      {entry.staleGrant && <span className="badge badge-bus-stale">要再承認</span>}
+      {!entry.resolved && <Badge className="bg-red-950 text-red-400">未解決</Badge>}
+      {entry.staleGrant && <Badge className="bg-yellow-950 text-yellow-400">要再承認</Badge>}
 
       {entry.publish.length > 0 && (
-        <p className="bus-publish">配信するトピック: {entry.publish.join(", ")}</p>
+        <p className="text-sm text-muted-foreground">配信するトピック: {entry.publish.join(", ")}</p>
       )}
       {entry.subscribe.length > 0 && (
-        <p className="bus-subscribe">購読するトピック: {entry.subscribe.join(", ")}</p>
+        <p className="text-sm text-muted-foreground">購読するトピック: {entry.subscribe.join(", ")}</p>
       )}
 
-      <label className="form-row bus-grant-toggle">
+      <label className="mt-2 flex items-center justify-between gap-4 py-1.5">
         <span>このバス接続を承認する</span>
         {/*
           `FilesystemSection` / `SidecarSection` と同じ規律: `checked` は
@@ -63,19 +64,19 @@ function BusEntryCard({
           onChange={(e) => handleGrant(e.target.checked)}
         />
         {saving && (
-          <span className="capability-pending" role="status">
+          <span className="ml-1.5 text-xs text-muted-foreground" role="status">
             確認中…
           </span>
         )}
       </label>
 
       {!entry.granted && (
-        <p className="capability-notice">
+        <p className="mt-1.5 text-sm text-yellow-400">
           未承認 — このプラグインはこのドライバとメッセージをやり取りできません
         </p>
       )}
 
-      {error && <p className="form-error">{error}</p>}
+      {error && <p className="mt-1.5 text-sm text-red-400">{error}</p>}
     </fieldset>
   );
 }
@@ -94,7 +95,7 @@ export function BusSection({
   }
 
   return (
-    <div className="bus-section">
+    <div className="mt-3 border-t border-border pt-3">
       {bus.map((entry) => (
         <BusEntryCard
           key={entry.driver}

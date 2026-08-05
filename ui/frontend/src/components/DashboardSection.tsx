@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { Badge } from "@/components/ui/badge";
 import type { DashboardWidget } from "../types/plugin";
 
 function DashboardEntryCard({
@@ -26,16 +27,16 @@ function DashboardEntryCard({
   };
 
   return (
-    <fieldset className="bus-card">
-      <legend>{entry.title}</legend>
-      <p className="bus-reason">
+    <fieldset className="mb-3 rounded-md border border-border px-4 py-3">
+      <legend className="px-1.5 font-semibold text-sky-400">{entry.title}</legend>
+      <p className="mb-2 text-sm text-muted-foreground">
         ダッシュボードウィジェット({entry.size}) — {entry.entry}
       </p>
 
-      {!entry.resolved && <span className="badge badge-bus-unresolved">未解決</span>}
-      {entry.staleGrant && <span className="badge badge-bus-stale">要再承認</span>}
+      {!entry.resolved && <Badge className="bg-red-950 text-red-400">未解決</Badge>}
+      {entry.staleGrant && <Badge className="bg-yellow-950 text-yellow-400">要再承認</Badge>}
 
-      <label className="form-row bus-grant-toggle">
+      <label className="mt-2 flex items-center justify-between gap-4 py-1.5">
         <span>このウィジェットの表示を承認する</span>
         {/*
           `BusSection` と同じ規律: `checked` はサーバから返った
@@ -52,19 +53,19 @@ function DashboardEntryCard({
           onChange={(e) => handleGrant(e.target.checked)}
         />
         {saving && (
-          <span className="capability-pending" role="status">
+          <span className="ml-1.5 text-xs text-muted-foreground" role="status">
             確認中…
           </span>
         )}
       </label>
 
       {!entry.granted && (
-        <p className="capability-notice">
+        <p className="mt-1.5 text-sm text-yellow-400">
           未承認 — このウィジェットは Dashboard に表示されません
         </p>
       )}
 
-      {error && <p className="form-error">{error}</p>}
+      {error && <p className="mt-1.5 text-sm text-red-400">{error}</p>}
     </fieldset>
   );
 }
@@ -83,7 +84,7 @@ export function DashboardSection({
   }
 
   return (
-    <div className="dashboard-section">
+    <div className="mt-3 border-t border-border pt-3">
       {dashboard.map((entry) => (
         <DashboardEntryCard
           key={entry.id}

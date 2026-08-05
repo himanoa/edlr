@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { Button } from "@/components/ui/button";
 import { invoke, isTauri, type AppConfigDto } from "./lib/tauri";
 import Dashboard from "./pages/Dashboard";
 import DriversPage from "./pages/Drivers";
@@ -30,19 +31,21 @@ export default function App() {
   }, []);
 
   return (
-    <div className="app">
-      <nav className="tabs">
+    <div className="flex h-screen flex-col bg-background text-foreground">
+      <nav className="flex gap-1 border-b p-2">
         {TABS.map((t) => (
-          <button
+          <Button
             key={t}
-            className={t === tab ? "tab active" : "tab"}
+            variant={t === tab ? "secondary" : "ghost"}
+            size="sm"
+            className={t === tab ? "active" : undefined}
             onClick={() => setTab(t)}
           >
             {t}
-          </button>
+          </Button>
         ))}
       </nav>
-      <main className="page">
+      <main className="flex-1 overflow-auto p-4">
         {tab === "Dashboard" && <Dashboard />}
         {tab === "Logs" && <Logs />}
         {tab === "Plugins" && <Plugins />}

@@ -1,6 +1,13 @@
 import { useEffect, useState } from "react";
+import { Button } from "@/components/ui/button";
 import { invoke, isTauri } from "../lib/tauri";
 import type { Sidecar, SidecarConfig } from "../types/plugin";
+
+const ROW = "flex items-center justify-between gap-4 py-1.5";
+const INPUT =
+  "w-56 rounded border border-border bg-background px-2 py-1 text-foreground disabled:opacity-50";
+const WARNING = "mt-1.5 text-sm font-semibold text-yellow-400";
+const PENDING = "ml-1.5 text-xs text-muted-foreground";
 
 /// 承認すると実際に採番される実ポート列(`port, port+1, …, port+replicas-1`)。
 /// `core::plugin::sidecar::assign_ports` と同じ規則(`replicas` は 1 未満なら
@@ -115,41 +122,44 @@ function SidecarCard({
   };
 
   return (
-    <fieldset className="sidecar-card">
-      <legend>{sidecar.name}</legend>
-      <p className="sidecar-reason">{sidecar.reason}</p>
+    <fieldset className="mb-3 rounded-md border border-border px-4 py-3">
+      <legend className="px-1.5 font-semibold text-sky-400">{sidecar.name}</legend>
+      <p className="mb-2 text-sm text-muted-foreground">{sidecar.reason}</p>
 
-      <label className="form-row">
+      <label className={ROW}>
         <span>実行ファイル</span>
         <input
           aria-label="実行ファイル"
           type="text"
+          className={INPUT}
           value={command}
           onChange={(e) => setCommand(e.target.value)}
           disabled={saving}
         />
       </label>
       {isTauri() && (
-        <button type="button" onClick={handlePick} disabled={saving}>
+        <Button type="button" variant="secondary" size="sm" onClick={handlePick} disabled={saving}>
           選択…
-        </button>
+        </Button>
       )}
 
-      <label className="form-row">
+      <label className={ROW}>
         <span>引数(1 行 1 引数)</span>
         <textarea
           aria-label="引数"
+          className="min-h-14 w-56 rounded border border-border bg-background px-2 py-1 font-mono text-foreground disabled:opacity-50"
           value={args}
           onChange={(e) => setArgs(e.target.value)}
           disabled={saving}
         />
       </label>
 
-      <label className="form-row">
+      <label className={ROW}>
         <span>ポート</span>
         <input
           aria-label="ポート"
           type="number"
+          className={INPUT}
           value={port}
           onChange={(e) => setPort(e.target.value)}
           disabled={saving}
@@ -157,11 +167,12 @@ function SidecarCard({
       </label>
 
       {sidecar.scalable && (
-        <label className="form-row">
+        <label className={ROW}>
           <span>レプリカ数</span>
           <input
             aria-label="レプリカ数"
             type="number"
+            className={INPUT}
             value={replicas}
             onChange={(e) => setReplicas(e.target.value)}
             disabled={saving}
@@ -169,11 +180,11 @@ function SidecarCard({
         </label>
       )}
 
-      <button type="button" onClick={handleSave} disabled={saving}>
+      <Button type="button" variant="secondary" size="sm" onClick={handleSave} disabled={saving}>
         保存
-      </button>
+      </Button>
 
-      <label className="form-row sidecar-grant-toggle">
+      <label className={`${ROW} mt-2`}>
         <span>このサイドカーを承認する</span>
         {/*
           `CapabilitySection` と同じ理由で、`checked` はサーバから返った
@@ -192,17 +203,17 @@ function SidecarCard({
           onChange={(e) => handleGrant(e.target.checked)}
         />
         {grantSaving && (
-          <span className="capability-pending" role="status">
+          <span className={PENDING} role="status">
             確認中…
           </span>
         )}
       </label>
 
-      <p className="capability-warning">
+      <p className={WARNING}>
         承認するとこのプラグインはあなたが指定したプログラムを実行できます。そのプログラムは
         edlr のサンドボックスの外で動きます。
       </p>
-      <p className="capability-warning" data-testid="sidecar-network-warning">
+      <p className={WARNING} data-testid="sidecar-network-warning">
         さらに、承認するとこのプラグインは{" "}
         <code>http://127.0.0.1:{assignPorts(sidecar.config).join(", 127.0.0.1:")}</code>{" "}
         への通信が(サイドカーを 1 つも起動していなくても)許可されます。このポート番号は
@@ -212,13 +223,13 @@ function SidecarCard({
       </p>
 
       {!sidecar.granted && (
-        <p className="capability-notice">未承認 — このプラグインはプロセスを起動できません</p>
+        <p className="mt-1.5 text-sm text-yellow-400">
+          未承認 — このプラグインはプロセスを起動できません
+        </p>
       )}
-      {sidecar.staleGrant && (
-        <p className="capability-warning">要求が変わったため再承認が必要です</p>
-      )}
+      {sidecar.staleGrant && <p className={WARNING}>要求が変わったため再承認が必要です</p>}
 
-      <ul className="sidecar-instances">
+      <ul className="my-2 list-none p-0 font-mono text-[0.85rem] text-muted-foreground">
         {sidecar.instances.map((inst) => (
           <li key={inst.index}>
             #{inst.index} :{inst.port}{" "}
@@ -229,19 +240,37 @@ function SidecarCard({
         ))}
       </ul>
 
-      <div className="sidecar-controls">
-        <button type="button" onClick={() => handleControl("start")} disabled={controlling}>
+      <div className="mt-2 flex gap-2">
+        <Button
+          type="button"
+          variant="secondary"
+          size="sm"
+          onClick={() => handleControl("start")}
+          disabled={controlling}
+        >
           起動
-        </button>
-        <button type="button" onClick={() => handleControl("stop")} disabled={controlling}>
+        </Button>
+        <Button
+          type="button"
+          variant="secondary"
+          size="sm"
+          onClick={() => handleControl("stop")}
+          disabled={controlling}
+        >
           停止
-        </button>
-        <button type="button" onClick={() => handleControl("restart")} disabled={controlling}>
+        </Button>
+        <Button
+          type="button"
+          variant="secondary"
+          size="sm"
+          onClick={() => handleControl("restart")}
+          disabled={controlling}
+        >
           再起動
-        </button>
+        </Button>
       </div>
 
-      {error && <p className="form-error">{error}</p>}
+      {error && <p className="mt-1.5 text-sm text-red-400">{error}</p>}
     </fieldset>
   );
 }
@@ -262,7 +291,7 @@ export default function SidecarSection({
   }
 
   return (
-    <div className="sidecar-section">
+    <div className="mt-3 border-t border-border pt-3">
       {sidecars.map((s) => (
         <SidecarCard
           key={s.name}

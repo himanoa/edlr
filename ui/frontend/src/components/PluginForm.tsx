@@ -1,5 +1,12 @@
 import { useEffect, useRef, useState } from "react";
+import { Button } from "@/components/ui/button";
 import type { LayoutSection, PluginInfo, SettingField } from "../types/plugin";
+
+// ラベル+入力欄の 2 カラム grid 行(旧 .plugin-form .form-row)
+const ROW = "grid grid-cols-[minmax(8rem,40%)_1fr] items-center gap-x-4 gap-y-1 py-1.5";
+const INPUT =
+  "w-full max-w-56 justify-self-start rounded border border-border bg-background px-2 py-1 text-foreground disabled:opacity-50";
+const ROW_ERROR = "col-span-full m-0 text-sm text-red-400";
 
 // `PluginInfo` の一部だけを要求する形にしてある。`DriverInfo`(bus を持たない)
 // のようにフィールドの一部が異なる形でも、この 3 つさえ揃っていれば
@@ -56,11 +63,12 @@ function SecretField({
   };
 
   return (
-    <label htmlFor={id} className="form-row">
+    <label htmlFor={id} className={ROW}>
       <span>{field.label}</span>
       <input
         id={id}
         type="password"
+        className={INPUT}
         value={draft}
         disabled={disabled}
         placeholder={isSet ? "設定済み(変更する場合のみ入力)" : "未設定"}
@@ -111,11 +119,12 @@ function DraftField({
   };
 
   return (
-    <label htmlFor={id} className="form-row">
+    <label htmlFor={id} className={ROW}>
       <span>{field.label}</span>
       <input
         id={id}
         type={field.type === "number" ? "number" : "text"}
+        className={INPUT}
         value={draft}
         disabled={disabled}
         onChange={(e) => setDraft(e.target.value)}
@@ -254,18 +263,19 @@ function MapField({
     // 移動で {"<key>": ""} のような書きかけの行を保存しない(issue btvh)。
     // blur は React では focusout としてバブルするので fieldset で拾える。
     <fieldset
-      className="map-field"
+      className="my-1.5 rounded-md border border-border px-3 pt-2 pb-3"
       onBlur={(e) => {
         if (!e.currentTarget.contains(e.relatedTarget)) {
           commit(rows);
         }
       }}
     >
-      <legend>{field.label}</legend>
+      <legend className="px-1.5 font-semibold text-sky-400">{field.label}</legend>
       {rows.map((row) => (
-        <div key={row.id} className="map-row">
+        <div key={row.id} className="flex items-center gap-2 py-0.5">
           <input
             type="text"
+            className="min-w-0 flex-1 rounded border border-border bg-background px-2 py-1 text-foreground disabled:opacity-50"
             aria-label={`${field.label} のキー`}
             value={row.key}
             disabled={disabled}
@@ -279,6 +289,7 @@ function MapField({
           />
           <input
             type="text"
+            className="min-w-0 flex-1 rounded border border-border bg-background px-2 py-1 text-foreground disabled:opacity-50"
             aria-label={`${field.label} の値`}
             value={row.value}
             disabled={disabled}
@@ -290,8 +301,10 @@ function MapField({
               }
             }}
           />
-          <button
+          <Button
             type="button"
+            variant="secondary"
+            size="sm"
             disabled={disabled}
             onClick={() => {
               const next = rows.filter((r) => r.id !== row.id);
@@ -300,18 +313,20 @@ function MapField({
             }}
           >
             削除
-          </button>
+          </Button>
         </div>
       ))}
-      <button
+      <Button
         type="button"
+        variant="secondary"
+        size="sm"
         disabled={disabled}
         onClick={() => setRows((current) => [...current, { id: makeId(), key: "", value: "" }])}
       >
         行を追加
-      </button>
+      </Button>
       {duplicate !== null && (
-        <p className="form-error">キーが重複しています: {duplicate}</p>
+        <p className="mt-1.5 text-sm text-red-400">キーが重複しています: {duplicate}</p>
       )}
     </fieldset>
   );
@@ -334,11 +349,12 @@ function Field({
   switch (field.type) {
     case "boolean":
       return (
-        <label htmlFor={id} className="form-row">
+        <label htmlFor={id} className={ROW}>
           <span>{field.label}</span>
           <input
             id={id}
             type="checkbox"
+            className="justify-self-start"
             checked={Boolean(value)}
             disabled={disabled}
             onChange={(e) => onChange(e.target.checked)}
@@ -394,12 +410,12 @@ function SelectField({
   if (options === null) {
     const source = field.optionsFrom;
     return (
-      <label htmlFor={id} className="form-row">
+      <label htmlFor={id} className={ROW}>
         <span>{field.label}</span>
-        <select id={id} value={current} disabled onChange={() => {}}>
+        <select id={id} className={INPUT} value={current} disabled onChange={() => {}}>
           <option value={current}>{current}</option>
         </select>
-        <p className="form-error">
+        <p className={ROW_ERROR}>
           {source
             ? `候補を取得できません(ドライバ ${source.driver} のトピック ${source.topic} が未着です)`
             : "候補を取得できません"}
@@ -412,10 +428,11 @@ function SelectField({
   const shown = missing ? [{ value: current, label: current }, ...options] : options;
 
   return (
-    <label htmlFor={id} className="form-row">
+    <label htmlFor={id} className={ROW}>
       <span>{field.label}</span>
       <select
         id={id}
+        className={INPUT}
         value={current}
         disabled={disabled}
         onChange={(e) => onChange(e.target.value)}
@@ -426,7 +443,7 @@ function SelectField({
           </option>
         ))}
       </select>
-      {missing && <p className="form-error">保存済みの値が現在の候補にありません</p>}
+      {missing && <p className={ROW_ERROR}>保存済みの値が現在の候補にありません</p>}
     </label>
   );
 }
@@ -480,9 +497,23 @@ export default function PluginForm({
   };
 
   const renderSection = (section: LayoutSection, depth: number, key: number) => (
-    <section key={key} className="form-section">
-      {depth === 0 ? <h3>{section.title}</h3> : <h4>{section.title}</h4>}
-      {section.description && <p className="note">{section.description}</p>}
+    <section
+      key={key}
+      className={
+        depth === 0
+          ? // トップレベルはカード、入れ子は枠を弱め左インデントのみで区切る
+            "mb-4 rounded-lg border bg-card px-4 pt-3.5 pb-4 last:mb-0"
+          : "mt-3 border-l-2 border-border py-2 pl-4"
+      }
+    >
+      {depth === 0 ? (
+        <h3 className="m-0 mb-2.5 text-base font-semibold text-sky-400">{section.title}</h3>
+      ) : (
+        <h4 className="m-0 mb-1.5 text-sm font-semibold text-sky-400">{section.title}</h4>
+      )}
+      {section.description && (
+        <p className="m-0 mb-2.5 text-sm text-muted-foreground">{section.description}</p>
+      )}
       {section.children.map((node, i) =>
         "field" in node ? renderField(node.field) : renderSection(node, depth + 1, i),
       )}
@@ -490,11 +521,11 @@ export default function PluginForm({
   );
 
   return (
-    <form className="plugin-form" onSubmit={(e) => e.preventDefault()}>
+    <form onSubmit={(e) => e.preventDefault()}>
       {plugin.layout
         ? plugin.layout.sections.map((s, i) => renderSection(s, 0, i))
         : plugin.settings.map((field) => renderField(field.key))}
-      {error && <p className="form-error">{error}</p>}
+      {error && <p className="mt-1.5 text-sm text-red-400">{error}</p>}
     </form>
   );
 }

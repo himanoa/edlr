@@ -28,17 +28,17 @@ export default function CapabilitySection({
   };
 
   return (
-    <div className="capability-section">
-      <ul className="capability-list">
+    <div className="mt-3 border-t border-border pt-3">
+      <ul className="m-0 mb-2 list-none p-0 text-[0.85rem]">
         {capabilities.requests.map((req, i) => (
-          <li key={i} className="capability-request">
-            <span className="capability-kind">{req.kind}</span>
-            <span className="capability-hosts">{req.hosts.join(", ")}</span>
-            <span className="capability-reason">{req.reason}</span>
+          <li key={i} className="flex flex-wrap gap-2 py-0.5 text-muted-foreground">
+            <span className="rounded bg-accent px-1.5 text-sky-400">{req.kind}</span>
+            <span className="font-mono">{req.hosts.join(", ")}</span>
+            <span>{req.reason}</span>
           </li>
         ))}
       </ul>
-      <label className="form-row capability-toggle">
+      <label className="flex items-center justify-between gap-4 py-1.5">
         <span>外部通信を承認する</span>
         {/*
           `checked` is driven by the confirmed `capabilities.granted` prop,
@@ -56,18 +56,22 @@ export default function CapabilitySection({
           onChange={(e) => toggle(e.target.checked)}
         />
         {saving && (
-          <span className="capability-pending" role="status">
+          <span className="ml-1.5 text-xs text-muted-foreground" role="status">
             確認中…
           </span>
         )}
       </label>
       {!capabilities.granted && (
-        <p className="capability-notice">未承認 — このプラグインは外部通信できません</p>
+        <p className="mt-1.5 text-sm text-yellow-400">
+          未承認 — このプラグインは外部通信できません
+        </p>
       )}
       {capabilities.staleGrant && (
-        <p className="capability-warning">要求が変わったため再承認が必要です</p>
+        <p className="mt-1.5 text-sm font-semibold text-yellow-400">
+          要求が変わったため再承認が必要です
+        </p>
       )}
-      {error && <p className="form-error">{error}</p>}
+      {error && <p className="mt-1.5 text-sm text-red-400">{error}</p>}
     </div>
   );
 }

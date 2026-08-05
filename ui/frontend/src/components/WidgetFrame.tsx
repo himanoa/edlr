@@ -71,7 +71,8 @@ export function WidgetFrame({
       title={`${entry.plugin}/${entry.widget}`}
       src={entry.url}
       sandbox="allow-scripts"
-      style={{ width: "100%", height, border: "none" }}
+      className="w-full border-none"
+      style={{ height }}
     />
   );
 }

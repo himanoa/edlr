@@ -1,4 +1,6 @@
 import { useEffect, useRef, useState } from "react";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import CapabilitySection from "../components/CapabilitySection";
 import FilesystemSection from "../components/FilesystemSection";
 import PluginForm from "../components/PluginForm";
@@ -19,12 +21,12 @@ type Status = "loading" | "ready" | "error";
 function StateBadge({ driver }: { driver: DriverInfo }) {
   if (driver.state === "disabled") {
     return (
-      <span className="badge badge-plugin-disabled">
+      <Badge className="bg-red-950 text-red-400">
         無効{driver.reason ? `: ${driver.reason}` : ""}
-      </span>
+      </Badge>
     );
   }
-  return <span className="badge badge-plugin-running">有効</span>;
+  return <Badge className="bg-emerald-950 text-emerald-400">有効</Badge>;
 }
 
 /**
@@ -147,31 +149,29 @@ export function Drivers({
 
   return (
     <section>
-      <h1>Drivers</h1>
-      <button type="button" onClick={onReload}>
+      <h1 className="mb-4 text-2xl font-bold">Drivers</h1>
+      <Button type="button" variant="secondary" size="sm" className="mb-4" onClick={onReload}>
         更新
-      </button>
+      </Button>
       {items.length === 0 && (
-        <p className="note">
+        <p className="text-sm text-muted-foreground">
           ドライバが見つかりませんでした。{driversDir} にドライバを配置してください。
         </p>
       )}
       {items.map((d) => (
-        <article key={d.id} className="plugin-card">
-          <h2>
+        <article key={d.id} className="mb-4 max-w-2xl rounded-lg border bg-card px-5 py-4">
+          <h2 className="flex items-center gap-2 text-lg font-semibold">
             {d.name} <StateBadge driver={d} />
           </h2>
-          <p>{d.description}</p>
+          <p className="my-2">{d.description}</p>
 
           {d.topics.length > 0 && (
-            <ul className="driver-topics">
+            <ul className="my-2 list-none space-y-1 p-0 text-sm">
               {d.topics.map((t) => (
                 <li key={t.name}>
-                  <span className="driver-topic-name">{t.name}</span>{" "}
-                  <span className="badge badge-topic-retain">
-                    {t.retain ? "retain" : "no-retain"}
-                  </span>{" "}
-                  <span className="driver-topic-description">{t.description}</span>
+                  <span className="font-mono text-sky-400">{t.name}</span>{" "}
+                  <Badge variant="outline">{t.retain ? "retain" : "no-retain"}</Badge>{" "}
+                  <span className="text-muted-foreground">{t.description}</span>
                 </li>
               ))}
             </ul>
@@ -246,10 +246,10 @@ export default function DriversPage() {
   };
 
   if (status === "loading") {
-    return <p className="note">読み込み中…</p>;
+    return <p className="text-sm text-muted-foreground">読み込み中…</p>;
   }
   if (status === "error") {
-    return <p className="form-error">ドライバ一覧の取得に失敗しました: {error}</p>;
+    return <p className="mt-1.5 text-sm text-red-400">ドライバ一覧の取得に失敗しました: {error}</p>;
   }
 
   return <Drivers drivers={drivers} driversDir={driversDir} onReload={handleReload} />;
