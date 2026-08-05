@@ -122,8 +122,13 @@ pub fn find_in_path(name: &str) -> Option<PathBuf> {
         .find(|p| p.is_file())
 }
 
-/// 探索順: env_bin(無条件)→ exe_dir の edlr → PATH ヒット → dev fallback(実在時のみ)。
+/// 探索順: env_bin(無条件)→ exe_dir の edlr-daemon / edlr → PATH ヒット →
+/// dev fallback(実在時のみ)。
 /// PATH 探索・環境変数の読み取りは呼び出し側で行い、ここは順序決定のみを担う。
+///
+/// exe_dir では sidecar 名 `edlr-daemon` を先に見る: パッケージ配布物では
+/// GUI 自身が `edlr`(productName)としてインストールされるため、`edlr` を
+/// 先に見ると自分自身を daemon として spawn してしまう(issue vlxe)。
 pub fn resolve_edlr_bin(
     env_bin: Option<PathBuf>,
     exe_dir: Option<&Path>,
@@ -134,8 +139,11 @@ pub fn resolve_edlr_bin(
         return Some(p);
     }
     if let Some(dir) = exe_dir {
-        let candidate = dir.join("edlr");
-        if candidate.is_file() {
+        if let Some(candidate) = ["edlr-daemon", "edlr"]
+            .iter()
+            .map(|name| dir.join(name))
+            .find(|p| p.is_file())
+        {
             return Some(candidate);
         }
     }
@@ -237,7 +245,21 @@ mod tests {
         let dev = tempfile::tempdir().unwrap();
         let dev_bin = make_exec(dev.path(), "edlr");
 
-        // exe_dir の edlr が最優先
+        // exe_dir に edlr-daemon(sidecar 名)があればそれが最優先。
+        // パッケージ配布物では exe_dir/edlr は GUI 自身なので誤選択しない。
+        let daemon_sibling = make_exec(exe_dir.path(), "edlr-daemon");
+        assert_eq!(
+            resolve_edlr_bin(
+                None,
+                Some(exe_dir.path()),
+                Some(path_hit.clone()),
+                Some(dev_bin.clone())
+            ),
+            Some(daemon_sibling)
+        );
+        fs::remove_file(exe_dir.path().join("edlr-daemon")).unwrap();
+
+        // edlr-daemon が無ければ exe_dir の edlr
         assert_eq!(
             resolve_edlr_bin(
                 None,

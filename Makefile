@@ -2,6 +2,7 @@ FRONTEND_DIR := ui/frontend
 TAURI_APP_DIR := ui
 BUNDLE_DIR    := target/release/bundle
 DIST_DIR      := dist
+TARGET_TRIPLE := $(shell rustc -vV | sed -n 's/^host: //p')
 
 # make           → リリースバイナリをビルドするだけ(target/release/edlr-ui, target/release/edlr)
 # make install   → バイナリ(edlr-ui / edlr)を PATH(~/.cargo/bin)に配置
@@ -19,7 +20,14 @@ install: frontend
 
 packaging: frontend tauri-cli
 	cargo fetch
-	cd $(TAURI_APP_DIR) && cargo tauri build --config '{"build":{"beforeBuildCommand":""}}'
+	# core の edlr を sidecar(externalBin)として同梱する。Tauri は
+	# <name>-<target-triple> というファイル名を要求する(issue vlxe)。
+	# externalBin を tauri.conf.json に書くと sidecar ファイルが無いだけで
+	# 通常の cargo build/test まで失敗するため、packaging 時だけ --config で渡す。
+	cargo build --release -p edlr-core
+	mkdir -p $(TAURI_APP_DIR)/src-tauri/binaries
+	cp target/release/edlr $(TAURI_APP_DIR)/src-tauri/binaries/edlr-daemon-$(TARGET_TRIPLE)
+	cd $(TAURI_APP_DIR) && cargo tauri build --config '{"build":{"beforeBuildCommand":""},"bundle":{"externalBin":["binaries/edlr-daemon"]}}'
 	mkdir -p $(DIST_DIR)
 	find $(BUNDLE_DIR) -maxdepth 2 -type f \
 		\( -name '*.deb' -o -name '*.rpm' -o -name '*.AppImage' \) \

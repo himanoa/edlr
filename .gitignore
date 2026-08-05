@@ -4,6 +4,7 @@ node_modules/
 ui/frontend/dist/
 ui/frontend/*.tsbuildinfo
 ui/src-tauri/gen/
+ui/src-tauri/binaries/
 examples/plugins/*/target/
 examples/drivers/*/target/
 sdk/rust/target/
