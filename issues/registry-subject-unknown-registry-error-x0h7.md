@@ -2,10 +2,10 @@
 id: registry-subject-unknown-registry-error-x0h7
 title: registry subject の unknown_registry_error 文字列 dispatch と list() の clone 増(kgc6 追い残件)
 summary: 
-status: open
+status: closed
 labels: refactor
 created: 2026-07-31T06:32:56Z
-updated: 2026-07-31T06:32:56Z
+updated: 2026-08-05T07:08:14Z
 ---
 
 
@@ -28,3 +28,8 @@ updated: 2026-07-31T06:32:56Z
    silent fallback を消す。
 2. ホットと実証されたら `SettingsService::effective_for` 等に `_with_manifest` 口を
    足して list() で射影を1回に共有する(それまでは容認)。
+
+## 対応(2026-08-05)
+
+1 の unknown_registry_error は required method 化した(plugin/driver 各1行)。
+2 の list() clone 増は issue 記載どおり「ホットと実証されるまで容認」のままとする。
