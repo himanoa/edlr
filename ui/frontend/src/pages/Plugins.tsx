@@ -1,5 +1,18 @@
-import { useEffect, useRef, useState } from "react";
+import { useAtom, useAtomValue, useSetAtom } from "jotai";
+import { AlertCircle, PackageOpen } from "lucide-react";
+import { Component, type ReactNode, Suspense } from "react";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
+import {
+  Empty,
+  EmptyDescription,
+  EmptyHeader,
+  EmptyMedia,
+  EmptyTitle,
+} from "@/components/ui/empty";
+import { Skeleton } from "@/components/ui/skeleton";
+import { pluginList$ } from "@/store/pluginList";
+import { rpcClient$ } from "@/store/rpcClient";
 import { BusSection } from "../components/BusSection";
 import CapabilitySection from "../components/CapabilitySection";
 import { DashboardSection } from "../components/DashboardSection";
@@ -8,19 +21,15 @@ import FilesystemSection from "../components/FilesystemSection";
 import PluginForm from "../components/PluginForm";
 import { ScheduleSection } from "../components/ScheduleSection";
 import SidecarSection from "../components/SidecarSection";
-import { RpcClient } from "../rpc";
 import type {
   Capabilities,
   FilesystemConfig,
   FilesystemRoots,
   PluginInfo,
-  PluginsList,
   SidecarConfig,
   Sidecars,
 } from "../types/plugin";
-import { defaultWsUrl } from "../ws";
-
-type Status = "loading" | "ready" | "error";
+import { selectedPluginId$ } from "@/store/selectedPluginId";
 
 function StateBadge({ plugin }: { plugin: PluginInfo }) {
   if (plugin.state === "disabled") {
@@ -33,184 +42,162 @@ function StateBadge({ plugin }: { plugin: PluginInfo }) {
   return <Badge className="bg-emerald-950 text-emerald-400">有効</Badge>;
 }
 
+class LoadErrorBoundary extends Component<{ children: ReactNode }, { error: Error | null }> {
+  state = { error: null as Error | null };
+  static getDerivedStateFromError(error: Error) {
+    return { error };
+  }
+  render() {
+    if (this.state.error) {
+      return (
+        <section>
+          <Alert variant="destructive">
+            <AlertCircle />
+            <AlertTitle>プラグイン一覧の取得に失敗しました</AlertTitle>
+            <AlertDescription>{this.state.error.message}</AlertDescription>
+          </Alert>
+        </section>
+      );
+    }
+    return this.props.children;
+  }
+}
+
 export default function Plugins() {
-  const clientRef = useRef<RpcClient | null>(null);
-  // Guards every post-await setState in this component (the initial `plugins/list`
-  // load and `handleChange`'s `plugins/set-settings` round-trip) against firing
-  // after the component has unmounted (e.g. the user switches tabs mid-save).
-  const mountedRef = useRef(true);
-  const [status, setStatus] = useState<Status>("loading");
-  const [pluginsDir, setPluginsDir] = useState("");
-  const [plugins, setPlugins] = useState<PluginInfo[]>([]);
-  const [error, setError] = useState<string | null>(null);
-  const [selectedId, setSelectedId] = useState<string | null>(null);
+  return (
+    <LoadErrorBoundary>
+      <Suspense
+        fallback={
+          <section role="status" className="flex h-full gap-4">
+            <span className="sr-only">読み込み中…</span>
+            <div className="w-64 shrink-0 space-y-2 border-r pr-2">
+              <Skeleton className="h-12 w-full" />
+              <Skeleton className="h-12 w-full" />
+              <Skeleton className="h-12 w-full" />
+            </div>
+            <div className="max-w-2xl flex-1 space-y-3">
+              <Skeleton className="h-7 w-48" />
+              <Skeleton className="h-4 w-72" />
+              <Skeleton className="h-32 w-full" />
+            </div>
+          </section>
+        }
+      >
+        <PluginsContent />
+      </Suspense>
+    </LoadErrorBoundary>
+  );
+}
 
-  useEffect(() => {
-    mountedRef.current = true;
-    const client = new RpcClient(defaultWsUrl());
-    clientRef.current = client;
+function PluginsContent() {
+  // 一覧の取得は pluginList$ が担う。rpcClient$ は設定変更・承認トグルなどの
+  // ミューテーション用の共有クライアント。
+  const client = useAtomValue(rpcClient$);
+  const { pluginsDir, plugins } = useAtomValue(pluginList$);
+  const setPluginList = useSetAtom(pluginList$);
+  const [selectedId, setSelectedId] = useAtom(selectedPluginId$);
 
-    client
-      .call<PluginsList>("plugins/list")
-      .then((res) => {
-        if (!mountedRef.current) return;
-        setPluginsDir(res.pluginsDir);
-        setPlugins(res.plugins);
-        setStatus("ready");
-      })
-      .catch((err) => {
-        if (!mountedRef.current) return;
-        setError(err instanceof Error ? err.message : String(err));
-        setStatus("error");
-      });
+  const rpc = () => {
+    if (!client) throw new Error("RPC に接続されていません");
+    return client;
+  };
 
-    return () => {
-      mountedRef.current = false;
-      clientRef.current = null;
-      client.close();
-    };
-  }, []);
+  const patchPlugin = (pluginId: string, patch: Partial<PluginInfo>) =>
+    setPluginList((prev) => ({
+      ...prev,
+      plugins: prev.plugins.map((p) => (p.id === pluginId ? { ...p, ...patch } : p)),
+    }));
 
   const handleChange = (pluginId: string) => async (key: string, value: unknown) => {
-    const client = clientRef.current;
-    if (!client) throw new Error("RPC に接続されていません");
-    const updated = await client.call<Record<string, unknown>>("plugins/set-settings", {
+    const updated = await rpc().call<Record<string, unknown>>("plugins/set-settings", {
       plugin: pluginId,
       values: { [key]: value },
     });
-    if (!mountedRef.current) return;
-    setPlugins((prev) =>
-      prev.map((p) => (p.id === pluginId ? { ...p, values: updated } : p)),
-    );
+    patchPlugin(pluginId, { values: updated });
   };
 
   const handleCapabilityToggle = (pluginId: string) => async (granted: boolean) => {
-    const client = clientRef.current;
-    if (!client) throw new Error("RPC に接続されていません");
-    const updated = await client.call<Capabilities>("plugins/set-capabilities", {
+    const updated = await rpc().call<Capabilities>("plugins/set-capabilities", {
       plugin: pluginId,
       granted,
     });
-    if (!mountedRef.current) return;
-    setPlugins((prev) =>
-      prev.map((p) => (p.id === pluginId ? { ...p, capabilities: updated } : p)),
-    );
+    patchPlugin(pluginId, { capabilities: updated });
   };
 
   const handleSidecarConfig = (pluginId: string) => async (name: string, config: SidecarConfig) => {
-    const client = clientRef.current;
-    if (!client) throw new Error("RPC に接続されていません");
-    const updated = await client.call<Sidecars>("plugins/set-sidecar-config", {
+    const updated = await rpc().call<Sidecars>("plugins/set-sidecar-config", {
       plugin: pluginId,
       name,
       config,
     });
-    if (!mountedRef.current) return;
-    setPlugins((prev) =>
-      prev.map((p) => (p.id === pluginId ? { ...p, sidecars: updated.sidecars } : p)),
-    );
+    patchPlugin(pluginId, { sidecars: updated.sidecars });
   };
 
   const handleSidecarGrant = (pluginId: string) => async (name: string, granted: boolean) => {
-    const client = clientRef.current;
-    if (!client) throw new Error("RPC に接続されていません");
-    const updated = await client.call<Sidecars>("plugins/set-sidecar-grant", {
+    const updated = await rpc().call<Sidecars>("plugins/set-sidecar-grant", {
       plugin: pluginId,
       name,
       granted,
     });
-    if (!mountedRef.current) return;
-    setPlugins((prev) =>
-      prev.map((p) => (p.id === pluginId ? { ...p, sidecars: updated.sidecars } : p)),
-    );
+    patchPlugin(pluginId, { sidecars: updated.sidecars });
   };
 
   const handleSidecarControl =
     (pluginId: string) => async (name: string, action: "start" | "stop" | "restart") => {
-      const client = clientRef.current;
-      if (!client) throw new Error("RPC に接続されていません");
-      const updated = await client.call<Sidecars>("plugins/sidecar-control", {
+      const updated = await rpc().call<Sidecars>("plugins/sidecar-control", {
         plugin: pluginId,
         name,
         action,
       });
-      if (!mountedRef.current) return;
-      setPlugins((prev) =>
-        prev.map((p) => (p.id === pluginId ? { ...p, sidecars: updated.sidecars } : p)),
-      );
+      patchPlugin(pluginId, { sidecars: updated.sidecars });
     };
 
   const handleFilesystemConfig =
     (pluginId: string) => async (name: string, config: FilesystemConfig) => {
-      const client = clientRef.current;
-      if (!client) throw new Error("RPC に接続されていません");
-      const updated = await client.call<FilesystemRoots>("plugins/set-filesystem-config", {
+      const updated = await rpc().call<FilesystemRoots>("plugins/set-filesystem-config", {
         plugin: pluginId,
         name,
         config,
       });
-      if (!mountedRef.current) return;
-      setPlugins((prev) =>
-        prev.map((p) => (p.id === pluginId ? { ...p, filesystem: updated.roots } : p)),
-      );
+      patchPlugin(pluginId, { filesystem: updated.roots });
     };
 
   const handleFilesystemGrant =
     (pluginId: string) => async (name: string, granted: boolean) => {
-      const client = clientRef.current;
-      if (!client) throw new Error("RPC に接続されていません");
-      const updated = await client.call<FilesystemRoots>("plugins/set-filesystem-grant", {
+      const updated = await rpc().call<FilesystemRoots>("plugins/set-filesystem-grant", {
         plugin: pluginId,
         name,
         granted,
       });
-      if (!mountedRef.current) return;
-      setPlugins((prev) =>
-        prev.map((p) => (p.id === pluginId ? { ...p, filesystem: updated.roots } : p)),
-      );
+      patchPlugin(pluginId, { filesystem: updated.roots });
     };
 
   const handleBusGrant = async (pluginId: string, driver: string, granted: boolean) => {
-    const client = clientRef.current;
-    if (!client) throw new Error("RPC に接続されていません");
-    const updated = await client.setBusGrant(pluginId, driver, granted);
-    if (!mountedRef.current) return;
-    setPlugins((prev) =>
-      prev.map((p) => (p.id === pluginId ? { ...p, bus: updated.bus } : p)),
-    );
+    const updated = await rpc().setBusGrant(pluginId, driver, granted);
+    patchPlugin(pluginId, { bus: updated.bus });
   };
 
   const handleDashboardGrant = async (pluginId: string, widget: string, granted: boolean) => {
-    const client = clientRef.current;
-    if (!client) throw new Error("RPC に接続されていません");
-    const updated = await client.setDashboardGrant(pluginId, widget, granted);
-    if (!mountedRef.current) return;
-    setPlugins((prev) =>
-      prev.map((p) => (p.id === pluginId ? { ...p, dashboard: updated.dashboard } : p)),
-    );
+    const updated = await rpc().setDashboardGrant(pluginId, widget, granted);
+    patchPlugin(pluginId, { dashboard: updated.dashboard });
   };
 
   const selected = plugins.find((p) => p.id === selectedId) ?? plugins[0];
 
-  if (status !== "ready") {
-    return (
-      <section>
-        {status === "loading" && <p className="text-sm text-muted-foreground">読み込み中…</p>}
-        {status === "error" && (
-          <p className="mt-1.5 text-sm text-red-400">
-            プラグイン一覧の取得に失敗しました: {error}
-          </p>
-        )}
-      </section>
-    );
-  }
-
   if (plugins.length === 0) {
     return (
-      <section>
-        <p className="text-sm text-muted-foreground">
-          プラグインが見つかりませんでした。{pluginsDir} にプラグインを配置してください。
-        </p>
+      <section className="h-full">
+        <Empty className="h-full">
+          <EmptyHeader>
+            <EmptyMedia variant="icon">
+              <PackageOpen />
+            </EmptyMedia>
+            <EmptyTitle>プラグインが見つかりませんでした</EmptyTitle>
+            <EmptyDescription>
+              {pluginsDir} にプラグインを配置してください。
+            </EmptyDescription>
+          </EmptyHeader>
+        </Empty>
       </section>
     );
   }

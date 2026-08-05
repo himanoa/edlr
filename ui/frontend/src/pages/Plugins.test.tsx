@@ -1,5 +1,8 @@
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+// 各テストを独立した jotai store で走らせる(async atom のキャッシュが
+// テスト間に漏れないように)。store なし Provider はマウントごとに新規 store を作る。
+import { Provider } from "jotai";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import type { PluginInfo, PluginsList } from "../types/plugin";
 import Plugins from "./Plugins";
@@ -158,7 +161,7 @@ test("shows loading then renders the plugin list", async () => {
   const plugin = makePlugin();
   listImpl = () => Promise.resolve({ pluginsDir: "/plugins", plugins: [plugin] });
 
-  render(<Plugins />);
+  render(<Provider><Plugins /></Provider>);
   expect(screen.getByText(/読み込み/)).toBeInTheDocument();
 
   expect(await screen.findByRole("heading", { name: /Voice Notify/ })).toBeInTheDocument();
@@ -167,7 +170,7 @@ test("shows loading then renders the plugin list", async () => {
 test("shows an empty-state message including pluginsDir when there are no plugins", async () => {
   listImpl = () => Promise.resolve({ pluginsDir: "/opt/edlr/plugins", plugins: [] });
 
-  render(<Plugins />);
+  render(<Provider><Plugins /></Provider>);
 
   expect(await screen.findByText(/\/opt\/edlr\/plugins/)).toBeInTheDocument();
 });
@@ -175,7 +178,7 @@ test("shows an empty-state message including pluginsDir when there are no plugin
 test("shows an error message when plugins/list fails", async () => {
   listImpl = () => Promise.reject(new Error("connection refused"));
 
-  render(<Plugins />);
+  render(<Provider><Plugins /></Provider>);
 
   expect(await screen.findByText(/connection refused/)).toBeInTheDocument();
 });
@@ -184,22 +187,25 @@ test("shows the reason for a disabled plugin", async () => {
   const plugin = makePlugin({ state: "disabled", reason: "wasm load failed" });
   listImpl = () => Promise.resolve({ pluginsDir: "/plugins", plugins: [plugin] });
 
-  render(<Plugins />);
+  render(<Provider><Plugins /></Provider>);
 
   expect(await screen.findByText(/wasm load failed/)).toBeInTheDocument();
 });
 
-test("closes the RpcClient when the component unmounts", async () => {
+test("closes every RpcClient when the component unmounts", async () => {
   const plugin = makePlugin();
   listImpl = () => Promise.resolve({ pluginsDir: "/plugins", plugins: [plugin] });
 
-  const { unmount } = render(<Plugins />);
+  const { unmount } = render(<Provider><Plugins /></Provider>);
   await screen.findByRole("heading", { name: /Voice Notify/ });
 
   unmount();
 
-  expect(instances).toHaveLength(1);
-  expect(instances[0].close).toHaveBeenCalledTimes(1);
+  // pluginList$ の一覧取得用(fetch 完了時に close)と、ページのミューテーション用の 2 本
+  expect(instances).toHaveLength(2);
+  for (const instance of instances) {
+    expect(instance.close).toHaveBeenCalledTimes(1);
+  }
 });
 
 test("changing a setting calls plugins/set-settings with the right args and updates displayed values", async () => {
@@ -207,7 +213,7 @@ test("changing a setting calls plugins/set-settings with the right args and upda
   listImpl = () => Promise.resolve({ pluginsDir: "/plugins", plugins: [plugin] });
   setSettingsImpl = () => Promise.resolve({ enabled: false });
 
-  render(<Plugins />);
+  render(<Provider><Plugins /></Provider>);
   const checkbox = (await screen.findByLabelText("有効")) as HTMLInputElement;
   await userEvent.click(checkbox);
 
@@ -232,7 +238,7 @@ test("shows the capability section for a plugin that has capability requests", a
   });
   listImpl = () => Promise.resolve({ pluginsDir: "/plugins", plugins: [plugin] });
 
-  render(<Plugins />);
+  render(<Provider><Plugins /></Provider>);
 
   expect(await screen.findByText(/api\.example\.com/)).toBeInTheDocument();
 });
@@ -253,7 +259,7 @@ test("toggling capability approval calls plugins/set-capabilities and updates th
       staleGrant: false,
     });
 
-  render(<Plugins />);
+  render(<Provider><Plugins /></Provider>);
   const toggle = (await screen.findByRole("checkbox", { name: /承認/ })) as HTMLInputElement;
   await userEvent.click(toggle);
 
@@ -270,7 +276,7 @@ test("shows the sidecar section for a plugin that declares sidecars", async () =
   const plugin = makePlugin({ sidecars: [makeSidecar()] });
   listImpl = () => Promise.resolve({ pluginsDir: "/plugins", plugins: [plugin] });
 
-  render(<Plugins />);
+  render(<Provider><Plugins /></Provider>);
 
   expect(await screen.findByText(/音声合成エンジン/)).toBeInTheDocument();
 });
@@ -280,7 +286,7 @@ test("toggling sidecar approval calls plugins/set-sidecar-grant with the right p
   listImpl = () => Promise.resolve({ pluginsDir: "/plugins", plugins: [plugin] });
   setSidecarGrantImpl = () => Promise.resolve({ sidecars: [makeSidecar({ granted: true })] });
 
-  render(<Plugins />);
+  render(<Provider><Plugins /></Provider>);
   const toggle = (await screen.findByRole("checkbox", {
     name: /このサイドカーを承認する/,
   })) as HTMLInputElement;
@@ -298,7 +304,7 @@ test("shows the filesystem section for a plugin that declares filesystem roots",
   const plugin = makePlugin({ filesystem: [makeFilesystemRoot()] });
   listImpl = () => Promise.resolve({ pluginsDir: "/plugins", plugins: [plugin] });
 
-  render(<Plugins />);
+  render(<Provider><Plugins /></Provider>);
 
   expect(await screen.findByText(/CSV で書き出すため/)).toBeInTheDocument();
 });
@@ -309,7 +315,7 @@ test("toggling filesystem approval calls plugins/set-filesystem-grant with the r
   setFilesystemGrantImpl = () =>
     Promise.resolve({ roots: [makeFilesystemRoot({ granted: true })] });
 
-  render(<Plugins />);
+  render(<Provider><Plugins /></Provider>);
   const toggle = (await screen.findByRole("checkbox", {
     name: /このフォルダへのアクセスを承認する/,
   })) as HTMLInputElement;
@@ -327,7 +333,7 @@ test("shows the bus section for a plugin that declares bus connections", async (
   const plugin = makePlugin({ bus: [makeBusEntry()] });
   listImpl = () => Promise.resolve({ pluginsDir: "/plugins", plugins: [plugin] });
 
-  render(<Plugins />);
+  render(<Provider><Plugins /></Provider>);
 
   expect(await screen.findByText(/現在システムを購読するため/)).toBeInTheDocument();
 });
@@ -340,7 +346,7 @@ test("toggling bus approval calls setBusGrant with the right params and replaces
       bus: [makeBusEntry({ granted: true }), makeBusEntry({ driver: "translator-core" })],
     });
 
-  render(<Plugins />);
+  render(<Provider><Plugins /></Provider>);
   const toggle = (await screen.findByRole("checkbox", {
     name: /このバス接続を承認する/,
   })) as HTMLInputElement;
@@ -378,7 +384,7 @@ test("toggling dashboard approval calls setDashboardGrant and replaces the dashb
       ],
     });
 
-  render(<Plugins />);
+  render(<Provider><Plugins /></Provider>);
   const toggle = (await screen.findByRole("checkbox", {
     name: /このウィジェットの表示を承認する/,
   })) as HTMLInputElement;
@@ -408,7 +414,7 @@ test("shows the schedules section with name, spec, and next time for a plugin th
   });
   listImpl = () => Promise.resolve({ pluginsDir: "/plugins", plugins: [plugin] });
 
-  render(<Plugins />);
+  render(<Provider><Plugins /></Provider>);
 
   expect(await screen.findByText(/flush — every 60s \(next .+\)/)).toBeInTheDocument();
   expect(await screen.findByText(/daily — cron: 0 9 \* \* \* \(next .+\)/)).toBeInTheDocument();
@@ -418,7 +424,7 @@ test("hides the schedules section when a plugin declares no schedules", async ()
   const plugin = makePlugin({ schedules: [] });
   listImpl = () => Promise.resolve({ pluginsDir: "/plugins", plugins: [plugin] });
 
-  render(<Plugins />);
+  render(<Provider><Plugins /></Provider>);
 
   await screen.findByRole("heading", { name: new RegExp(plugin.name) });
   expect(screen.queryByText("Schedules")).not.toBeInTheDocument();
