@@ -1,0 +1,196 @@
+package edlr:plugin@0.5.0;
+
+interface host-log {
+  enum level { debug, info, warn, error }
+  log: func(level: level, message: string);
+}
+
+interface host-settings {
+  get-all: func() -> string; // 設定値 JSON オブジェクト文字列(defaults マージ済み)
+}
+
+interface driver-http {
+  record request {
+    method: string,
+    url: string,
+    headers: list<tuple<string, string>>,
+    body: option<list<u8>>,
+  }
+  record response {
+    status: u16,
+    headers: list<tuple<string, string>>,
+    body: list<u8>,
+  }
+  variant driver-error {
+    permission-denied(string),
+    invalid-request(string),
+    transport(string),
+  }
+  send: func(req: request) -> result<response, driver-error>;
+  // 非同期 submit。即 return し、ホストは中で await しない。結果は
+  // `on-job-complete` export へ job-id 付きで届く。
+  // timeout-ms: none なら 30_000。上限 60_000 にクランプ。
+  submit-send: func(req: request, timeout-ms: option<u32>) -> result<u64, driver-error>;
+}
+
+interface driver-process {
+  enum instance-state { running, exited }
+
+  record instance {
+    index: u32,
+    port: u16,
+    state: instance-state,
+    exit-code: option<s32>,
+  }
+
+  variant driver-error {
+    permission-denied(string),
+    not-configured(string),
+    unknown-sidecar(string),
+    rate-limited(string),
+    spawn-failed(string),
+  }
+
+  ensure-started: func(name: string) -> result<list<instance>, driver-error>;
+  stop: func(name: string) -> result<_, driver-error>;
+  status: func(name: string) -> result<list<instance>, driver-error>;
+}
+
+interface driver-fs {
+  // 行末コメントは使わない。wit-bindgen-go が各コメントを「次のフィールド」に
+  // 付けてしまい、生成物のコメントが 1 つずつずれるため(下も同じ)。
+  record entry {
+    // ルートからの相対パス
+    path: string,
+    size: u64,
+    // Unix epoch 秒。取得できなければ none
+    modified: option<u64>,
+  }
+
+  variant driver-error {
+    // 未承認 / mode 違反
+    permission-denied(string),
+    // ディレクトリ未設定
+    not-configured(string),
+    // manifest にない root 名
+    unknown-root(string),
+    // 脱出を含む不正なパス
+    invalid-path(string),
+    not-found(string),
+    too-large(string),
+    io(string),
+  }
+
+  read:       func(root: string, path: string) -> result<list<u8>, driver-error>;
+  read-range: func(root: string, path: string, offset: u64, len: u32) -> result<list<u8>, driver-error>;
+  stat:       func(root: string, path: string) -> result<entry, driver-error>;
+  %list:      func(root: string, prefix: string) -> result<list<entry>, driver-error>;
+  write:      func(root: string, path: string, bytes: list<u8>) -> result<_, driver-error>;
+  append:     func(root: string, path: string, bytes: list<u8>) -> result<_, driver-error>;
+  delete:     func(root: string, path: string) -> result<_, driver-error>;
+}
+
+/// `bus-error` を関数を持たない型だけの interface に切り出したもの。
+/// `bus` や `bus-host` のように関数を持つ interface から `use` で型を借りると、
+/// その interface 全体が import 先の world に引き込まれてしまう
+/// (WIT の `use` は型だけでなく interface 全体への依存を生む)。
+/// `world driver` が `bus-host` を import しつつ `bus` を引き込まないためには、
+/// 両者が共有する型をこの関数なし interface から借りる必要がある。
+interface bus-types {
+  variant bus-error {
+    permission-denied(string),
+    unknown-driver(string),
+    unknown-topic(string),
+    driver-unavailable(string),
+    queue-full(string),
+    too-large(string),
+  }
+}
+
+interface bus {
+  use bus-types.{bus-error};
+
+  publish: func(driver: string, topic: string, payload: list<u8>) -> result<_, bus-error>;
+  get:     func(driver: string, topic: string) -> result<option<list<u8>>, bus-error>;
+}
+
+interface bus-host {
+  use bus-types.{bus-error};
+
+  emit: func(topic: string, payload: list<u8>) -> result<_, bus-error>;
+}
+
+world plugin {
+  import host-log;
+  import host-settings;
+  import driver-http;
+  import driver-process;
+  import driver-fs;
+  import bus;
+
+  record event {
+    // "journal" | "status"
+    kind: string,
+    timestamp: option<string>,
+    // journal イベント名
+    name: option<string>,
+    // raw JSON
+    payload-json: string,
+    // デーモンが動き出す前に既に書かれていたイベント
+    replay: bool,
+  }
+
+  export init: func();
+  export on-event: func(ev: event);
+  export on-message: func(driver: string, topic: string, payload: list<u8>);
+  // manifest の `[[schedule]]` エントリごとに、その name を渡して呼ばれる。
+  export on-schedule: func(name: string);
+  export on-job-complete: func(job-id: u64, result-json: string);
+  // デーモンの graceful shutdown 時に一度だけ呼ばれる。trap による
+  // 無効化(disable)の後には呼ばれない。
+  export on-stop: func();
+}
+
+/// ゲスト(プラグイン)がビルド時に対象とする world。
+///
+/// 中身は `plugin` に WASI の import 一式を足しただけ。Go/TinyGo の
+/// 標準ライブラリは、プラグインが何も呼ばなくても WASI を import する
+/// (環境変数の初期化で `wasi:cli/environment`、`time.Now()` で
+/// `wasi:clocks/wall-clock` など)。`plugin` にはそれらの宣言が無いため、
+/// `wasm-tools component new --wit-world plugin` は「world に無い import が
+/// モジュールに含まれている」としてコンポーネント化を拒否する。
+///
+/// Rust の `wasm32-wasip2` ターゲットはリンカ(`wasm-component-ld`)が WASI
+/// import を自動で足すのでこの world を使わなくてもビルドできるが、Go は
+/// そうならない。**ゲスト側は言語を問わずこの world を対象にすればよい。**
+///
+/// ホスト側(`core/src/plugin/host.rs` の `bindgen!`)は引き続き `plugin` を
+/// 使う。ホストが自前で提供するのは edlr 独自の 4 インターフェースだけで、
+/// WASI は `wasmtime_wasi` の `add_to_linker_sync` が linker へ足すため、
+/// ホストの world に WASI を含めると二重登録になってしまう。
+world plugin-guest {
+  include plugin;
+  include wasi:cli/imports@0.2.0;
+}
+
+/// ドライバ(ホスト側 `bindgen!` が使う)。`bus` は import しない
+/// -- ドライバ間の呼び出しを構造的に不可能にするため。`on-event` も無い
+/// -- ドライバは journal / status を受け取らない。
+world driver {
+  import host-log;
+  import host-settings;
+  import driver-http;
+  import driver-process;
+  import driver-fs;
+  import bus-host;
+
+  export init: func();
+  export on-message: func(%from: string, topic: string, payload: list<u8>);
+}
+
+/// ドライバ(ゲスト)がビルド時に対象とする world。`plugin-guest` と同じ理由で
+/// WASI の import 一式を足してある。
+world driver-guest {
+  include driver;
+  include wasi:cli/imports@0.2.0;
+}
