@@ -1,11 +1,11 @@
 ---
 id: wasmtime-vtrv
 title: wasmtime のコンパイルキャッシュを有効化して起動時のプラグインロードを速くする
-summary: EpochEngine の Config にキャッシュ未設定で毎起動フルコンパイル。debug 実行では全ロードに 15 秒超(release は 1.4 秒)。Config::cache 有効化で再起動を高速化 / 未着手
-status: open
+summary: EpochEngine の Config にキャッシュ未設定で毎起動フルコンパイル。debug 実行では全ロードに 15 秒超(release は 1.4 秒)。Config::cache 有効化で release 1.9s→0.4s / debug 15s+→1.0s に改善 / 実装済み(87413f6)
+status: closed
 labels: performance
 created: 2026-08-05T13:07:30Z
-updated: 2026-08-05T13:07:58Z
+updated: 2026-08-05T13:23:34Z
 ---
 
 ## どこで踏んだか
@@ -38,3 +38,10 @@ updated: 2026-08-05T13:07:58Z
 2. (補) ロードの並列化(spawn を先に全部やってから ready を待つ)。
    直列待ちは init 順序の保証が理由でなければ外せるが、キャッシュ有効化
    だけで開発時の痛みはほぼ消えるので優先度低。
+
+## 結果(2026-08-05)
+
+`Cache::new(CacheConfig::new())`(既定の $XDG_CACHE_HOME/wasmtime)を
+`EpochEngine::new()` で有効化(87413f6)。実測: release 1.9s→0.4s、
+debug 15s+→1.0s。キャッシュ初期化失敗は warn してキャッシュ無し続行。
+案 2(ロード並列化)はキャッシュだけで痛みが消えたため見送り。
