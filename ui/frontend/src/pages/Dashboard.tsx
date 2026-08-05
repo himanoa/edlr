@@ -39,7 +39,6 @@ export default function Dashboard() {
 
   return (
     <section>
-      <h1 className="mb-4 text-2xl font-semibold">Dashboard</h1>
       {error && (
         <p className="mt-1.5 text-sm text-red-400">
           ウィジェット一覧の取得に失敗しました: {error}

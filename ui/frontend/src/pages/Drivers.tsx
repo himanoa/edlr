@@ -149,7 +149,6 @@ export function Drivers({
 
   return (
     <section>
-      <h1 className="mb-4 text-2xl font-bold">Drivers</h1>
       <Button type="button" variant="secondary" size="sm" className="mb-4" onClick={onReload}>
         更新
       </Button>

@@ -191,7 +191,6 @@ export default function Plugins() {
 
   return (
     <section>
-      <h1 className="mb-4 text-2xl font-bold">Plugins</h1>
       {status === "loading" && <p className="text-sm text-muted-foreground">読み込み中…</p>}
       {status === "error" && (
         <p className="mt-1.5 text-sm text-red-400">プラグイン一覧の取得に失敗しました: {error}</p>

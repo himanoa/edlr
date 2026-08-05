@@ -108,7 +108,6 @@ export default function Settings() {
 
   return (
     <section className="max-w-2xl space-y-3">
-      <h1 className="text-xl font-semibold">Settings</h1>
 
       {status === "loading" && <p className={NOTE}>読み込み中…</p>}
 
