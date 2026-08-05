@@ -192,6 +192,14 @@ install_component() {
   [[ -f "$src/$descriptor" || $dry_run -eq 1 ]] || die "$dir/$descriptor が無い"
   run cp "$src/$descriptor" "$dest/$descriptor"
 
+  # 設定画面レイアウト。存在すればコピー、無ければスキップ。
+  local layout
+  for layout in layout.kdl layout.json; do
+    if [[ -f "$src/$layout" ]]; then
+      run cp "$src/$layout" "$dest/$layout"
+    fi
+  done
+
   # ダッシュボードウィジェットの静的ファイル。**先に消してから入れる**:
   # 上書きコピーだけだと、名前を変えたり消したりしたファイルが配置先に
   # 残り続ける(manifest から参照されていない古い entry が生き残る)。
