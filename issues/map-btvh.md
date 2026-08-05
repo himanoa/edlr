@@ -2,10 +2,10 @@
 id: map-btvh
 title: map 型設定で、キー入力中に値が空のまま一度保存されてしまう
 summary: PluginForm の map 型は blur ごとに保存するため、キー欄から値欄へ移った時点で {"<key>": ""} が一度保存される / 未着手
-status: open
+status: closed
 labels: ui
 created: 2026-07-29T07:51:18Z
-updated: 2026-07-29T07:51:18Z
+updated: 2026-08-05T07:11:14Z
 ---
 
 ## どこで踏んだか
