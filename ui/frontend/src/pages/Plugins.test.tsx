@@ -161,7 +161,7 @@ test("shows loading then renders the plugin list", async () => {
   render(<Plugins />);
   expect(screen.getByText(/読み込み/)).toBeInTheDocument();
 
-  expect(await screen.findByText("Voice Notify")).toBeInTheDocument();
+  expect(await screen.findByRole("heading", { name: /Voice Notify/ })).toBeInTheDocument();
 });
 
 test("shows an empty-state message including pluginsDir when there are no plugins", async () => {
@@ -194,7 +194,7 @@ test("closes the RpcClient when the component unmounts", async () => {
   listImpl = () => Promise.resolve({ pluginsDir: "/plugins", plugins: [plugin] });
 
   const { unmount } = render(<Plugins />);
-  await screen.findByText("Voice Notify");
+  await screen.findByRole("heading", { name: /Voice Notify/ });
 
   unmount();
 
@@ -420,6 +420,6 @@ test("hides the schedules section when a plugin declares no schedules", async ()
 
   render(<Plugins />);
 
-  await screen.findByText(plugin.name);
+  await screen.findByRole("heading", { name: new RegExp(plugin.name) });
   expect(screen.queryByText("Schedules")).not.toBeInTheDocument();
 });

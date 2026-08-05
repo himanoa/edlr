@@ -43,6 +43,7 @@ export default function Plugins() {
   const [pluginsDir, setPluginsDir] = useState("");
   const [plugins, setPlugins] = useState<PluginInfo[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -189,50 +190,96 @@ export default function Plugins() {
     );
   };
 
-  return (
-    <section>
-      {status === "loading" && <p className="text-sm text-muted-foreground">読み込み中…</p>}
-      {status === "error" && (
-        <p className="mt-1.5 text-sm text-red-400">プラグイン一覧の取得に失敗しました: {error}</p>
-      )}
-      {status === "ready" && plugins.length === 0 && (
+  const selected = plugins.find((p) => p.id === selectedId) ?? plugins[0];
+
+  if (status !== "ready") {
+    return (
+      <section>
+        {status === "loading" && <p className="text-sm text-muted-foreground">読み込み中…</p>}
+        {status === "error" && (
+          <p className="mt-1.5 text-sm text-red-400">
+            プラグイン一覧の取得に失敗しました: {error}
+          </p>
+        )}
+      </section>
+    );
+  }
+
+  if (plugins.length === 0) {
+    return (
+      <section>
         <p className="text-sm text-muted-foreground">
           プラグインが見つかりませんでした。{pluginsDir} にプラグインを配置してください。
         </p>
-      )}
-      {status === "ready" &&
-        plugins.map((p) => (
-          <article key={p.id} className="mb-4 max-w-2xl rounded-lg border bg-card px-5 py-4">
+      </section>
+    );
+  }
+
+  return (
+    <section className="flex h-full gap-4">
+      <nav className="w-64 shrink-0 overflow-y-auto border-r pr-2">
+        <ul className="m-0 list-none space-y-1 p-0">
+          {plugins.map((p) => (
+            <li key={p.id}>
+              <button
+                type="button"
+                onClick={() => setSelectedId(p.id)}
+                aria-current={p.id === selected?.id}
+                className={`w-full rounded-md px-3 py-2 text-left hover:bg-accent/50 ${
+                  p.id === selected?.id ? "bg-accent" : ""
+                }`}
+              >
+                <span className="flex items-center gap-2">
+                  <span
+                    aria-hidden
+                    className={`size-2 shrink-0 rounded-full ${
+                      p.state === "disabled" ? "bg-red-400" : "bg-emerald-400"
+                    }`}
+                  />
+                  <span className="truncate font-medium">{p.name}</span>
+                </span>
+                <span className="mt-0.5 block truncate text-xs text-muted-foreground">
+                  {p.description}
+                </span>
+              </button>
+            </li>
+          ))}
+        </ul>
+      </nav>
+      {selected && (
+        <article key={selected.id} className="min-w-0 flex-1 overflow-y-auto pr-1">
+          <div className="max-w-2xl">
             <h2 className="flex items-center gap-2 text-lg font-semibold">
-              {p.name} <StateBadge plugin={p} />
+              {selected.name} <StateBadge plugin={selected} />
             </h2>
-            <p className="my-2">{p.description}</p>
-            <PluginForm plugin={p} onChange={handleChange(p.id)} />
+            <p className="my-2">{selected.description}</p>
+            <PluginForm plugin={selected} onChange={handleChange(selected.id)} />
             <CapabilitySection
-              capabilities={p.capabilities}
-              onToggle={handleCapabilityToggle(p.id)}
+              capabilities={selected.capabilities}
+              onToggle={handleCapabilityToggle(selected.id)}
             />
             <SidecarSection
-              sidecars={p.sidecars}
-              onConfigChange={handleSidecarConfig(p.id)}
-              onGrantChange={handleSidecarGrant(p.id)}
-              onControl={handleSidecarControl(p.id)}
+              sidecars={selected.sidecars}
+              onConfigChange={handleSidecarConfig(selected.id)}
+              onGrantChange={handleSidecarGrant(selected.id)}
+              onControl={handleSidecarControl(selected.id)}
             />
             <FilesystemSection
-              roots={p.filesystem}
-              onConfigChange={handleFilesystemConfig(p.id)}
-              onGrantChange={handleFilesystemGrant(p.id)}
+              roots={selected.filesystem}
+              onConfigChange={handleFilesystemConfig(selected.id)}
+              onGrantChange={handleFilesystemGrant(selected.id)}
             />
-            <BusSection pluginId={p.id} bus={p.bus} onSetGrant={handleBusGrant} />
+            <BusSection pluginId={selected.id} bus={selected.bus} onSetGrant={handleBusGrant} />
             <DashboardSection
-              pluginId={p.id}
-              dashboard={p.dashboard}
+              pluginId={selected.id}
+              dashboard={selected.dashboard}
               onSetGrant={handleDashboardGrant}
             />
-            <ScheduleSection schedules={p.schedules} />
-            <DroppedSection dropped={p.dropped} />
-          </article>
-        ))}
+            <ScheduleSection schedules={selected.schedules} />
+            <DroppedSection dropped={selected.dropped} />
+          </div>
+        </article>
+      )}
     </section>
   );
 }
