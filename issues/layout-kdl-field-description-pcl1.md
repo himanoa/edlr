@@ -2,10 +2,10 @@
 id: layout-kdl-field-description-pcl1
 title: layout.kdl の field/description パースで警告なしに値が消える箇所が複数ある
 summary: core/src/layout/kdl.rs の first_string_arg 系で field 引数無し・非文字列 description・2つ目の位置引数が LayoutWarning 無しに黙って消える / 未着手
-status: open
+status: closed
 labels: bug
 created: 2026-08-01T06:05:27Z
-updated: 2026-08-01T06:05:59Z
+updated: 2026-08-05T07:09:21Z
 ---
 
 ## どこで踏んだか
