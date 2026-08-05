@@ -206,7 +206,13 @@ mod tests {
         let addr = listener.local_addr().unwrap().to_string();
         assert!(daemon_running(&addr));
         drop(listener);
-        assert!(!daemon_running(&addr));
+        // 負のケースは「bind して閉じた直後のポート」を使ってはいけない:
+        // 並行して走る他のテストの `bind("127.0.0.1:0")` が同じポートを
+        // 再取得した瞬間に接続が成功して flaky になる(issue c5x9、
+        // devserver.rs の同名パターンと同じ理由)。ephemeral port range
+        // (Linux 既定 32768-60999)の外の固定ポートを bind せずに使う。
+        // 他のテストの固定ポート帯(285xx/286xx/5030x/29993)と被らない値。
+        assert!(!daemon_running("127.0.0.1:29994"));
         assert!(!daemon_running("not an addr"));
     }
 
