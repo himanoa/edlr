@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
-use wasmtime::{Config, Engine};
+use wasmtime::{Cache, CacheConfig, Config, Engine};
 
 /// Interval between epoch ticks driven by the background ticker thread.
 pub(crate) const EPOCH_TICK_INTERVAL: Duration = Duration::from_millis(100);
@@ -32,6 +32,16 @@ impl EpochEngine {
         let mut config = Config::new();
         config.wasm_component_model(true);
         config.epoch_interruption(true);
+        // コンパイル結果のディスクキャッシュ(既定で $XDG_CACHE_HOME/wasmtime)。
+        // wasm が変わらない限り 2 回目以降の起動はデシリアライズだけになる。
+        // キャッシュディレクトリが作れない等の失敗は致命ではないので、
+        // 警告してキャッシュ無しで続行する(issue wasmtime-vtrv)。
+        match Cache::new(CacheConfig::new()) {
+            Ok(cache) => {
+                config.cache(Some(cache));
+            }
+            Err(e) => tracing::warn!("wasmtime compile cache disabled: {e}"),
+        }
         let engine = Engine::new(&config)
             .map_err(|e| anyhow::anyhow!("failed to create wasmtime engine: {e}"))?;
 

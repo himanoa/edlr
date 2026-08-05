@@ -21,7 +21,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 chrono = "0.4"
 axum = { version = "0.8", features = ["ws"] }
 tower-http = { version = "0.6", features = ["fs"] }
-wasmtime = { version = "47.0.2", features = ["component-model"] }
+wasmtime = { version = "47.0.2", features = ["component-model", "cache"] }
 anyhow = "1.0.104"
 base64 = "0.22"
 wasmtime-wasi = "47.0.2"
