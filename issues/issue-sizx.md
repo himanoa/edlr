@@ -2,10 +2,10 @@
 id: issue-sizx
 title: プラグインの非同期実行を submit/complete プロトコルで導入する
 summary: lifecycle 呼び出しの中で I/O を待つ設計をやめ、submit_job / on-job-complete の2フェーズに倒して deadline とキュー詰まりを解消する / 実現可能と調査済み・方針決定済み(ABI 破壊 OK・1本キューのまま種別別の削除ルール)・実装未着手
-status: open
+status: closed
 labels: 人間がやる
 created: 2026-07-28T14:10:44Z
-updated: 2026-08-04T14:21:58Z
+updated: 2026-08-05T00:37:41Z
 ---
 
 
@@ -198,3 +198,36 @@ driver 抽象化の狙い(暗黙のプロトコルドリフト防止)とむし�
 - ドライバ側(`world driver`)の同種の問題は別 issue http-driver-9znv の領分。
 - 規模感: WIT + ホスト + runner 配線 + ゲスト SDK/examples 更新 + テストで
   中規模。技術的な阻害要因はなし。
+
+## 実装完了(2026-08-05)
+
+Phase 1〜5 を実装し main へコミット済み(`223d427` キュー自作、`bd89453`
+配線、`4c8e7b5` WIT 0.5.0 + submit/complete 本体、以降 docs/ゲスト追従)。
+
+### 未決だった「complete の結果型」の決定
+
+**「submit は型付き・complete は汎用 JSON 文字列」の折衷案を採用**。
+
+- submit は `driver-http.submit-send(request, timeout-ms: option<u32>)
+  -> result<u64, driver-error>`(untyped `submit(kind, payload)` は不採用。
+  上記「実装時の補足」の思想どおり)
+- complete は `on-job-complete(job-id: u64, result-json: string)`。
+  形は `{"ok":{"status","headers","body-base64"}}` /
+  `{"err":{"kind","message"}}`(body はバイト列なので base64)。
+  job 種別が増えても export は増えない
+
+### 実装が決定からずれた点
+
+- 名前は `submit-http` ではなく `submit-send`(interface が既に
+  `driver-http` なので冗長を避けた)
+- in-flight 上限(8)超過の同期エラーは `queue-full` variant 追加ではなく
+  既存 `transport` にメッセージで載せた(driver-error の variant 追加は
+  もう一段の ABI 変更になるため)
+- HTTP 実行体は async client(Step 2a で導入済みの `reqwest::Client`)+
+  リクエスト単位タイムアウト上書き(既定 30s・上限 60s クランプ)
+
+### 残タスク(別 issue)
+
+- ゲスト SDK の job-id → await ヘルパー: sdk-send-async-response-await-lvn3
+- ドライバ側 submit(現状 world driver の trait 上は invalid-request の
+  stub): http-driver-9znv
