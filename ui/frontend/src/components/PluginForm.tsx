@@ -249,7 +249,18 @@ function MapField({
   };
 
   return (
-    <fieldset className="map-field">
+    // 保存はフィールド単位の blur ではなく、fieldset 全体からフォーカスが
+    // 外れたときだけ。map は「複数の入力欄で 1 つの値」なので、キー欄→値欄の
+    // 移動で {"<key>": ""} のような書きかけの行を保存しない(issue btvh)。
+    // blur は React では focusout としてバブルするので fieldset で拾える。
+    <fieldset
+      className="map-field"
+      onBlur={(e) => {
+        if (!e.currentTarget.contains(e.relatedTarget)) {
+          commit(rows);
+        }
+      }}
+    >
       <legend>{field.label}</legend>
       {rows.map((row) => (
         <div key={row.id} className="map-row">
@@ -259,7 +270,6 @@ function MapField({
             value={row.key}
             disabled={disabled}
             onChange={(e) => editRow(row.id, { key: e.target.value })}
-            onBlur={() => commit(rows)}
             onKeyDown={(e) => {
               if (e.key === "Enter") {
                 e.preventDefault();
@@ -273,7 +283,6 @@ function MapField({
             value={row.value}
             disabled={disabled}
             onChange={(e) => editRow(row.id, { value: e.target.value })}
-            onBlur={() => commit(rows)}
             onKeyDown={(e) => {
               if (e.key === "Enter") {
                 e.preventDefault();

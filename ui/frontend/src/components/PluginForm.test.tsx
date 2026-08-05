@@ -217,8 +217,24 @@ test("adding a row does not save until the key is filled in", async () => {
 
   // 値だけ入れて離れても、キーが空の行は保存対象にならない。
   await userEvent.type(screen.getByLabelText("表示名の置き換え の値"), "太陽系");
-  await userEvent.tab();
+  await userEvent.click(document.body);
   expect(onChange).not.toHaveBeenCalled();
+});
+
+test("moving from the key input to the value input does not save a half-filled row", async () => {
+  const onChange = vi.fn().mockResolvedValue(undefined);
+  render(<PluginForm plugin={makeMapPlugin()} onChange={onChange} />);
+
+  await userEvent.click(screen.getByRole("button", { name: "行を追加" }));
+  await userEvent.type(screen.getByLabelText("表示名の置き換え のキー"), "Deciat");
+  // キー欄 → 値欄への移動(fieldset 内の blur)では保存しない(issue btvh)。
+  await userEvent.click(screen.getByLabelText("表示名の置き換え の値"));
+  expect(onChange).not.toHaveBeenCalled();
+
+  await userEvent.type(screen.getByLabelText("表示名の置き換え の値"), "デシアト");
+  await userEvent.click(document.body);
+  expect(onChange).toHaveBeenCalledTimes(1);
+  expect(onChange).toHaveBeenCalledWith("aliases", { Deciat: "デシアト" });
 });
 
 test("filling in a new row saves the whole map object", async () => {
@@ -230,8 +246,9 @@ test("filling in a new row saves the whole map object", async () => {
   const vals = screen.getAllByLabelText("表示名の置き換え の値");
   await userEvent.type(keys[1], "Deciat");
   await userEvent.type(vals[1], "デシアト");
-  await userEvent.tab();
+  await userEvent.click(document.body);
 
+  expect(onChange).toHaveBeenCalledTimes(1);
   expect(onChange).toHaveBeenCalledWith("aliases", { Sol: "太陽系", Deciat: "デシアト" });
 });
 
@@ -268,7 +285,7 @@ test("duplicate keys are reported instead of silently keeping the last one", asy
   const vals = screen.getAllByLabelText("表示名の置き換え の値");
   await userEvent.type(keys[1], "Sol");
   await userEvent.type(vals[1], "別の名前");
-  await userEvent.tab();
+  await userEvent.click(document.body);
 
   expect(await screen.findByText(/キーが重複/)).toBeInTheDocument();
   expect(onChange).not.toHaveBeenCalled();
