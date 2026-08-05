@@ -70,9 +70,25 @@ func SubmitHTTP(req Request, timeoutMS *uint32, cb func(*Response, error)) (uint
 	}
 	result := driverhttp.SubmitSend(req, timeout)
 	if result.IsErr() {
-		return 0, fmt.Errorf("submit-send: %v", result.Err())
+		return 0, fmt.Errorf("submit-send: %s", driverErrorMessage(result.Err()))
 	}
 	jobID := *result.OK()
 	registerPending(jobID, cb)
 	return jobID, nil
+}
+
+// driverErrorMessage は variant の中身(拒否理由の文字列)を含めて整形する。
+// %v だけだと variant 名(例: "invalid-request")しか出ず、どのホストが
+// 未許可か・in-flight 上限かといった実際の理由が消えるため。
+func driverErrorMessage(err *driverhttp.DriverError) string {
+	reason := "unknown reason"
+	switch {
+	case err.PermissionDenied() != nil:
+		reason = *err.PermissionDenied()
+	case err.InvalidRequest() != nil:
+		reason = *err.InvalidRequest()
+	case err.Transport() != nil:
+		reason = *err.Transport()
+	}
+	return fmt.Sprintf("%s: %s", err.String(), reason)
 }
