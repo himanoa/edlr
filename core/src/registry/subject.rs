@@ -62,15 +62,11 @@ pub(crate) trait RegistrySubject: Clone {
     /// sidecar/filesystem 群専用の未登録エラー。この2群は driver 側でも
     /// `RegistryError` を使う設計上の非対称(`registry::driver` の
     /// `sidecars`/`filesystem` 等のドキュメントコメント参照)があるため、
-    /// `Self::Error` ではなく常に共有の `RegistryError` を返す
-    /// (`subject_noun` から導出するデフォルト実装で足りる)。
-    fn unknown_registry_error(id: &str) -> RegistryError {
-        if Self::subject_noun() == "driver" {
-            RegistryError::UnknownDriver(id.to_string())
-        } else {
-            RegistryError::UnknownPlugin(id.to_string())
-        }
-    }
+    /// `Self::Error` ではなく常に共有の `RegistryError` を返す。
+    /// required method なのは意図的: `subject_noun()` の文字列比較で導出する
+    /// デフォルト実装だと、第3の Subject を足したとき無言で誤った variant に
+    /// 落ちる(issue x0h7)。
+    fn unknown_registry_error(id: &str) -> RegistryError;
 
     /// エラーメッセージの主語("plugin"/"driver")。`control_sidecar` の
     /// disabled メッセージ用。
@@ -109,6 +105,10 @@ impl RegistrySubject for Manifest {
         RegistryError::UnknownPlugin(id.to_string())
     }
 
+    fn unknown_registry_error(id: &str) -> RegistryError {
+        RegistryError::UnknownPlugin(id.to_string())
+    }
+
     fn settings_error(e: SettingsError) -> RegistryError {
         RegistryError::Settings(e)
     }
@@ -143,6 +143,10 @@ impl RegistrySubject for crate::manifest::driver::DriverManifest {
 
     fn unknown_error(id: &str) -> DriverRegistryError {
         DriverRegistryError::UnknownDriver(id.to_string())
+    }
+
+    fn unknown_registry_error(id: &str) -> RegistryError {
+        RegistryError::UnknownDriver(id.to_string())
     }
 
     fn settings_error(e: SettingsError) -> DriverRegistryError {
