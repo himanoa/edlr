@@ -2,10 +2,10 @@
 id: ui-daemon-running-detects-listener-flaky-c5x9
 title: ui の daemon_running_detects_listener が並列負荷で flaky
 summary: ui/src-tauri の daemon_running_detects_listener が cargo test --workspace の並列負荷で稀に落ちる(単独では安定 pass)/ 未着手
-status: open
+status: closed
 labels: flaky-test
 created: 2026-08-05T06:11:52Z
-updated: 2026-08-05T06:11:52Z
+updated: 2026-08-05T07:09:57Z
 ---
 
 
