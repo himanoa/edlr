@@ -2,7 +2,7 @@
 id: sdk-send-async-response-await-lvn3
 title: ゲスト SDK に submit-http の結果を await できるヘルパーを足す
 summary: コールバック式で実装完了(future/promise ではなくゲスト側 pending マップ)。Rust は sdk/rust/src/http.rs、Go は sdk/go/edlrplugin/jobs.go
-status: open
+status: closed
 labels: sdk
 created: 2026-08-04T13:52:09Z
 updated: 2026-08-05T04:10:37Z
