@@ -2,10 +2,10 @@
 id: install-examples-sh-layout-kdl-layout-js-7jkk
 title: install-examples.sh が layout.kdl / layout.json をインストール先へコピーしない
 summary: install-examples.sh の install_component が manifest.toml/driver.toml と wasm しかコピーせず layout ファイルを配置しないため、examples 配下に layout.kdl を置いても UI に反映されない / 未着手
-status: open
+status: closed
 labels: bug
 created: 2026-08-01T05:56:41Z
-updated: 2026-08-01T05:57:16Z
+updated: 2026-08-05T07:07:20Z
 ---
 
 ## どこで踏んだか
