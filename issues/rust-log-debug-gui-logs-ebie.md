@@ -2,10 +2,10 @@
 id: rust-log-debug-gui-logs-ebie
 title: RUST_LOG=debug で GUI の Logs 画面が溢れる(レベルフィルタが無い)
 summary: RUST_LOG=debug にすると依存クレートの debug まで GUI へ流れ、容量 256 の broadcast が詰まって本来見たいログが Lagged で落ちる / Logs 画面にレベル絞り込みも無い / 未着手
-status: open
+status: closed
 labels: 
 created: 2026-07-29T07:49:19Z
-updated: 2026-07-29T07:49:56Z
+updated: 2026-08-05T07:12:33Z
 ---
 
 ## どこで踏んだか
@@ -50,3 +50,10 @@ GUI の Logs 画面にも出る。
 - `core/src/logs.rs`(`LogLayer` / `CHANNEL_CAPACITY` / `env_filter`)
 - `core/src/server.rs`(`attach_log_stream`)
 - `ui/frontend/src/pages/Logs.tsx`
+
+## 対応(2026-08-05)
+
+Logs 画面に level トグル(error/warn/info/debug/trace)を追加した(案3)。
+broadcast 溢れ(問題1)はコード変更なし: docs/plugins.md 記載の
+`RUST_LOG=info,edlr_core::plugin::host=debug` のようなターゲット絞りで運用する。
+それでも足りない実害が出たら per-layer Filter / CHANNEL_CAPACITY 増で再起票。
