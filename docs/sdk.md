@@ -148,15 +148,16 @@ SDK が pending マップを持ち、`SubmitHTTP` を経由しない job の完�
 ### tinygo build
 
 SDK は WIT ファイルを `sdk/go/wit/` に同梱している(Go module の zip は
-モジュールディレクトリしか含まないため)。ビルドスクリプトからは
-`go list -m` で場所を引く:
+モジュールディレクトリしか含まないため)。`--wit-package` / `--wit-world`
+は `tinygo build -target=wasip2` 自身のフラグ(`wasm-tools component new`
+は別途呼ばない、tinygo が内部でコンポーネント化まで行う)。ビルド
+スクリプトからは `go list -m` で場所を引く:
 
 ```sh
-tinygo build -o plugin.wasm --target=wasi -tags cm ./...
-wasm-tools component new plugin.wasm \
+tinygo build -target=wasip2 \
   --wit-package "$(go list -m -f '{{.Dir}}' github.com/himanoa/edlr/sdk/go)/wit" \
   --wit-world plugin-guest \
-  -o plugin.component.wasm
+  -o plugin.wasm ./...
 ```
 
 ## バージョニング
