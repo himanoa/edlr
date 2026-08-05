@@ -2,10 +2,10 @@
 id: make-packaging-core-edlr-vlxe
 title: make packaging の配布物に core の edlr バイナリが含まれない
 summary: make packaging(cargo tauri build)は edlr-ui だけをバンドルするため、.deb/.rpm/.AppImage に core の edlr バイナリが入らない / 未着手
-status: open
+status: closed
 labels: build
 created: 2026-07-29T18:30:19Z
-updated: 2026-07-29T18:30:40Z
+updated: 2026-08-05T07:19:28Z
 ---
 
 ## どこで踏んだか
