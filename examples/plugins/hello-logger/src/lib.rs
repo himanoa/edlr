@@ -1,22 +1,18 @@
 #![allow(clippy::too_many_arguments)]
 
-wit_bindgen::generate!({
-    path: "../../../core/wit",
-    world: "plugin",
-});
+use edlr_plugin_sdk as sdk;
+use sdk::host_log::{log, Level};
+use sdk::host_settings;
 
 struct HelloLogger;
 
-impl Guest for HelloLogger {
+impl sdk::Plugin for HelloLogger {
     fn init() {
-        edlr::plugin::host_log::log(
-            edlr::plugin::host_log::Level::Info,
-            "hello-logger initialized",
-        );
+        log(Level::Info, "hello-logger initialized");
     }
 
-    fn on_event(ev: Event) {
-        let settings = edlr::plugin::host_settings::get_all();
+    fn on_event(ev: sdk::Event) {
+        let settings = host_settings::get_all();
         let enabled = serde_json::from_str::<serde_json::Value>(&settings)
             .ok()
             .and_then(|v| v.get("enabled").and_then(|b| b.as_bool()))
@@ -24,8 +20,8 @@ impl Guest for HelloLogger {
 
         if enabled {
             let name = ev.name.as_deref().unwrap_or("-");
-            edlr::plugin::host_log::log(
-                edlr::plugin::host_log::Level::Info,
+            log(
+                Level::Info,
                 &format!(
                     "{}:{}{} {}",
                     ev.kind,
@@ -38,17 +34,11 @@ impl Guest for HelloLogger {
     }
 
     fn on_message(driver: String, topic: String, _payload: Vec<u8>) {
-        edlr::plugin::host_log::log(
-            edlr::plugin::host_log::Level::Debug,
+        log(
+            Level::Debug,
             &format!("ignoring bus message from {driver}/{topic}"),
         );
     }
-
-    fn on_job_complete(_job_id: u64, _result_json: String) {}
-
-    fn on_schedule(_name: String) {}
-
-    fn on_stop() {}
 }
 
-export!(HelloLogger);
+sdk::register!(HelloLogger);
