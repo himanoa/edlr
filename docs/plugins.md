@@ -49,7 +49,9 @@ WIT パッケージは `edlr:plugin@0.5.0`。
 **旧 world でビルド済みのプラグインは新しいホストへのロードに失敗する**。
 プラグインを新しい `core/wit` に対して再ビルドすること(Rust は
 `wit_bindgen::generate!` がパス指定なら自動追随、Go/TinyGo は
-`wit-bindgen-go generate` での `gen/` 再生成が必要)。
+`wit-bindgen-go generate` での `gen/` 再生成が必要)。SDK([docs/sdk.md](sdk.md))
+経由であれば、この追従は SDK 側で済んでいるので、依存の tag を上げて
+再ビルドするだけでよい。
 
 ## ログレベル(`host-log`)
 
