@@ -25,7 +25,7 @@ edlr のプラグインを、`core/wit` を自分のリポジトリへ `cp` し�
 
 ```toml
 [dependencies]
-edlr-plugin-sdk = { git = "https://github.com/himanoa/edlr", tag = "sdk/v0.6.0" }
+edlr-plugin-sdk = { git = "https://github.com/himanoa/edlr", tag = "sdk/v0.6.1" }
 ```
 
 `crate-type = ["rlib"]` の通常の Rust crate なので、プラグイン側は
@@ -97,7 +97,7 @@ SDK は job-id → コールバックの pending マップを内部で持ち、
 ### 依存の書き方
 
 ```
-go get github.com/himanoa/edlr/sdk/go@sdk/go/v0.6.0
+go get github.com/himanoa/edlr/sdk/go@sdk/go/v0.6.1
 ```
 
 ### `Hooks` と `Register`
@@ -164,8 +164,8 @@ tinygo build -target=wasip2 \
 
 SDK バージョン = WIT バージョンで、tag はそれぞれ:
 
-- Rust: `sdk/v<wit-version>`(例: `sdk/v0.6.0`)
-- Go: `sdk/go/v<wit-version>`(例: `sdk/go/v0.6.0`。Go のサブディレクトリ
+- Rust: `sdk/v<wit-version>`(例: `sdk/v0.6.1`)
+- Go: `sdk/go/v<wit-version>`(例: `sdk/go/v0.6.1`。Go のサブディレクトリ
   モジュール規約)
 
 `core/wit` の ABI が上がったら、SDK 側がバインディングを追従させた上で
