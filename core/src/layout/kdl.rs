@@ -45,7 +45,13 @@ fn convert_node(node: &KdlNode, warnings: &mut Vec<LayoutWarning>) -> Option<Nod
     match node.name().value() {
         "section" => convert_section(node, warnings).map(Node::Section),
         "field" => {
-            let key = first_string_arg(node)?;
+            let Some(key) = first_string_arg(node) else {
+                warnings.push(LayoutWarning::UnknownNode(
+                    "field (no string argument)".into(),
+                ));
+                return None;
+            };
+            warn_extra_positional_args(node, "field", warnings);
             Some(Node::Field { field: key })
         }
         other => {
@@ -60,12 +66,19 @@ fn convert_section(node: &KdlNode, warnings: &mut Vec<LayoutWarning>) -> Option<
         warnings.push(LayoutWarning::SectionWithoutTitle);
         return None;
     };
-    let description = node
+    warn_extra_positional_args(node, "section", warnings);
+    let description_entry = node
         .entries()
         .iter()
-        .find(|e| e.name().map(|n| n.value()) == Some("description"))
+        .find(|e| e.name().map(|n| n.value()) == Some("description"));
+    let description = description_entry
         .and_then(|e| e.value().as_string())
         .map(str::to_string);
+    if description_entry.is_some() && description.is_none() {
+        warnings.push(LayoutWarning::UnknownNode(
+            "description (not a string)".into(),
+        ));
+    }
     // title(位置引数)と description 以外の名前付き引数は語彙に無い。
     for entry in node.entries() {
         if let Some(name) = entry.name() {
@@ -97,6 +110,16 @@ fn first_string_arg(node: &KdlNode) -> Option<String> {
         .find(|e| e.name().is_none())
         .and_then(|e| e.value().as_string())
         .map(str::to_string)
+}
+
+/// 2つ目以降の位置引数は語彙に無い。黙って捨てず警告を積む。
+fn warn_extra_positional_args(node: &KdlNode, name: &str, warnings: &mut Vec<LayoutWarning>) {
+    let positional = node.entries().iter().filter(|e| e.name().is_none()).count();
+    if positional > 1 {
+        warnings.push(LayoutWarning::UnknownNode(format!(
+            "{name} (extra positional arguments)"
+        )));
+    }
 }
 
 #[cfg(test)]
@@ -187,6 +210,46 @@ section "基本" {
         let (layout, warnings) = from_kdl_str("section { field \"voice\" }").unwrap();
         assert_eq!(layout.sections, vec![]);
         assert_eq!(warnings, vec![LayoutWarning::SectionWithoutTitle]);
+    }
+
+    #[test]
+    fn field_without_string_argument_is_skipped_with_warning() {
+        let (layout, warnings) = from_kdl_str("section \"基本\" { field }").unwrap();
+        assert_eq!(layout.sections[0].children, vec![]);
+        assert_eq!(
+            warnings,
+            vec![LayoutWarning::UnknownNode("field (no string argument)".into())]
+        );
+    }
+
+    #[test]
+    fn non_string_description_is_dropped_with_warning() {
+        let (layout, warnings) = from_kdl_str("section \"基本\" description=123").unwrap();
+        assert_eq!(layout.sections[0].description, None);
+        assert_eq!(
+            warnings,
+            vec![LayoutWarning::UnknownNode("description (not a string)".into())]
+        );
+    }
+
+    #[test]
+    fn extra_positional_args_are_ignored_with_warning() {
+        let (layout, warnings) =
+            from_kdl_str("section \"基本\" \"余分\" { field \"voice\" \"余分\" }").unwrap();
+        assert_eq!(layout.sections[0].title, "基本");
+        assert_eq!(
+            layout.sections[0].children,
+            vec![Node::Field {
+                field: "voice".into()
+            }]
+        );
+        assert_eq!(
+            warnings,
+            vec![
+                LayoutWarning::UnknownNode("section (extra positional arguments)".into()),
+                LayoutWarning::UnknownNode("field (extra positional arguments)".into()),
+            ]
+        );
     }
 
     #[test]
