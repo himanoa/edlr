@@ -1,11 +1,11 @@
 ---
 id: stop-shutdown-5iy7
 title: サイドカー本体の死後に残った孫プロセスが stop/shutdown で殺されない
-summary: drivers/process の stop 経路は child:Some しか killpg しないため、サイドカー本体が先に死ぬと孤児の孫プロセスが shutdown で回収されない(pgid を reap 後も保持すれば直せる)/ 未着手
-status: open
+summary: drivers/process が pgid を reap 後も保持し、stop/stop_all/respawn/align の全経路で本体死亡後の孤児孫プロセスを killpg で回収するよう修正済み(回帰テスト3本)
+status: closed
 labels: bug
 created: 2026-08-05T04:40:26Z
-updated: 2026-08-05T04:40:48Z
+updated: 2026-08-05T05:08:38Z
 ---
 
 
@@ -43,3 +43,24 @@ pid == pgid(spawn 時に `process_group(0)`)なので、reap 前の pid を
 - 注意: pid 再利用の窓(reap 後に同じ pid が別プロセスへ再割り当て)を
   踏むと無関係のグループへシグナルを送るリスクがあるため、送る条件や
   タイミング(reap からの経過や、デーモン終了時のみ等)は要検討
+
+## 修正(2026-08-05)
+
+案どおり `Instance` に `pgid` を追加(spawn 時に記録、reap 後も保持)し、
+回収経路を 3 つとも塞いだ:
+
+- **stop / stop_all**: `take_for_stop` が `StopBatch`(生きている子 +
+  孤児グループの pgid)を返し、`kill_and_wait_all` が孤児グループへも
+  SIGTERM → 猶予中 `killpg(pgid, 0)` で空を待つ → 残れば SIGKILL を行う
+- **respawn**(`ensure_started`): 旧 pgid のグループを SIGKILL してから
+  新しい世代を spawn
+- **align_instances**(ポート構成変更での作り直し): `terminate` が
+  child 無しでも旧 pgid を SIGKILL
+
+pid 再利用の安全性: POSIX/Linux では生きたプロセスグループの id は新しい
+pid として再利用されないため、グループに孫が残っている限り killpg は必ず
+自分のグループに当たる。空になった後は ESRCH で無害。さらに `reap` が
+グループの空を観測した時点で pgid を破棄し、stale な値を持ち続けない。
+
+回帰テスト 3 本(stop_all / stop / respawn の各経路で「本体死亡後の孫が
+回収される」)を drivers/process に追加。workspace 全テスト + clippy 全パス。
