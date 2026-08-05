@@ -76,6 +76,19 @@ struct Instance {
     /// 「生きている」とみなす。respawn で世代が進めば、古い監視スレッドは
     /// 静かに終了する。
     generation: u64,
+    /// spawn 時のプロセスグループ id(`process_group(0)` なので子の pid と
+    /// 同値)。**reap で `child` が `None` になった後も保持する** -- 本体が
+    /// 先に死んでも、サイドカーが spawn した孫プロセスは同じグループに
+    /// 残っており、stop/stop_all/respawn 時に `killpg` で回収する必要がある
+    /// (issue stop-shutdown-5iy7: かつては `child: Some` のインスタンスしか
+    /// killpg しなかったため、本体死亡後の孫が孤児として生き残った)。
+    ///
+    /// pid 再利用の心配は要らない: POSIX/Linux では、ある id が生きた
+    /// プロセスグループの id である限りその値は新しい pid として再利用され
+    /// ない。つまりグループに孫が残っている間は `killpg` は必ず自分の
+    /// グループに当たる。グループが空になった後は `killpg` が ESRCH で
+    /// 無害に失敗するだけで、`reap` が空を観測した時点で `None` へ戻す。
+    pgid: Option<i32>,
 }
 
 /// 1 サイドカー(= 1 key)分のインスタンス群と、直近の spawn 試行時刻。
@@ -187,9 +200,22 @@ impl ProcessDriver {
             if instance.child.is_some() || instance.terminating {
                 continue;
             }
+            // respawn の場合、旧世代のプロセスグループに孫が残っていることが
+            // ある(本体だけが死んで reap された後)。新しいグループで spawn
+            // し直す前に旧グループを回収する。空のグループなら ESRCH で
+            // 無害(`Instance::pgid` のドキュメントコメント参照)。
+            if let Some(old_pgid) = instance.pgid.take() {
+                // SAFETY: 自分が spawn した子の(グループが空でない限り
+                // 再利用されない)pgid。
+                unsafe {
+                    libc::killpg(old_pgid, libc::SIGKILL);
+                }
+            }
             match spawn_one(key, spec, instance.port) {
                 Ok(child) => {
+                    let pgid = child.id() as i32;
                     instance.child = Some(child);
+                    instance.pgid = Some(pgid);
                     instance.exit_code = None;
                     instance.generation = self
                         .next_generation
@@ -260,7 +286,10 @@ impl ProcessDriver {
             let mut groups = self.lock();
             match groups.get_mut(key) {
                 Some(group) => take_for_stop(group),
-                None => Vec::new(),
+                None => StopBatch {
+                    children: Vec::new(),
+                    orphan_pgids: Vec::new(),
+                },
             }
         };
         self.finish_stop(key, taken);
@@ -326,7 +355,10 @@ impl ProcessDriver {
         let mut groups = self.lock();
         let taken = match groups.get_mut(key) {
             Some(group) => take_for_stop(group),
-            None => Vec::new(),
+            None => StopBatch {
+                children: Vec::new(),
+                orphan_pgids: Vec::new(),
+            },
         };
         if taken.is_empty() {
             return;
@@ -360,7 +392,7 @@ impl ProcessDriver {
     /// 実際には死ぬ前に `stop_all` が戻ってしまう -- デーモン終了時に
     /// 子プロセスが生き残る、という致命的な取りこぼしになる。
     pub fn stop_all(&self) {
-        let per_key: Vec<(String, Vec<TakenChild>)> = {
+        let per_key: Vec<(String, StopBatch)> = {
             let mut groups = self.lock();
             groups
                 .iter_mut()
@@ -372,12 +404,16 @@ impl ProcessDriver {
         // 最悪 "キー数 × shutdown_grace" かかり、デーモン終了を待っている
         // Tauri 側(`ui/src-tauri/src/daemon.rs` の `STOP_GRACE`)がその分
         // 長く待たされる。
+        let orphan_pgids: Vec<i32> = per_key
+            .iter()
+            .flat_map(|(_, batch)| batch.orphan_pgids.iter().copied())
+            .collect();
         let mut flat: Vec<(String, TakenChild)> = per_key
             .into_iter()
-            .flat_map(|(key, taken)| taken.into_iter().map(move |t| (key.clone(), t)))
+            .flat_map(|(key, batch)| batch.children.into_iter().map(move |t| (key.clone(), t)))
             .collect();
         let mut children: Vec<&mut Child> = flat.iter_mut().map(|(_, t)| &mut t.child).collect();
-        let exit_codes = kill_and_wait_all(&mut children, self.shutdown_grace);
+        let exit_codes = kill_and_wait_all(&mut children, &orphan_pgids, self.shutdown_grace);
 
         for ((key, taken), exit_code) in flat.iter().zip(exit_codes) {
             self.record_stopped(key, taken.index, taken.port, exit_code);
@@ -398,13 +434,14 @@ impl ProcessDriver {
     /// SIGTERM/SIGKILL を送って待ち、結果を該当インスタンスへ書き戻す。
     /// ロックは子ごとに個別に取り直すので、他のキー(や他の呼び出し)を
     /// 長時間ブロックしない。
-    fn finish_stop(&self, key: &str, taken: Vec<TakenChild>) {
+    fn finish_stop(&self, key: &str, taken: StopBatch) {
         let mut taken = taken;
         // このキーの子はまとめて 1 つの猶予で停止する(`kill_and_wait_all`)。
-        let mut children: Vec<&mut Child> = taken.iter_mut().map(|t| &mut t.child).collect();
-        let exit_codes = kill_and_wait_all(&mut children, self.shutdown_grace);
+        let mut children: Vec<&mut Child> =
+            taken.children.iter_mut().map(|t| &mut t.child).collect();
+        let exit_codes = kill_and_wait_all(&mut children, &taken.orphan_pgids, self.shutdown_grace);
 
-        for (taken, exit_code) in taken.iter().zip(exit_codes) {
+        for (taken, exit_code) in taken.children.iter().zip(exit_codes) {
             self.record_stopped(key, taken.index, taken.port, exit_code);
         }
     }
@@ -502,6 +539,7 @@ fn new_instances(spec: &ProcessSpec) -> Vec<Instance> {
             exit_code: None,
             terminating: false,
             generation: 0,
+            pgid: None,
         })
         .collect()
 }
@@ -566,38 +604,80 @@ struct TakenChild {
     child: Child,
 }
 
-fn take_for_stop(group: &mut Group) -> Vec<TakenChild> {
-    let mut taken = Vec::new();
+/// `take_for_stop` の結果。生きている子(SIGTERM → wait → SIGKILL の通常
+/// 経路)に加えて、本体は死んだが孫が残っていそうなプロセスグループ
+/// (`orphan_pgids`)も停止対象として運ぶ(issue stop-shutdown-5iy7)。
+struct StopBatch {
+    children: Vec<TakenChild>,
+    orphan_pgids: Vec<i32>,
+}
+
+impl StopBatch {
+    fn is_empty(&self) -> bool {
+        self.children.is_empty() && self.orphan_pgids.is_empty()
+    }
+}
+
+fn take_for_stop(group: &mut Group) -> StopBatch {
+    let mut children = Vec::new();
+    let mut orphan_pgids = Vec::new();
     for instance in group.instances.iter_mut() {
         if instance.terminating {
             continue;
         }
-        if let Some(child) = instance.child.take() {
-            instance.terminating = true;
-            taken.push(TakenChild {
-                index: instance.index,
-                port: instance.port,
-                child,
-            });
+        match instance.child.take() {
+            Some(child) => {
+                instance.terminating = true;
+                instance.pgid = None;
+                children.push(TakenChild {
+                    index: instance.index,
+                    port: instance.port,
+                    child,
+                });
+            }
+            // 本体は既に死んで reap 済み。孫が同じグループに残って
+            // いる可能性があるので pgid を回収対象として引き取る
+            // (`Instance::pgid` のドキュメントコメント参照)。
+            None => {
+                if let Some(pgid) = instance.pgid.take() {
+                    orphan_pgids.push(pgid);
+                }
+            }
         }
     }
-    taken
+    StopBatch {
+        children,
+        orphan_pgids,
+    }
 }
 
 /// 終了済みの子を回収し、`exit_code` を記録する。
+///
+/// `pgid` は消さない -- 本体が死んでも孫が同じグループに残っている可能性が
+/// あり、stop/respawn 時の回収に要る。ただしグループが空になったことを
+/// 観測したら `None` へ戻す(id が新しい pid として再利用可能になるのは
+/// この後なので、stale な pgid を持ち続けない)。
 fn reap(group: &mut Group) {
     for instance in group.instances.iter_mut() {
-        let Some(child) = instance.child.as_mut() else {
-            continue;
-        };
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                instance.exit_code = status.code();
-                instance.child = None;
-            }
-            Ok(None) => {}
-            Err(_) => {
-                instance.child = None;
+        match instance.child.as_mut() {
+            Some(child) => match child.try_wait() {
+                Ok(Some(status)) => {
+                    instance.exit_code = status.code();
+                    instance.child = None;
+                }
+                Ok(None) => {}
+                Err(_) => {
+                    instance.child = None;
+                }
+            },
+            None => {
+                if let Some(pgid) = instance.pgid {
+                    // SAFETY: signal 0 は存在確認のみ。グループが空なら
+                    // ESRCH が返る。
+                    if unsafe { libc::killpg(pgid, 0) } != 0 {
+                        instance.pgid = None;
+                    }
+                }
             }
         }
     }
@@ -669,8 +749,19 @@ fn forward_output<R: std::io::Read + Send + 'static>(key: String, stream: &'stat
 /// `kill_and_wait` に一本化してある)。
 fn terminate(instance: &mut Instance, grace: Duration) {
     let Some(mut child) = instance.child.take() else {
+        // 本体は死んでいても孫がグループに残っていることがある
+        // (`Instance::pgid` のドキュメントコメント参照)。インスタンス列を
+        // 作り直す前に回収する。
+        if let Some(pgid) = instance.pgid.take() {
+            // SAFETY: 自分が spawn した子の(グループが空でない限り
+            // 再利用されない)pgid。空なら ESRCH で無害。
+            unsafe {
+                libc::killpg(pgid, libc::SIGKILL);
+            }
+        }
         return;
     };
+    instance.pgid = None;
     instance.exit_code = kill_and_wait(&mut child, grace);
 }
 
@@ -680,7 +771,7 @@ fn terminate(instance: &mut Instance, grace: Duration) {
 /// ではないため)。呼び出し元はロックを保持していないことが前提
 /// (`stop`/`stop_all` は `take_for_stop` で子を切り離してから呼ぶ)。
 fn kill_and_wait(child: &mut Child, grace: Duration) -> Option<i32> {
-    kill_and_wait_all(&mut [child], grace)
+    kill_and_wait_all(&mut [child], &[], grace)
         .pop()
         .expect("one child in, one result out")
 }
@@ -696,12 +787,26 @@ fn kill_and_wait(child: &mut Child, grace: Duration) -> Option<i32> {
 /// 戻り値は入力と同じ順序。正常終了時のみ `Some(code)` で、SIGKILL へ昇格
 /// した場合や `wait` に失敗した場合は `None`(強制終了なので意味のある終了
 /// コードではないため)。呼び出し元はロックを保持していないことが前提。
-fn kill_and_wait_all(children: &mut [&mut Child], grace: Duration) -> Vec<Option<i32>> {
+fn kill_and_wait_all(
+    children: &mut [&mut Child],
+    orphan_pgids: &[i32],
+    grace: Duration,
+) -> Vec<Option<i32>> {
     // SAFETY: いずれも自分が spawn した(まだ wait していない)子の pid で、
     // `process_group(0)` により pid == pgid。
     for child in children.iter() {
         unsafe {
             libc::killpg(child.id() as i32, libc::SIGTERM);
+        }
+    }
+    // 本体が先に死んだインスタンスのグループ(孫だけが残っている)へも
+    // 同じ SIGTERM を送る。こちらは wait できる子がいないので、猶予中は
+    // `killpg(pgid, 0)`(存在確認)で空になるのを待つ。
+    // SAFETY: グループが空でない限り pgid は再利用されず、空なら ESRCH で
+    // 無害(`Instance::pgid` のドキュメントコメント参照)。
+    for pgid in orphan_pgids {
+        unsafe {
+            libc::killpg(*pgid, libc::SIGTERM);
         }
     }
 
@@ -710,6 +815,7 @@ fn kill_and_wait_all(children: &mut [&mut Child], grace: Duration) -> Vec<Option
     // `try_wait` がエラーを返した子は、以後ポーリングせず直ちに SIGKILL へ
     // 進める(単体版が `Err` で待ちループを抜けていたのと同じ扱い)。
     let mut give_up = vec![false; children.len()];
+    let mut orphan_gone = vec![false; orphan_pgids.len()];
     let deadline = Instant::now() + grace;
     loop {
         let mut all_settled = true;
@@ -721,6 +827,17 @@ fn kill_and_wait_all(children: &mut [&mut Child], grace: Duration) -> Vec<Option
                 Ok(Some(status)) => reaped[i] = Some(status.code()),
                 Ok(None) => all_settled = false,
                 Err(_) => give_up[i] = true,
+            }
+        }
+        for (i, pgid) in orphan_pgids.iter().enumerate() {
+            if orphan_gone[i] {
+                continue;
+            }
+            // SAFETY: signal 0 は存在確認のみ。
+            if unsafe { libc::killpg(*pgid, 0) } != 0 {
+                orphan_gone[i] = true;
+            } else {
+                all_settled = false;
             }
         }
         if all_settled || Instant::now() >= deadline {
@@ -740,6 +857,16 @@ fn kill_and_wait_all(children: &mut [&mut Child], grace: Duration) -> Vec<Option
         }
         let _ = child.wait();
         reaped[i] = Some(None);
+    }
+    // 猶予内に空にならなかった孤児グループも強制終了。
+    for (i, pgid) in orphan_pgids.iter().enumerate() {
+        if orphan_gone[i] {
+            continue;
+        }
+        // SAFETY: 同上。
+        unsafe {
+            libc::killpg(*pgid, libc::SIGKILL);
+        }
     }
 
     reaped
@@ -1308,5 +1435,130 @@ mod tests {
             "stop_all must wait out a stop_detached kill that was already in \
              flight when it was called, not just the instances it detaches itself"
         );
+    }
+
+    /// 孫プロセスの pid をファイルへ書き、本体(sh)はすぐ exit する spec。
+    /// サイドカー本体が先に死んだ状況(issue stop-shutdown-5iy7)の再現用。
+    fn dying_parent_spec(pidfile: &std::path::Path, ports: Vec<u16>) -> ProcessSpec {
+        ProcessSpec {
+            command: PathBuf::from("/bin/sh"),
+            args: vec![
+                "-c".to_string(),
+                format!("sleep 30 & echo $! > {}", pidfile.display()),
+            ],
+            ports,
+        }
+    }
+
+    /// pidfile から孫プロセスの pid を読む(書かれるまでポーリング)。
+    fn read_grandchild_pid(pidfile: &std::path::Path) -> i32 {
+        for _ in 0..200 {
+            if let Ok(content) = std::fs::read_to_string(pidfile) {
+                if let Ok(pid) = content.trim().parse::<i32>() {
+                    return pid;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        panic!("grandchild pid was never written to {}", pidfile.display());
+    }
+
+    /// 本体(sh)が exit して reap される(status が running=false を報告
+    /// する)までポーリングする。
+    fn wait_until_reaped(driver: &ProcessDriver, key: &str, spec: &ProcessSpec) {
+        for _ in 0..200 {
+            if driver.status(key, spec).iter().all(|i| !i.running) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        panic!("sidecar main process never exited");
+    }
+
+    fn process_exits_within(pid: i32, deadline: Duration) -> bool {
+        let due = Instant::now() + deadline;
+        loop {
+            // SAFETY: existence check only, no signal sent.
+            if unsafe { libc::kill(pid, 0) } != 0 {
+                return true;
+            }
+            if Instant::now() >= due {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// issue stop-shutdown-5iy7 の回帰テスト: サイドカー本体が先に死んで
+    /// reap された後でも、同じプロセスグループに残った孫プロセスは
+    /// `stop_all`(デーモン shutdown)で回収される。
+    #[test]
+    fn stop_all_kills_grandchildren_of_an_already_dead_sidecar() {
+        let driver = driver();
+        let tmp = tempfile::tempdir().unwrap();
+        let pidfile = tmp.path().join("grandchild.pid");
+        let spec = dying_parent_spec(&pidfile, vec![28641]);
+
+        driver.ensure_started("d/dying", &spec).expect("start");
+        let grandchild = read_grandchild_pid(&pidfile);
+        wait_until_reaped(&driver, "d/dying", &spec);
+        assert!(
+            unsafe { libc::kill(grandchild, 0) } == 0,
+            "grandchild must be alive before stop_all"
+        );
+
+        driver.stop_all();
+
+        assert!(
+            process_exits_within(grandchild, Duration::from_secs(2)),
+            "grandchild {grandchild} must be killed by stop_all even though its \
+             parent sidecar process already exited and was reaped"
+        );
+    }
+
+    /// 同上の per-key 版: `stop` でも孤児の孫が回収される。
+    #[test]
+    fn stop_kills_grandchildren_of_an_already_dead_sidecar() {
+        let driver = driver();
+        let tmp = tempfile::tempdir().unwrap();
+        let pidfile = tmp.path().join("grandchild.pid");
+        let spec = dying_parent_spec(&pidfile, vec![28642]);
+
+        driver.ensure_started("d/dying-stop", &spec).expect("start");
+        let grandchild = read_grandchild_pid(&pidfile);
+        wait_until_reaped(&driver, "d/dying-stop", &spec);
+
+        driver.stop("d/dying-stop");
+
+        assert!(
+            process_exits_within(grandchild, Duration::from_secs(2)),
+            "grandchild {grandchild} must be killed by stop"
+        );
+    }
+
+    /// respawn 時にも旧世代の孤児は残らない: 本体が死んだインスタンスを
+    /// `ensure_started` が spawn し直すとき、旧プロセスグループの孫を
+    /// 先に回収する。
+    #[test]
+    fn respawn_kills_grandchildren_of_the_previous_generation() {
+        let driver = driver();
+        let tmp = tempfile::tempdir().unwrap();
+        let pidfile = tmp.path().join("grandchild.pid");
+        let spec = dying_parent_spec(&pidfile, vec![28643]);
+
+        driver.ensure_started("d/respawn", &spec).expect("start");
+        let old_grandchild = read_grandchild_pid(&pidfile);
+        wait_until_reaped(&driver, "d/respawn", &spec);
+
+        // pidfile を消してから respawn(新しい孫の pid と区別するため)。
+        std::fs::remove_file(&pidfile).unwrap();
+        driver.ensure_started("d/respawn", &spec).expect("respawn");
+        let _new_grandchild = read_grandchild_pid(&pidfile);
+
+        assert!(
+            process_exits_within(old_grandchild, Duration::from_secs(2)),
+            "old grandchild {old_grandchild} must be killed on respawn"
+        );
+        driver.stop_all();
     }
 }
