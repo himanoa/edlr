@@ -3,6 +3,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { invoke, isTauri } from "../lib/tauri";
 import type { FilesystemConfig, FilesystemRoot } from "../types/plugin";
+import { Checkbox } from "@/components/ui/checkbox";
 
 const WARNING = "mt-1.5 text-sm font-semibold text-yellow-400";
 
@@ -76,7 +77,7 @@ function FilesystemRootCard({
         <input
           aria-label="フォルダ"
           type="text"
-          className="w-56 rounded border border-border bg-background px-2 py-1 text-foreground disabled:opacity-50"
+          className="w-72 rounded border border-border bg-background px-3 py-1.5 text-foreground disabled:opacity-50"
           value={path}
           onChange={(e) => setPath(e.target.value)}
           disabled={saving}
@@ -99,8 +100,7 @@ function FilesystemRootCard({
           `root.granted` のみで駆動する(楽観的更新をしない)。RPC が返らない
           まま「承認済み」に見えるのを防ぐため。
         */}
-        <input
-          type="checkbox"
+        <Checkbox
           aria-label="このフォルダへのアクセスを承認する"
           checked={root.granted}
           // `checked` と同じ理由で、`disabled` もローカルの未保存入力
@@ -108,7 +108,7 @@ function FilesystemRootCard({
           // 判定する。保存前の入力だけでトグルが有効になると、承認した対象
           // (サーバ側のパス)と実際にアクセスされる場所がずれてしまう。
           disabled={root.config.path === "" || grantSaving}
-          onChange={(e) => handleGrant(e.target.checked)}
+          onCheckedChange={(v) => handleGrant(v === true)}
         />
         {grantSaving && (
           <span className="ml-1.5 text-xs text-muted-foreground" role="status">

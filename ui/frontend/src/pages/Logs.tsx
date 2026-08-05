@@ -3,6 +3,7 @@ import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { filterEntries, type LogEntry } from "../lib/filter";
 import { defaultWsUrl, useEventStream, type ConnectionState } from "../ws";
+import { Checkbox } from "@/components/ui/checkbox";
 
 const CONNECTION_STYLE: Record<ConnectionState, string> = {
   open: "bg-emerald-950 text-emerald-400",
@@ -110,31 +111,28 @@ export default function Logs() {
         />
         {KINDS.map((k) => (
           <label key={k} className="flex items-center gap-1.5">
-            <input
-              type="checkbox"
+            <Checkbox
               aria-label={k}
               checked={kinds[k]}
-              onChange={(e) => setKinds((prev) => ({ ...prev, [k]: e.target.checked }))}
+              onCheckedChange={(v) => setKinds((prev) => ({ ...prev, [k]: v === true }))}
             />
             {k}
           </label>
         ))}
         {LEVELS.map((lv) => (
           <label key={lv} className={`flex items-center gap-1.5 ${LEVEL_STYLE[lv]}`}>
-            <input
-              type="checkbox"
+            <Checkbox
               aria-label={lv}
               checked={levels[lv]}
-              onChange={(e) => setLevels((prev) => ({ ...prev, [lv]: e.target.checked }))}
+              onCheckedChange={(v) => setLevels((prev) => ({ ...prev, [lv]: v === true }))}
             />
             {lv}
           </label>
         ))}
         <label className="flex items-center gap-1.5">
-          <input
-            type="checkbox"
+          <Checkbox
             checked={follow}
-            onChange={(e) => setFollow(e.target.checked)}
+            onCheckedChange={(v) => setFollow(v === true)}
           />
           自動スクロール
         </label>

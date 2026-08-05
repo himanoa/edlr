@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import type { DashboardWidget } from "../types/plugin";
+import { Checkbox } from "@/components/ui/checkbox";
 
 function DashboardEntryCard({
   pluginId,
@@ -45,12 +46,11 @@ function DashboardEntryCard({
           無効化する -- ただし無効化するのは ON にする方向だけで、取消は
           常に可能にする(未解決でも承認済みなら取り消せる)。
         */}
-        <input
-          type="checkbox"
+        <Checkbox
           aria-label="このウィジェットの表示を承認する"
           checked={entry.granted}
           disabled={saving || (!entry.granted && !entry.resolved)}
-          onChange={(e) => handleGrant(e.target.checked)}
+          onCheckedChange={(v) => handleGrant(v === true)}
         />
         {saving && (
           <span className="ml-1.5 text-xs text-muted-foreground" role="status">

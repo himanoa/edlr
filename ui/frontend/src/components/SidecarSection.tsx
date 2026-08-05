@@ -2,10 +2,11 @@ import { useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { invoke, isTauri } from "../lib/tauri";
 import type { Sidecar, SidecarConfig } from "../types/plugin";
+import { Checkbox } from "@/components/ui/checkbox";
 
 const ROW = "flex items-center justify-between gap-4 py-1.5";
 const INPUT =
-  "w-56 rounded border border-border bg-background px-2 py-1 text-foreground disabled:opacity-50";
+  "w-72 rounded border border-border bg-background px-3 py-1.5 text-foreground disabled:opacity-50";
 const WARNING = "mt-1.5 text-sm font-semibold text-yellow-400";
 const PENDING = "ml-1.5 text-xs text-muted-foreground";
 
@@ -147,7 +148,7 @@ function SidecarCard({
         <span>引数(1 行 1 引数)</span>
         <textarea
           aria-label="引数"
-          className="min-h-14 w-56 rounded border border-border bg-background px-2 py-1 font-mono text-foreground disabled:opacity-50"
+          className="min-h-14 w-72 rounded border border-border bg-background px-3 py-1.5 font-mono text-foreground disabled:opacity-50"
           value={args}
           onChange={(e) => setArgs(e.target.value)}
           disabled={saving}
@@ -191,8 +192,7 @@ function SidecarCard({
           `sidecar.granted` のみで駆動する(楽観的更新をしない)。
           RPC が返らないまま「承認済み」に見えるのを防ぐため。
         */}
-        <input
-          type="checkbox"
+        <Checkbox
           aria-label="このサイドカーを承認する"
           checked={sidecar.granted}
           // `checked` と同じ理由で、`disabled` もローカルの未保存入力
@@ -200,7 +200,7 @@ function SidecarCard({
           // で判定する。保存前の入力だけでトグルが有効になると、承認した対象
           // (サーバ側の command)と実際に走るプログラムがずれてしまう。
           disabled={sidecar.config.command === "" || grantSaving}
-          onChange={(e) => handleGrant(e.target.checked)}
+          onCheckedChange={(v) => handleGrant(v === true)}
         />
         {grantSaving && (
           <span className={PENDING} role="status">

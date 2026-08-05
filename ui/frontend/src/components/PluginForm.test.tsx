@@ -62,12 +62,12 @@ test("shows an error and reverts the value when onChange rejects (boolean)", asy
   render(<PluginForm plugin={plugin} onChange={onChange} />);
 
   const checkbox = screen.getByLabelText("有効") as HTMLInputElement;
-  expect(checkbox.checked).toBe(true);
+  expect(checkbox).toBeChecked();
 
   await userEvent.click(checkbox);
 
   expect(await screen.findByText("save failed")).toBeInTheDocument();
-  expect(checkbox.checked).toBe(true);
+  expect(checkbox).toBeChecked();
 });
 
 test("a boolean field still commits immediately on change", async () => {

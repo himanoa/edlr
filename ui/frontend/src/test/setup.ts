@@ -1,5 +1,14 @@
 import "@testing-library/jest-dom/vitest";
 
+// jsdom に ResizeObserver が無く、Radix UI(checkbox 等)が参照するため補う。
+if (!globalThis.ResizeObserver) {
+  globalThis.ResizeObserver = class {
+    observe() {}
+    unobserve() {}
+    disconnect() {}
+  };
+}
+
 // Node 22+ は実験的な global localStorage を持ち(--localstorage-file 未指定では undefined)、
 // vitest の jsdom 環境は既存の Node グローバルを上書きしないため、
 // jsdom 実装がテストに届かない。そのためここで補う。

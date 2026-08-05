@@ -157,6 +157,11 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
+
+async function openPermissionWizard() {
+  await userEvent.click(await screen.findByRole("button", { name: /権限を設定/ }));
+}
+
 test("shows loading then renders the plugin list", async () => {
   const plugin = makePlugin();
   listImpl = () => Promise.resolve({ pluginsDir: "/plugins", plugins: [plugin] });
@@ -181,6 +186,23 @@ test("shows an error message when plugins/list fails", async () => {
   render(<Provider><Plugins /></Provider>);
 
   expect(await screen.findByText(/connection refused/)).toBeInTheDocument();
+});
+
+test("shows 権限承認待ち badge when a plugin has ungranted permissions", async () => {
+  const plugin = makePlugin({
+    capabilities: {
+      requests: [{ kind: "http", hosts: ["api.example.com"], reason: "天気を取得するため" }],
+      granted: false,
+      staleGrant: false,
+    },
+  });
+  listImpl = () => Promise.resolve({ pluginsDir: "/plugins", plugins: [plugin] });
+
+  render(<Provider><Plugins /></Provider>);
+
+  // バッジが「有効」ではなく「権限承認待ち」になる(「有効」は設定フィールドの
+  // ラベルにも現れるため、バッジ側のテキストだけで判定する)
+  expect(await screen.findByText("権限承認待ち")).toBeInTheDocument();
 });
 
 test("shows the reason for a disabled plugin", async () => {
@@ -225,7 +247,7 @@ test("changing a setting calls plugins/set-settings with the right args and upda
     });
   });
 
-  await waitFor(() => expect(checkbox.checked).toBe(false));
+  await waitFor(() => expect(checkbox).not.toBeChecked());
 });
 
 test("shows the capability section for a plugin that has capability requests", async () => {
@@ -239,6 +261,7 @@ test("shows the capability section for a plugin that has capability requests", a
   listImpl = () => Promise.resolve({ pluginsDir: "/plugins", plugins: [plugin] });
 
   render(<Provider><Plugins /></Provider>);
+  await openPermissionWizard();
 
   expect(await screen.findByText(/api\.example\.com/)).toBeInTheDocument();
 });
@@ -260,6 +283,7 @@ test("toggling capability approval calls plugins/set-capabilities and updates th
     });
 
   render(<Provider><Plugins /></Provider>);
+  await openPermissionWizard();
   const toggle = (await screen.findByRole("checkbox", { name: /承認/ })) as HTMLInputElement;
   await userEvent.click(toggle);
 
@@ -268,7 +292,7 @@ test("toggling capability approval calls plugins/set-capabilities and updates th
     expect(call?.params).toEqual({ plugin: "voice-notify", granted: true });
   });
 
-  await waitFor(() => expect(toggle.checked).toBe(true));
+  await waitFor(() => expect(toggle).toBeChecked());
   expect(screen.queryByText(/未承認/)).not.toBeInTheDocument();
 });
 
@@ -277,6 +301,7 @@ test("shows the sidecar section for a plugin that declares sidecars", async () =
   listImpl = () => Promise.resolve({ pluginsDir: "/plugins", plugins: [plugin] });
 
   render(<Provider><Plugins /></Provider>);
+  await openPermissionWizard();
 
   expect(await screen.findByText(/音声合成エンジン/)).toBeInTheDocument();
 });
@@ -287,6 +312,7 @@ test("toggling sidecar approval calls plugins/set-sidecar-grant with the right p
   setSidecarGrantImpl = () => Promise.resolve({ sidecars: [makeSidecar({ granted: true })] });
 
   render(<Provider><Plugins /></Provider>);
+  await openPermissionWizard();
   const toggle = (await screen.findByRole("checkbox", {
     name: /このサイドカーを承認する/,
   })) as HTMLInputElement;
@@ -297,7 +323,7 @@ test("toggling sidecar approval calls plugins/set-sidecar-grant with the right p
     expect(call?.params).toEqual({ plugin: "voice-notify", name: "tts", granted: true });
   });
 
-  await waitFor(() => expect(toggle.checked).toBe(true));
+  await waitFor(() => expect(toggle).toBeChecked());
 });
 
 test("shows the filesystem section for a plugin that declares filesystem roots", async () => {
@@ -305,6 +331,7 @@ test("shows the filesystem section for a plugin that declares filesystem roots",
   listImpl = () => Promise.resolve({ pluginsDir: "/plugins", plugins: [plugin] });
 
   render(<Provider><Plugins /></Provider>);
+  await openPermissionWizard();
 
   expect(await screen.findByText(/CSV で書き出すため/)).toBeInTheDocument();
 });
@@ -316,6 +343,7 @@ test("toggling filesystem approval calls plugins/set-filesystem-grant with the r
     Promise.resolve({ roots: [makeFilesystemRoot({ granted: true })] });
 
   render(<Provider><Plugins /></Provider>);
+  await openPermissionWizard();
   const toggle = (await screen.findByRole("checkbox", {
     name: /このフォルダへのアクセスを承認する/,
   })) as HTMLInputElement;
@@ -326,7 +354,7 @@ test("toggling filesystem approval calls plugins/set-filesystem-grant with the r
     expect(call?.params).toEqual({ plugin: "voice-notify", name: "exports", granted: true });
   });
 
-  await waitFor(() => expect(toggle.checked).toBe(true));
+  await waitFor(() => expect(toggle).toBeChecked());
 });
 
 test("shows the bus section for a plugin that declares bus connections", async () => {
@@ -334,6 +362,7 @@ test("shows the bus section for a plugin that declares bus connections", async (
   listImpl = () => Promise.resolve({ pluginsDir: "/plugins", plugins: [plugin] });
 
   render(<Provider><Plugins /></Provider>);
+  await openPermissionWizard();
 
   expect(await screen.findByText(/現在システムを購読するため/)).toBeInTheDocument();
 });
@@ -347,6 +376,7 @@ test("toggling bus approval calls setBusGrant with the right params and replaces
     });
 
   render(<Provider><Plugins /></Provider>);
+  await openPermissionWizard();
   const toggle = (await screen.findByRole("checkbox", {
     name: /このバス接続を承認する/,
   })) as HTMLInputElement;
@@ -361,7 +391,7 @@ test("toggling bus approval calls setBusGrant with the right params and replaces
   // entries (a second, previously-absent driver appears), not just flip the
   // toggled entry locally.
   expect(await screen.findByText("translator-core")).toBeInTheDocument();
-  await waitFor(() => expect(toggle.checked).toBe(true));
+  await waitFor(() => expect(toggle).toBeChecked());
 });
 
 test("toggling dashboard approval calls setDashboardGrant and replaces the dashboard array from its response", async () => {
@@ -385,6 +415,7 @@ test("toggling dashboard approval calls setDashboardGrant and replaces the dashb
     });
 
   render(<Provider><Plugins /></Provider>);
+  await openPermissionWizard();
   const toggle = (await screen.findByRole("checkbox", {
     name: /このウィジェットの表示を承認する/,
   })) as HTMLInputElement;
@@ -396,7 +427,7 @@ test("toggling dashboard approval calls setDashboardGrant and replaces the dashb
   });
 
   expect(await screen.findByText("Extra Widget")).toBeInTheDocument();
-  await waitFor(() => expect(toggle.checked).toBe(true));
+  await waitFor(() => expect(toggle).toBeChecked());
 });
 
 test("shows the schedules section with name, spec, and next time for a plugin that declares schedules", async () => {

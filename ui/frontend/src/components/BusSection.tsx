@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import type { BusRequest } from "../types/plugin";
+import { Checkbox } from "@/components/ui/checkbox";
 
 function BusEntryCard({
   pluginId,
@@ -56,12 +57,11 @@ function BusEntryCard({
           手段が無くなってしまう(Important: 最終レビューで見つかった
           取りこぼし)。取消は常に可能にする。
         */}
-        <input
-          type="checkbox"
+        <Checkbox
           aria-label="このバス接続を承認する"
           checked={entry.granted}
           disabled={saving || (!entry.granted && !entry.resolved)}
-          onChange={(e) => handleGrant(e.target.checked)}
+          onCheckedChange={(v) => handleGrant(v === true)}
         />
         {saving && (
           <span className="ml-1.5 text-xs text-muted-foreground" role="status">

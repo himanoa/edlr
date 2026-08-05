@@ -1,5 +1,6 @@
 import { useState } from "react";
 import type { Capabilities } from "../types/plugin";
+import { Checkbox } from "@/components/ui/checkbox";
 
 export default function CapabilitySection({
   capabilities,
@@ -49,11 +50,10 @@ export default function CapabilitySection({
           surfaces a pending indicator; it never fabricates the checked
           state.
         */}
-        <input
-          type="checkbox"
+        <Checkbox
           checked={capabilities.granted}
           disabled={saving}
-          onChange={(e) => toggle(e.target.checked)}
+          onCheckedChange={(v) => toggle(v === true)}
         />
         {saving && (
           <span className="ml-1.5 text-xs text-muted-foreground" role="status">

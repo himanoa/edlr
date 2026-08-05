@@ -85,7 +85,7 @@ test("a never-settling onToggle leaves the checkbox reflecting the confirmed pro
   // reflect the last confirmed server state (ungranted), not a hopeful
   // "approved" flash, and the control should be disabled with a pending
   // indicator visible.
-  expect(toggle.checked).toBe(false);
+  expect(toggle).not.toBeChecked();
   expect(toggle.disabled).toBe(true);
   expect(screen.getByRole("status")).toBeInTheDocument();
 
@@ -101,10 +101,10 @@ test("a rejecting onToggle surfaces an error and reverts the toggle", async () =
   render(<CapabilitySection capabilities={capabilities} onToggle={onToggle} />);
 
   const toggle = screen.getByRole("checkbox") as HTMLInputElement;
-  expect(toggle.checked).toBe(false);
+  expect(toggle).not.toBeChecked();
 
   await userEvent.click(toggle);
 
   expect(await screen.findByText("承認に失敗しました")).toBeInTheDocument();
-  expect(toggle.checked).toBe(false);
+  expect(toggle).not.toBeChecked();
 });

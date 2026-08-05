@@ -1,11 +1,12 @@
 import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import type { LayoutSection, PluginInfo, SettingField } from "../types/plugin";
+import { Checkbox } from "@/components/ui/checkbox";
 
 // ラベル+入力欄の 2 カラム grid 行(旧 .plugin-form .form-row)
-const ROW = "grid grid-cols-[minmax(8rem,40%)_1fr] items-center gap-x-4 gap-y-1 py-1.5";
+const ROW = "grid grid-cols-[minmax(8rem,40%)_1fr] items-center gap-x-4 gap-y-1 py-1.5 w-full";
 const INPUT =
-  "w-full max-w-56 justify-self-start rounded border border-border bg-background px-2 py-1 text-foreground disabled:opacity-50";
+  "w-full max-w-72 justify-self-start rounded border border-border bg-background px-3 py-1.5 text-foreground disabled:opacity-50";
 const ROW_ERROR = "col-span-full m-0 text-sm text-red-400";
 
 // `PluginInfo` の一部だけを要求する形にしてある。`DriverInfo`(bus を持たない)
@@ -275,7 +276,7 @@ function MapField({
         <div key={row.id} className="flex items-center gap-2 py-0.5">
           <input
             type="text"
-            className="min-w-0 flex-1 rounded border border-border bg-background px-2 py-1 text-foreground disabled:opacity-50"
+            className="min-w-0 flex-1 rounded border border-border bg-background px-3 py-1.5 text-foreground disabled:opacity-50"
             aria-label={`${field.label} のキー`}
             value={row.key}
             disabled={disabled}
@@ -289,7 +290,7 @@ function MapField({
           />
           <input
             type="text"
-            className="min-w-0 flex-1 rounded border border-border bg-background px-2 py-1 text-foreground disabled:opacity-50"
+            className="min-w-0 flex-1 rounded border border-border bg-background px-3 py-1.5 text-foreground disabled:opacity-50"
             aria-label={`${field.label} の値`}
             value={row.value}
             disabled={disabled}
@@ -351,13 +352,12 @@ function Field({
       return (
         <label htmlFor={id} className={ROW}>
           <span>{field.label}</span>
-          <input
+          <Checkbox
             id={id}
-            type="checkbox"
             className="justify-self-start"
             checked={Boolean(value)}
             disabled={disabled}
-            onChange={(e) => onChange(e.target.checked)}
+            onCheckedChange={(v) => onChange(v === true)}
           />
         </label>
       );
@@ -502,8 +502,8 @@ export default function PluginForm({
       className={
         depth === 0
           ? // トップレベルはカード、入れ子は枠を弱め左インデントのみで区切る
-            "mb-4 rounded-lg border bg-card px-4 pt-3.5 pb-4 last:mb-0"
-          : "mt-3 border-l-2 border-border py-2 pl-4"
+            "mb-4 rounded-lg border bg-card px-4 pt-3.5 pb-4 last:mb-0 w-full"
+          : "mt-3 border-l-2 border-border py-2 pl-4 w-full"
       }
     >
       {depth === 0 ? (
@@ -521,7 +521,7 @@ export default function PluginForm({
   );
 
   return (
-    <form onSubmit={(e) => e.preventDefault()}>
+    <form onSubmit={(e) => e.preventDefault()} className="w-full">
       {plugin.layout
         ? plugin.layout.sections.map((s, i) => renderSection(s, 0, i))
         : plugin.settings.map((field) => renderField(field.key))}
