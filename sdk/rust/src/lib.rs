@@ -64,8 +64,7 @@ macro_rules! register {
                 <$plugin as $crate::Plugin>::on_schedule(name)
             }
             fn on_job_complete(job_id: u64, result_json: String) {
-                // Task 2 で $crate::http::dispatch_job_complete::<$plugin> に差し替える
-                <$plugin as $crate::Plugin>::on_job_complete(job_id, result_json)
+                $crate::http::dispatch_job_complete::<$plugin>(job_id, result_json)
             }
             fn on_stop() {
                 <$plugin as $crate::Plugin>::on_stop()
