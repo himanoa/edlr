@@ -10,7 +10,7 @@ publish = false
 crate-type = ["cdylib"]
 
 [dependencies]
-wit-bindgen = "0.60.0"
+edlr-plugin-sdk = { path = "../../../sdk/rust" }
 
 [profile.release]
 opt-level = "s"

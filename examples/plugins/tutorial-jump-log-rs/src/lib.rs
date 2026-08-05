@@ -9,15 +9,10 @@
 //! HTTP をイベント処理ではなく定期実行の側でやるのは意図的。理由は
 //! チュートリアルの 5 章を参照。
 
-wit_bindgen::generate!({
-    path: "../../../core/wit",
-    world: "plugin-guest",
-    generate_all,
-});
-
 use std::cell::RefCell;
 
-use edlr::plugin::{bus, driver_http, host_log, host_settings};
+use edlr_plugin_sdk as sdk;
+use sdk::{bus, driver_http, host_log, host_settings};
 
 /// 連携するドライバの id(`manifest.toml` の `[[bus]]` と一致させる)。
 const TRACKER: &str = "tutorial-tracker-rs";
@@ -46,12 +41,12 @@ struct Settings {
 
 struct Component;
 
-impl Guest for Component {
+impl sdk::Plugin for Component {
     fn init() {
         host_log::log(host_log::Level::Info, "tutorial-jump-log started");
     }
 
-    fn on_event(ev: Event) {
+    fn on_event(ev: sdk::Event) {
         // `manifest.toml` の `events` で絞ってはいるが、購読を増やしたときに
         // 壊れないよう、ここでも名前を確かめる。
         if ev.name.as_deref() != Some("FSDJump") {
@@ -114,8 +109,6 @@ impl Guest for Component {
             &format!("{driver}/{topic} = {}", String::from_utf8_lossy(&payload)),
         );
     }
-
-    fn on_job_complete(_job_id: u64, _result_json: String) {}
 
     fn on_schedule(name: String) {
         if name != "flush" {
@@ -241,4 +234,4 @@ fn urlencode(s: &str) -> String {
     out
 }
 
-export!(Component);
+sdk::register!(Component);

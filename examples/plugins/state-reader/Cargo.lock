@@ -9,10 +9,25 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
+name = "base64"
+version = "0.22.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
+
+[[package]]
 name = "bitflags"
 version = "2.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b588b76d00fde79687d7646a9b5bdf3cc0f655e0bbd080335a95d7e96f3587da"
+
+[[package]]
+name = "edlr-plugin-sdk"
+version = "0.5.0"
+dependencies = [
+ "base64",
+ "serde_json",
+ "wit-bindgen",
+]
 
 [[package]]
 name = "equivalent"
@@ -174,7 +189,7 @@ dependencies = [
 name = "state-reader"
 version = "0.1.0"
 dependencies = [
- "wit-bindgen",
+ "edlr-plugin-sdk",
 ]
 
 [[package]]

@@ -10,7 +10,7 @@ publish = false
 crate-type = ["cdylib"]
 
 [dependencies]
-wit-bindgen = "0.60.0"
+edlr-plugin-sdk = { path = "../../../sdk/rust" }
 serde_json = "1"
 
 [profile.release]

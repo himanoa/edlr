@@ -1,20 +1,14 @@
 //! `FSDJump` を見たら `ed-state` ドライバへシステム名を publish し、
 //! ドライバが配り直した `current-system` を `on-message` で受け取る。
 
-wit_bindgen::generate!({
-    path: "../../../core/wit",
-    world: "plugin-guest",
-    generate_all,
-});
-
-use edlr::plugin::{bus, host_log};
+use edlr_plugin_sdk as sdk;
+use sdk::bus;
+use sdk::host_log;
 
 struct Component;
 
-impl Guest for Component {
-    fn init() {}
-
-    fn on_event(ev: Event) {
+impl sdk::Plugin for Component {
+    fn on_event(ev: sdk::Event) {
         if ev.name.as_deref() != Some("FSDJump") {
             return;
         }
@@ -33,12 +27,6 @@ impl Guest for Component {
             ),
         );
     }
-
-    fn on_job_complete(_job_id: u64, _result_json: String) {}
-
-    fn on_schedule(_name: String) {}
-
-    fn on_stop() {}
 }
 
 /// `StarSystem` を素朴に取り出す(サンプルなので依存を増やさない)。
@@ -51,4 +39,4 @@ fn star_system_name(raw: &str) -> String {
     rest.split('"').next().unwrap_or("").to_string()
 }
 
-export!(Component);
+sdk::register!(Component);

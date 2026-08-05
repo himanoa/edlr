@@ -1,13 +1,10 @@
 #![allow(clippy::too_many_arguments)]
 
-wit_bindgen::generate!({
-    path: "../../../core/wit",
-    world: "plugin",
-});
+use edlr_plugin_sdk as sdk;
 
 struct InitTrap;
 
-impl Guest for InitTrap {
+impl sdk::Plugin for InitTrap {
     #[allow(clippy::empty_loop)]
     fn init() {
         loop {
@@ -17,19 +14,6 @@ impl Guest for InitTrap {
             // task started" path.
         }
     }
-
-    fn on_event(_ev: Event) {
-        // Never reached: init() always traps, so the runner never starts an
-        // event task for this plugin.
-    }
-
-    fn on_message(_driver: String, _topic: String, _payload: Vec<u8>) {}
-
-    fn on_job_complete(_job_id: u64, _result_json: String) {}
-
-    fn on_schedule(_name: String) {}
-
-    fn on_stop() {}
 }
 
-export!(InitTrap);
+sdk::register!(InitTrap);

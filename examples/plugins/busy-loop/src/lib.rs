@@ -1,32 +1,22 @@
 #![allow(clippy::too_many_arguments)]
 
-wit_bindgen::generate!({
-    path: "../../../core/wit",
-    world: "plugin",
-});
+use edlr_plugin_sdk as sdk;
+use sdk::host_log::{log, Level};
 
 struct BusyLoop;
 
-impl Guest for BusyLoop {
+impl sdk::Plugin for BusyLoop {
     fn init() {
-        edlr::plugin::host_log::log(edlr::plugin::host_log::Level::Info, "busy-loop initialized");
+        log(Level::Info, "busy-loop initialized");
     }
 
     #[allow(clippy::empty_loop)]
-    fn on_event(_ev: Event) {
+    fn on_event(_ev: sdk::Event) {
         loop {
             // Intentionally never terminates. Used to exercise the host's
             // epoch-based call deadline.
         }
     }
-
-    fn on_message(_driver: String, _topic: String, _payload: Vec<u8>) {}
-
-    fn on_job_complete(_job_id: u64, _result_json: String) {}
-
-    fn on_schedule(_name: String) {}
-
-    fn on_stop() {}
 }
 
-export!(BusyLoop);
+sdk::register!(BusyLoop);

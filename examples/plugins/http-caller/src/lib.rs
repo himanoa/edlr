@@ -1,22 +1,18 @@
 #![allow(clippy::too_many_arguments)]
 
-wit_bindgen::generate!({
-    path: "../../../core/wit",
-    world: "plugin",
-});
-
-use edlr::plugin::driver_http::{send, submit_send, DriverError, Request};
-use edlr::plugin::host_log::{log, Level};
+use edlr_plugin_sdk as sdk;
+use sdk::driver_http::{send, DriverError, Request};
+use sdk::host_log::{log, Level};
 
 struct HttpCaller;
 
-impl Guest for HttpCaller {
+impl sdk::Plugin for HttpCaller {
     fn init() {
         log(Level::Info, "http-caller initialized");
     }
 
-    fn on_event(_ev: Event) {
-        let settings = edlr::plugin::host_settings::get_all();
+    fn on_event(_ev: sdk::Event) {
+        let settings = sdk::host_settings::get_all();
         let url = serde_json::from_str::<serde_json::Value>(&settings)
             .ok()
             .and_then(|v| v.get("url").and_then(|u| u.as_str()).map(str::to_string))
@@ -59,48 +55,22 @@ impl Guest for HttpCaller {
             }
         }
 
-        // `submit-send` は同じリクエストを非同期に投げる例。呼び出しは即
-        // job-id を返し、結果は後から `on-job-complete` に届くので、同期
-        // `send` と違い呼び出し期限(2 秒)を HTTP の待ち時間で使わない。
-        // 受付時に判定されるのは許可と in-flight 上限だけで、どちらも typed
-        // `result` で返る(trap しない)。
-        match submit_send(&request, None) {
-            Ok(job_id) => {
-                log(
-                    Level::Info,
-                    &format!("http-caller: submitted {url} as job {job_id}"),
-                );
-            }
-            Err(e) => {
-                log(Level::Warn, &format!("http-caller: submit failed: {e:?}"));
-            }
-        }
-    }
-
-    fn on_message(_driver: String, _topic: String, _payload: Vec<u8>) {}
-
-    /// `submit-send` の結果。`result-json` は
-    /// `{"ok":{"status":..,"headers":..,"body-base64":..}}` か
-    /// `{"err":{"kind":..,"message":..}}`(docs/plugins.md 参照)。
-    fn on_job_complete(job_id: u64, result_json: String) {
-        let status = serde_json::from_str::<serde_json::Value>(&result_json)
-            .ok()
-            .and_then(|v| v["ok"]["status"].as_u64());
-        match status {
-            Some(status) => log(
+        // `sdk::http::submit` は同じリクエストを非同期に投げる例。呼び出しは
+        // 即 job-id を返し、結果はコールバックへ届くので、同期 `send` と違い
+        // 呼び出し期限(2 秒)を HTTP の待ち時間で使わない。受付時に判定され
+        // るのは許可と in-flight 上限だけで、どちらも typed `result` で返る
+        // (trap しない)。
+        match sdk::http::submit(request, None, move |result| match result {
+            Ok(response) => log(
                 Level::Info,
-                &format!("http-caller: job {job_id} -> status {status}"),
+                &format!("http-caller: job completed -> status {}", response.status),
             ),
-            None => log(
-                Level::Warn,
-                &format!("http-caller: job {job_id} failed: {result_json}"),
-            ),
+            Err(e) => log(Level::Warn, &format!("http-caller: job failed: {e:?}")),
+        }) {
+            Ok(job_id) => log(Level::Info, &format!("http-caller: submitted as job {job_id}")),
+            Err(e) => log(Level::Warn, &format!("http-caller: submit failed: {e:?}")),
         }
     }
-
-    fn on_schedule(_name: String) {}
-
-    fn on_stop() {}
 }
 
-export!(HttpCaller);
+sdk::register!(HttpCaller);
