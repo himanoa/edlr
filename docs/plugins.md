@@ -33,7 +33,7 @@ WASI 自体はホストが `wasmtime_wasi` の `add_to_linker_sync` で提供す
 
 ### WIT パッケージのバージョン
 
-WIT パッケージは `edlr:plugin@0.5.0`。
+WIT パッケージは `edlr:plugin@0.6.0`。
 
 - `0.1.0` → `0.2.0`: Journal 読み取り位置の永続化に伴い、`event` レコードへ
   `replay: bool` を追加した ABI 破壊的変更
@@ -45,6 +45,9 @@ WIT パッケージは `edlr:plugin@0.5.0`。
 - `0.4.0` → `0.5.0`: 非同期 HTTP の追加(`driver-http` への `submit-send`、
   `plugin` world への `on-job-complete` export 追加)に伴う ABI 破壊的変更
   (下記「非同期 HTTP」参照)
+- `0.5.0` → `0.6.0`: 非同期 HTTP のドライバ対応(`driver` world への
+  `on-job-complete` export 追加)に伴う ABI 破壊的変更。セマンティクスは
+  プラグイン側と同一
 
 **旧 world でビルド済みのプラグインは新しいホストへのロードに失敗する**。
 プラグインを新しい `core/wit` に対して再ビルドすること(Rust は

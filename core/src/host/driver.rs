@@ -96,6 +96,12 @@ const DRIVER_TABLE_LIMIT: usize = 8;
 /// Per-driver-instance host state, exposed to the guest via the generated
 /// `Host` traits.
 pub struct DriverCtx {
+    /// このドライバの作業キューの送信側。`submit_send` が spawn したタスクが
+    /// 完了通知(`DriverWork::JobComplete`)を push するのに使う。
+    work_tx: crate::runner::plugin::queue::WorkSender<crate::runner::driver::DriverWork>,
+    /// submit 系ジョブの共有状態(job id 採番・世代・in-flight 数)。
+    /// プラグイン側と同じ型を共用する(`crate::host::plugin::PluginJobs`)。
+    jobs: Arc<crate::host::plugin::PluginJobs>,
     pub driver_id: String,
     /// Effective settings JSON string. Wrapped so the runner can swap the
     /// value in place between calls without reloading the driver.
@@ -151,8 +157,12 @@ impl DriverCtx {
         http_driver: Arc<edlr_driver_http::HttpDriver>,
         process_driver: Arc<edlr_driver_process::ProcessDriver>,
         fs_driver: Arc<edlr_driver_fs::FsDriver>,
+        work_tx: crate::runner::plugin::queue::WorkSender<crate::runner::driver::DriverWork>,
+        jobs: Arc<crate::host::plugin::PluginJobs>,
     ) -> DriverCtx {
         DriverCtx {
+            work_tx,
+            jobs,
             driver_id,
             settings_json,
             capabilities_json,
@@ -241,18 +251,57 @@ impl DriverHttpHost for DriverCtx {
             })
     }
 
-    /// ドライバ側は未対応(issue http-driver-9znv の領分)。`interface
-    /// driver-http` は plugin/driver 両 world で共有されているため trait には
-    /// 現れるが、ドライバには完了通知の届け先(`on-job-complete` 相当の
-    /// export)がまだ無い。同期 `send` を使うこと。
+    /// 非同期 submit。プラグイン側
+    /// (`crate::host::plugin::HostCtx::submit_send`)と同じセマンティクス:
+    /// 許可判定と in-flight 上限(8)は同期で判定し、送信は tokio タスクへ
+    /// spawn して即 `Ok(job-id)`。結果は spawn したタスクが
+    /// `DriverWork::JobComplete` として作業キューへ push し、ドライバ専用
+    /// スレッドが `on-job-complete` export で届ける。
     fn submit_send(
         &mut self,
-        _req: WitRequest,
-        _timeout_ms: Option<u32>,
+        req: WitRequest,
+        timeout_ms: Option<u32>,
     ) -> Result<u64, WitDriverError> {
-        Err(WitDriverError::InvalidRequest(
-            "submit-send is not available to drivers yet; use send".to_string(),
-        ))
+        use crate::host::plugin::{job_result_json, submit_timeout, SUBMIT_IN_FLIGHT_LIMIT};
+
+        let raw = self
+            .capabilities_json
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        let hosts = crate::host::plugin::parse_capability_hosts(&raw);
+        check_http_permission(&hosts, &req.url).map_err(WitDriverError::PermissionDenied)?;
+
+        if self.jobs.try_acquire_slot().is_err() {
+            return Err(WitDriverError::Transport(format!(
+                "submit queue full ({SUBMIT_IN_FLIGHT_LIMIT} jobs already in flight)"
+            )));
+        }
+
+        let job_id = self.jobs.allocate_job_id();
+        let generation = self.jobs.current_generation();
+        let timeout = submit_timeout(timeout_ms);
+        let driver_request = edlr_driver_http::HttpRequest {
+            method: req.method,
+            url: req.url,
+            headers: req.headers,
+            body: req.body,
+        };
+
+        let http_driver = self.http_driver.clone();
+        let work_tx = self.work_tx.clone();
+        let jobs = self.jobs.clone();
+        self.http_driver.handle().spawn(async move {
+            let result = http_driver.send_async(driver_request, Some(timeout)).await;
+            jobs.release_slot();
+            let _ = work_tx.push(crate::runner::driver::DriverWork::JobComplete {
+                generation,
+                job_id,
+                result_json: job_result_json(result),
+            });
+        });
+
+        Ok(job_id)
     }
 }
 
@@ -582,6 +631,16 @@ impl DriverInstance {
             .call_on_message(&mut self.store, from, topic, payload)
             .map_err(|e| anyhow::anyhow!("driver on-message() call failed or timed out: {e}"))
     }
+
+    /// `submit-send` 系ジョブの完了を届ける。呼ばれる時点で結果は揃って
+    /// いるので、他の export と同じ同期呼び出し・同じ epoch deadline。
+    pub fn call_on_job_complete(&mut self, job_id: u64, result_json: &str) -> anyhow::Result<()> {
+        self.store
+            .set_epoch_deadline(deadline_ticks(Self::CALL_DEADLINE));
+        self.bindings
+            .call_on_job_complete(&mut self.store, job_id, result_json)
+            .map_err(|e| anyhow::anyhow!("driver on-job-complete() call failed or timed out: {e}"))
+    }
 }
 
 #[cfg(test)]
@@ -645,6 +704,111 @@ mod tests {
         ));
     }
 
+    /// submit 系を使わないテスト用のドライバ作業キュー送信側。受信側は
+    /// `forget` で生かしたままにする(host/plugin.rs の `test_work_tx` と
+    /// 同じ流儀)。
+    fn test_work_tx() -> crate::runner::plugin::queue::WorkSender<crate::runner::driver::DriverWork>
+    {
+        let (tx, rx) = crate::runner::plugin::queue::channel_for(
+            crate::runner::driver::admit_driver_work,
+        );
+        std::mem::forget(rx);
+        tx
+    }
+
+    /// submit 系テスト用: 作業キューの受信側も返すビルダ。
+    fn test_driver_ctx_with_queue(
+        hosts_json: &str,
+    ) -> (
+        DriverCtx,
+        crate::runner::plugin::queue::WorkReceiver<crate::runner::driver::DriverWork>,
+    ) {
+        let (work_tx, work_rx) = crate::runner::plugin::queue::channel_for(
+            crate::runner::driver::admit_driver_work,
+        );
+        let ctx = DriverCtx::new(
+            "ed-state".to_string(),
+            Arc::new(Mutex::new("{}".to_string())),
+            Arc::new(Mutex::new(hosts_json.to_string())),
+            Arc::new(Mutex::new("[]".to_string())),
+            Arc::new(Mutex::new("[]".to_string())),
+            edlr_driver_channel::Bus::new(),
+            Arc::new(
+                edlr_driver_http::HttpDriver::new(DRIVER_HTTP_TIMEOUT, HTTP_MAX_BODY, crate::host::drivers::test_handle())
+                    .expect("http driver builds"),
+            ),
+            Arc::new(edlr_driver_process::ProcessDriver::new(
+                SIDECAR_SHUTDOWN_GRACE,
+                SIDECAR_SPAWN_MIN_INTERVAL,
+            )),
+            Arc::new(edlr_driver_fs::FsDriver::new(FS_READ_LIMIT, FS_LIST_LIMIT)),
+            work_tx,
+            crate::host::plugin::PluginJobs::new(),
+        );
+        (ctx, work_rx)
+    }
+
+    /// submit-send: 未承認ホストは同期の permission-denied で、ジョブは
+    /// 始まらない(完了通知も来ない)。
+    #[test]
+    fn submit_send_without_a_grant_is_a_synchronous_permission_denied() {
+        let (mut ctx, work_rx) = test_driver_ctx_with_queue(r#"{"hosts":[]}"#);
+        let err = ctx
+            .submit_send(
+                WitRequest {
+                    method: "GET".to_string(),
+                    url: "https://example.com/x".to_string(),
+                    headers: Vec::new(),
+                    body: None,
+                },
+                None,
+            )
+            .expect_err("submit without a grant must be rejected synchronously");
+        assert!(matches!(err, WitDriverError::PermissionDenied(_)));
+        assert!(work_rx
+            .recv_timeout(std::time::Duration::from_millis(100))
+            .is_err());
+    }
+
+    /// submit-send: 受付は成功し、transport 失敗が `DriverWork::JobComplete`
+    /// の err 結果として非同期に届く(プラグイン側と同じセマンティクス)。
+    #[test]
+    fn submit_send_transport_failures_arrive_as_err_results() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("local_addr");
+        drop(listener);
+
+        let (mut ctx, work_rx) = test_driver_ctx_with_queue(&format!(
+            r#"{{"granted":true,"hosts":["http://{addr}"]}}"#
+        ));
+        let job_id = ctx
+            .submit_send(
+                WitRequest {
+                    method: "GET".to_string(),
+                    url: format!("http://{addr}/"),
+                    headers: Vec::new(),
+                    body: None,
+                },
+                None,
+            )
+            .expect("submission itself succeeds; the failure arrives asynchronously");
+        assert_eq!(job_id, 1, "job ids start at 1");
+
+        match work_rx.recv_timeout(std::time::Duration::from_secs(10)) {
+            Ok(crate::runner::driver::DriverWork::JobComplete {
+                generation,
+                job_id: completed,
+                result_json,
+            }) => {
+                assert_eq!(generation, 0);
+                assert_eq!(completed, job_id);
+                let value: serde_json::Value = serde_json::from_str(&result_json).unwrap();
+                assert_eq!(value["err"]["kind"], "transport");
+            }
+            other => panic!("expected DriverWork::JobComplete, got {other:?}"),
+        }
+    }
+
     fn test_driver_ctx(bus: edlr_driver_channel::Bus) -> DriverCtx {
         DriverCtx::new(
             "ed-state".to_string(),
@@ -662,6 +826,8 @@ mod tests {
                 SIDECAR_SPAWN_MIN_INTERVAL,
             )),
             Arc::new(edlr_driver_fs::FsDriver::new(FS_READ_LIMIT, FS_LIST_LIMIT)),
+            test_work_tx(),
+            crate::host::plugin::PluginJobs::new(),
         )
     }
 
@@ -685,6 +851,8 @@ mod tests {
                 SIDECAR_SPAWN_MIN_INTERVAL,
             )),
             Arc::new(edlr_driver_fs::FsDriver::new(FS_READ_LIMIT, FS_LIST_LIMIT)),
+            test_work_tx(),
+            crate::host::plugin::PluginJobs::new(),
         )
     }
 

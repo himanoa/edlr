@@ -6,32 +6,32 @@ import (
 	"go.bytecodealliance.org/cm"
 )
 
-// This file contains wasmimport and wasmexport declarations for "edlr:plugin@0.5.0".
+// This file contains wasmimport and wasmexport declarations for "edlr:plugin@0.6.0".
 
-//go:wasmimport edlr:plugin/driver-fs@0.5.0 read
+//go:wasmimport edlr:plugin/driver-fs@0.6.0 read
 //go:noescape
 func wasmimport_Read(root0 *uint8, root1 uint32, path0 *uint8, path1 uint32, result *cm.Result[DriverErrorShape, cm.List[uint8], DriverError])
 
-//go:wasmimport edlr:plugin/driver-fs@0.5.0 read-range
+//go:wasmimport edlr:plugin/driver-fs@0.6.0 read-range
 //go:noescape
 func wasmimport_ReadRange(root0 *uint8, root1 uint32, path0 *uint8, path1 uint32, offset0 uint64, len0 uint32, result *cm.Result[DriverErrorShape, cm.List[uint8], DriverError])
 
-//go:wasmimport edlr:plugin/driver-fs@0.5.0 stat
+//go:wasmimport edlr:plugin/driver-fs@0.6.0 stat
 //go:noescape
 func wasmimport_Stat(root0 *uint8, root1 uint32, path0 *uint8, path1 uint32, result *cm.Result[EntryShape, Entry, DriverError])
 
-//go:wasmimport edlr:plugin/driver-fs@0.5.0 list
+//go:wasmimport edlr:plugin/driver-fs@0.6.0 list
 //go:noescape
 func wasmimport_List(root0 *uint8, root1 uint32, prefix0 *uint8, prefix1 uint32, result *cm.Result[DriverErrorShape, cm.List[Entry], DriverError])
 
-//go:wasmimport edlr:plugin/driver-fs@0.5.0 write
+//go:wasmimport edlr:plugin/driver-fs@0.6.0 write
 //go:noescape
 func wasmimport_Write(root0 *uint8, root1 uint32, path0 *uint8, path1 uint32, bytes0 *uint8, bytes1 uint32, result *cm.Result[DriverError, struct{}, DriverError])
 
-//go:wasmimport edlr:plugin/driver-fs@0.5.0 append
+//go:wasmimport edlr:plugin/driver-fs@0.6.0 append
 //go:noescape
 func wasmimport_Append(root0 *uint8, root1 uint32, path0 *uint8, path1 uint32, bytes0 *uint8, bytes1 uint32, result *cm.Result[DriverError, struct{}, DriverError])
 
-//go:wasmimport edlr:plugin/driver-fs@0.5.0 delete
+//go:wasmimport edlr:plugin/driver-fs@0.6.0 delete
 //go:noescape
 func wasmimport_Delete(root0 *uint8, root1 uint32, path0 *uint8, path1 uint32, result *cm.Result[DriverError, struct{}, DriverError])

@@ -154,6 +154,24 @@ Plugins UI):
   取りこぼした購読プラグインも、`retain = true` のトピックなら次の `bus.get`
   で最新値を拾い直せる
 
+## 非同期 HTTP(`driver-http.submit-send` / `on-job-complete`)
+
+WIT 0.6.0 から、ドライバもプラグインと同じ submit/complete プロトコルを
+使える。`driver-http.submit-send(req, timeout-ms)` は即 job-id を返し、
+結果は `world driver` の `on-job-complete` export へ非同期に届く。
+API・`result-json` の形・in-flight 上限(8)・タイムアウト規定は
+プラグイン側と同一なので [plugins.md の「非同期 HTTP」](plugins.md#非同期-httpdriver-httpsubmit-send--on-job-complete)
+を参照。
+
+ドライバ固有の注意:
+
+- 完了通知は `on-message` と同じ 1 本の作業キューに FIFO で混ざる
+  (メッセージ処理が 1 スレッドに直列化される性質はそのまま)
+- 同期 `send` のタイムアウトはドライバでは 25 秒(呼び出し期限 30 秒)
+  なので、プラグインほど切迫はしないが、`on-message` の処理中に同期で
+  待った時間はそのままキューの詰まりになる。TTS のような遅い呼び出しは
+  `submit-send` に逃がすとキューが流れ続ける
+
 ## ドライバ無効化時の retained 値の破棄
 
 ドライバが `on-message`/`init` の失敗で無効化(`Disabled`)されると、その

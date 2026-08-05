@@ -192,8 +192,13 @@ impl PluginJobs {
         self.generation.fetch_add(1, Ordering::AcqRel);
     }
 
+    /// 次の job id を採番する(1 始まり・再作成をまたいで一意)。
+    pub(crate) fn allocate_job_id(&self) -> u64 {
+        self.next_job_id.fetch_add(1, Ordering::Relaxed)
+    }
+
     /// 「上限未満なら 1 枠取る」を原子的に行う。上限到達なら `Err`。
-    fn try_acquire_slot(&self) -> Result<(), ()> {
+    pub(crate) fn try_acquire_slot(&self) -> Result<(), ()> {
         self.in_flight
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
                 (n < SUBMIT_IN_FLIGHT_LIMIT).then_some(n + 1)
@@ -202,7 +207,7 @@ impl PluginJobs {
             .map_err(|_| ())
     }
 
-    fn release_slot(&self) {
+    pub(crate) fn release_slot(&self) {
         self.in_flight.fetch_sub(1, Ordering::AcqRel);
     }
 }
@@ -223,7 +228,7 @@ const SUBMIT_MAX_TIMEOUT_MS: u32 = 60_000;
 /// 60 秒にクランプ)。`HTTP_TIMEOUT`(1.5 秒)< `CALL_DEADLINE` の const
 /// assert は submit には適用されない -- 呼び出し自体は即返り、待つのは
 /// spawn されたタスクだけなので、ゲスト呼び出しの deadline とは無関係。
-fn submit_timeout(timeout_ms: Option<u32>) -> Duration {
+pub(crate) fn submit_timeout(timeout_ms: Option<u32>) -> Duration {
     let ms = timeout_ms
         .unwrap_or(SUBMIT_DEFAULT_TIMEOUT_MS)
         .min(SUBMIT_MAX_TIMEOUT_MS);
@@ -238,7 +243,7 @@ fn submit_timeout(timeout_ms: Option<u32>) -> Duration {
 /// body はバイト列なので base64 で運ぶ(JSON 文字列に生バイトは載らない)。
 /// `permission-denied` はここに来ない -- submit 受付時に同期エラーとして
 /// 返している。
-fn job_result_json(result: Result<edlr_driver_http::HttpResponse, edlr_driver_http::HttpError>) -> String {
+pub(crate) fn job_result_json(result: Result<edlr_driver_http::HttpResponse, edlr_driver_http::HttpError>) -> String {
     use base64::Engine as _;
     let value = match result {
         Ok(response) => serde_json::json!({
@@ -533,7 +538,7 @@ impl DriverHttpHost for HostCtx {
             )));
         }
 
-        let job_id = self.jobs.next_job_id.fetch_add(1, Ordering::Relaxed);
+        let job_id = self.jobs.allocate_job_id();
         let generation = self.jobs.current_generation();
         let timeout = submit_timeout(timeout_ms);
         let driver_request = edlr_driver_http::HttpRequest {

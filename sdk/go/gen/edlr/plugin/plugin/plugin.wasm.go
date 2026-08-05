@@ -6,7 +6,7 @@ import (
 	"go.bytecodealliance.org/cm"
 )
 
-// This file contains wasmimport and wasmexport declarations for "edlr:plugin@0.5.0".
+// This file contains wasmimport and wasmexport declarations for "edlr:plugin@0.6.0".
 
 //go:wasmexport init
 //export init

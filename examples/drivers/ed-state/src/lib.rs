@@ -16,6 +16,10 @@ impl Guest for Component {
         host_log::log(host_log::Level::Info, "ed-state driver started");
     }
 
+    // submit-send は使っていないので何もしない(export 自体は WIT 0.6.0 で
+    // 必須になった)。
+    fn on_job_complete(_job_id: u64, _result_json: String) {}
+
     fn on_message(from: String, topic: String, payload: Vec<u8>) {
         if topic != "set-system" {
             return;

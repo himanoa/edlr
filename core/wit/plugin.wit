@@ -1,4 +1,4 @@
-package edlr:plugin@0.5.0;
+package edlr:plugin@0.6.0;
 
 interface host-log {
   enum level { debug, info, warn, error }
@@ -186,6 +186,10 @@ world driver {
 
   export init: func();
   export on-message: func(%from: string, topic: string, payload: list<u8>);
+  // `driver-http.submit-send` したジョブの完了通知。plugin world の同名
+  // export と同じセマンティクス(result-json の形は docs/plugins.md
+  // 「非同期 HTTP」参照)。
+  export on-job-complete: func(job-id: u64, result-json: string);
 }
 
 /// ドライバ(ゲスト)がビルド時に対象とする world。`plugin-guest` と同じ理由で

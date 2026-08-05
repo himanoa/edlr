@@ -22,6 +22,41 @@ use std::fmt;
 use std::sync::mpsc::{SyncSender, TrySendError};
 use std::sync::{Arc, Mutex, MutexGuard};
 
+/// `MessageSink::try_send` の失敗。メッセージ本体は返さない(呼び出し側は
+/// エラー種別しか使わないため)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SinkError {
+    /// 受け口が満杯でメッセージを受け取れなかった。`publish` は
+    /// `queue-full` として呼び出し元へ返す(捨てない)。
+    Full,
+    /// 受け口が閉じている(ドライバスレッド終了済みなど)。
+    Closed,
+}
+
+/// `Bus` がドライバの受信キューへメッセージを渡すための口。
+///
+/// かつては `SyncSender<Message>` 固定だったが、core 側がドライバの作業
+/// キュー(journal ならぬ bus メッセージと submit 完了通知を 1 本に混ぜる
+/// 自作キュー)を直接受け口にできるよう trait にした。`SyncSender<Message>`
+/// への実装は残してあるので、テストや単純な用途はそのまま使える。
+///
+/// **`Drop` に意味を持たせてよい**: `Bus` が sink を手放すのは
+/// `register_driver` による差し替え時と `Bus` 自体の破棄時だけなので、
+/// 実装側は `Drop` で「受け口が閉じた」ことを下流へ知らせられる
+/// (core のドライバキュー sink はこれで受信ループを終了させる)。
+pub trait MessageSink: Send + Sync {
+    fn try_send(&self, message: Message) -> Result<(), SinkError>;
+}
+
+impl MessageSink for SyncSender<Message> {
+    fn try_send(&self, message: Message) -> Result<(), SinkError> {
+        SyncSender::try_send(self, message).map_err(|e| match e {
+            TrySendError::Full(_) => SinkError::Full,
+            TrySendError::Disconnected(_) => SinkError::Closed,
+        })
+    }
+}
+
 /// バスの呼び出しが返しうるエラー。WIT の `bus-error` variant と 1 対 1 で対応する。
 #[derive(Debug, Clone, PartialEq)]
 pub enum BusError {
@@ -65,7 +100,7 @@ pub struct Delivery {
 
 struct DriverSlot {
     topics: Vec<TopicSpec>,
-    sender: SyncSender<Message>,
+    sender: Arc<dyn MessageSink>,
     retained: BTreeMap<String, Vec<u8>>,
     available: bool,
 }
@@ -117,14 +152,14 @@ impl Bus {
         &self,
         driver_id: &str,
         topics: Vec<TopicSpec>,
-        sender: SyncSender<Message>,
+        sender: impl MessageSink + 'static,
     ) {
         let mut state = self.lock_state();
         state.drivers.insert(
             driver_id.to_string(),
             DriverSlot {
                 topics,
-                sender,
+                sender: Arc::new(sender),
                 retained: BTreeMap::new(),
                 available: true,
             },
@@ -180,20 +215,17 @@ impl Bus {
         // なので、呼び出し側が再送するか諦めるかを選べる(設計書参照)。
         match slot.sender.try_send(message) {
             Ok(()) => Ok(()),
-            Err(TrySendError::Full(_)) => Err(BusError::QueueFull(format!("{driver_id}/{topic}"))),
-            Err(TrySendError::Disconnected(_)) => {
+            Err(SinkError::Full) => Err(BusError::QueueFull(format!("{driver_id}/{topic}"))),
+            Err(SinkError::Closed) => {
                 Err(BusError::DriverUnavailable(driver_id.to_string()))
             }
         }
     }
 
     /// ホスト発の合成メッセージ(`from = HOST_SENDER`)をドライバの
-    /// キューへ届ける。監視スレッドなどホスト内部の専用スレッドから
-    /// 呼ばれる前提で、`publish` と違い**ブロッキング送信**する
-    /// (ready 通知は取りこぼすと空白期間が再発するため、キューが
-    /// 満杯ならドライバが捌くまで待つ)。ホスト予約経路なので
-    /// トピック宣言のチェックは行わない(`sidecar-ready` は manifest に
-    /// 宣言されない)。送信そのものはバスのロックを手放してから行う。
+    /// キューへ届ける。ホスト予約経路なのでトピック宣言のチェックは行わない
+    /// (`sidecar-ready` は manifest に宣言されない)。送信そのものはバスの
+    /// ロックを手放してから行う。満杯時の扱いは下のコメント参照。
     pub fn notify_from_host(
         &self,
         driver_id: &str,
@@ -216,9 +248,16 @@ impl Bus {
             topic: topic.to_string(),
             payload,
         };
-        sender
-            .send(message)
-            .map_err(|_| BusError::DriverUnavailable(driver_id.to_string()))
+        // かつては `SyncSender::send`(満杯ならブロック)だったが、sink 化に
+        // 伴い try_send に変更した。core のドライバキュー sink はホスト発
+        // (`from == HOST_SENDER`)のメッセージを満杯でも受け入れる
+        // (admit 判定)ので、実運用で Full になるのは素の `SyncSender` を
+        // 使うテスト経路だけ。届かなかった ready 通知は呼び出し側の保険経路
+        // (`forward_sidecar_ready` のドキュメント参照)が拾う。
+        sender.try_send(message).map_err(|e| match e {
+            SinkError::Full => BusError::QueueFull(format!("{driver_id}/{topic}")),
+            SinkError::Closed => BusError::DriverUnavailable(driver_id.to_string()),
+        })
     }
 
     pub fn get(&self, driver_id: &str, topic: &str) -> Result<Option<Vec<u8>>, BusError> {

@@ -7,7 +7,7 @@ edlr プラグインを Go で書くための SDK。WIT バインディング(`g
 ## インストール
 
 ```bash
-go get github.com/himanoa/edlr/sdk/go@sdk/go/v0.5.0
+go get github.com/himanoa/edlr/sdk/go@sdk/go/v0.6.0
 ```
 
 ## tinygo build
