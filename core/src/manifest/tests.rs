@@ -1280,6 +1280,41 @@ fn filesystem_target_rejects_unknown_value() {
     .expect_err("unknown target must be rejected");
 }
 
+#[test]
+fn filesystem_fingerprint_changes_when_target_becomes_file() {
+    let dir = parse_fs_manifest(
+        "[[filesystem]]\nname = \"a\"\nreason = \"r\"\nmode = \"read\"\n",
+    )
+    .unwrap();
+    let file = parse_fs_manifest(
+        "[[filesystem]]\nname = \"a\"\nreason = \"r\"\nmode = \"read\"\ntarget = \"file\"\n",
+    )
+    .unwrap();
+    assert_ne!(
+        dir.filesystem_fingerprint("a"),
+        file.filesystem_fingerprint("a"),
+        "directory -> file の変更は再承認を要求しなければならない"
+    );
+}
+
+#[test]
+fn filesystem_fingerprint_for_directory_is_unchanged_from_before_target_existed() {
+    // target フィールド導入前の canonical は
+    // "filesystem" + name + reason + mode の 4 フィールドだった。directory の
+    // fingerprint がこの値のままであること(= 既存の grants を失効させない
+    // こと)を、導入前のアルゴリズムで計算した固定値で釘付けする。
+    let manifest = parse_fs_manifest(
+        "[[filesystem]]\nname = \"a\"\nreason = \"r\"\nmode = \"read\"\n",
+    )
+    .unwrap();
+    // sha256("10:filesystem" + "1:a" + "1:r" + "4:read") -- 実装前に
+    // `echo -n '10:filesystem1:a1:r4:read' | sha256sum` で得た値。
+    assert_eq!(
+        manifest.filesystem_fingerprint("a").unwrap(),
+        "19861b2e46585bdee3a0e98f7a87c151036658bcff7c8b8704ca92407fe011fa"
+    );
+}
+
 fn manifest_with_bus(bus: Vec<BusRequest>) -> Manifest {
     Manifest {
         id: "translator".into(),

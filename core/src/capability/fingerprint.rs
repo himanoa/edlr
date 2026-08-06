@@ -4,7 +4,8 @@
 //! (`Manifest` のメソッド)の仕事。ここは値イン値アウトの計算だけを担う。
 
 use super::request::{
-    BusRequest, CapabilityRequest, DashboardWidget, FilesystemRequest, SidecarRequest,
+    BusRequest, CapabilityRequest, DashboardWidget, FilesystemRequest, FilesystemTarget,
+    SidecarRequest,
 };
 
 /// capability 要求一式の安定フィンガープリント(grants の失効判定に使う)。
@@ -84,6 +85,14 @@ pub fn filesystem(request: &FilesystemRequest) -> String {
     canonical.push_str(&encode_field(&request.name));
     canonical.push_str(&encode_field(&request.reason));
     canonical.push_str(&encode_field(request.mode.as_str()));
+    // target は file のときだけ畳み込む。directory で無条件に足すと、この
+    // フィールド導入前に承認された既存の grants が全プラグインで一斉に
+    // 失効してしまう。4 フィールド形(旧 directory)と 5 フィールド形
+    // (file)の衝突は起こらない: mode のエンコードは "4:read" か
+    // "10:read-write" のどちらかで、"4:file" で終わる文字列を含み得ない。
+    if request.target == FilesystemTarget::File {
+        canonical.push_str(&encode_field(request.target.as_str()));
+    }
     sha256_hex(&canonical)
 }
 
