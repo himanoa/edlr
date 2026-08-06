@@ -132,6 +132,7 @@ pub fn filesystem_result_json(roots: &[crate::rpc::info::FilesystemInfo]) -> ser
                 "name": info.request.name,
                 "reason": info.request.reason,
                 "mode": info.request.mode.as_str(),
+                "target": info.request.target.as_str(),
                 "granted": info.grant.granted,
                 "staleGrant": info.grant.stale,
                 "config": info.config,
@@ -147,7 +148,7 @@ mod tests {
     use crate::capability::grants::GrantState;
     use crate::capability::request::{
         BusRequest, CapabilityRequest, DashboardWidget, FilesystemMode, FilesystemRequest,
-        SidecarRequest, WidgetSize,
+        FilesystemTarget, SidecarRequest, WidgetSize,
     };
     use crate::manifest::ScheduleSpec;
     use crate::rpc::info::{BusInfo, DashboardInfo, FilesystemInfo, ScheduleInfo, SidecarInfo};
@@ -439,6 +440,7 @@ mod tests {
                         "name": "data",
                         "reason": "read config files",
                         "mode": "read-write",
+                        "target": "directory",
                         "granted": false,
                         "staleGrant": false,
                         "config": { "path": "/home/user/data" },
@@ -446,5 +448,21 @@ mod tests {
                 ]
             })
         );
+    }
+
+    #[test]
+    fn filesystem_json_includes_target() {
+        let roots = vec![FilesystemInfo {
+            request: FilesystemRequest {
+                name: "status".to_string(),
+                reason: "watch".to_string(),
+                mode: FilesystemMode::Read,
+                target: FilesystemTarget::File,
+            },
+            config: FilesystemConfig { path: String::new() },
+            grant: GrantState { granted: false, stale: false },
+        }];
+        let json = filesystem_result_json(&roots);
+        assert_eq!(json["roots"][0]["target"], "file");
     }
 }
