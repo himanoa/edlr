@@ -439,12 +439,14 @@ impl DriverCtx {
             .clone();
         let entries = crate::runtime::fs::parse_filesystem(&raw);
 
-        resolve_root(&entries, root, need_write).map_err(|e| match e {
-            RootResolveError::Unknown(m) => WitFsError::UnknownRoot(m),
-            RootResolveError::NotGranted(m) => WitFsError::PermissionDenied(m),
-            RootResolveError::NotConfigured(m) => WitFsError::NotConfigured(m),
-            RootResolveError::ReadOnly(m) => WitFsError::PermissionDenied(m),
-        })
+        resolve_root(&entries, root, need_write)
+            .map(|resolved| resolved.path)
+            .map_err(|e| match e {
+                RootResolveError::Unknown(m) => WitFsError::UnknownRoot(m),
+                RootResolveError::NotGranted(m) => WitFsError::PermissionDenied(m),
+                RootResolveError::NotConfigured(m) => WitFsError::NotConfigured(m),
+                RootResolveError::ReadOnly(m) => WitFsError::PermissionDenied(m),
+            })
     }
 }
 

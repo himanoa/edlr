@@ -66,6 +66,14 @@ pub(crate) enum RootResolveError {
     ReadOnly(String),
 }
 
+/// `resolve_root` の解決結果。`is_file` は当該ルートが `target = "file"`
+/// (単一ファイル承認)かどうか。
+#[derive(Debug)]
+pub(crate) struct ResolvedRoot {
+    pub path: PathBuf,
+    pub is_file: bool,
+}
+
 /// `filesystem_json` から解いたエントリ一覧(`entries`)から、当該ルート
 /// (`root`)の実パスを解決する。
 ///
@@ -75,7 +83,7 @@ pub(crate) fn resolve_root(
     entries: &BTreeMap<String, FsRuntimeEntry>,
     root: &str,
     need_write: bool,
-) -> Result<PathBuf, RootResolveError> {
+) -> Result<ResolvedRoot, RootResolveError> {
     let Some(entry) = entries.get(root) else {
         return Err(RootResolveError::Unknown(format!("no such root: {root}")));
     };
@@ -94,7 +102,37 @@ pub(crate) fn resolve_root(
             "root {root} is read-only"
         )));
     }
-    Ok(PathBuf::from(&entry.path))
+    Ok(ResolvedRoot {
+        path: PathBuf::from(&entry.path),
+        is_file: entry.target == "file",
+    })
+}
+
+/// `FsDriver` に渡す `(root_dir, rel)` を組み立てる。
+///
+/// directory ルートはゲストのパスをそのまま相対パスとして通す。file ルート
+/// はゲストのパスを `""` に限定し、承認されたファイルパスを「親ディレクトリ
+/// + ファイル名」に分解して返す -- `FsDriver` のパス検証・サイズ上限・
+/// 原子的書き込みをそのまま流用するため(ドライバ側に file 分岐を持たない)。
+pub(crate) fn effective_fs_target(
+    resolved: &ResolvedRoot,
+    guest_path: &str,
+) -> Result<(PathBuf, String), String> {
+    if !resolved.is_file {
+        return Ok((resolved.path.clone(), guest_path.to_string()));
+    }
+    if !guest_path.is_empty() {
+        return Err("path must be empty for a file root".to_string());
+    }
+    let parent = resolved.path.parent();
+    let name = resolved.path.file_name().and_then(|n| n.to_str());
+    match (parent, name) {
+        (Some(parent), Some(name)) => Ok((parent.to_path_buf(), name.to_string())),
+        _ => Err(format!(
+            "configured file path has no parent directory: {}",
+            resolved.path.display()
+        )),
+    }
 }
 
 /// `capabilities_json` から解いた有効ホスト一覧(`hosts`)を使って
@@ -213,11 +251,21 @@ mod tests {
         }
     }
 
+    fn fs_file_entry(granted: bool, mode: &str, path: &str) -> FsRuntimeEntry {
+        FsRuntimeEntry {
+            name: "status".to_string(),
+            granted,
+            mode: mode.to_string(),
+            path: path.to_string(),
+            target: "file".to_string(),
+        }
+    }
+
     #[test]
     fn resolve_root_granted_and_configured_returns_path() {
         let entries = fs_entries(vec![fs_entry(true, "read-write", "/tmp/exports")]);
-        let path = resolve_root(&entries, "exports", false).expect("granted and configured");
-        assert_eq!(path, PathBuf::from("/tmp/exports"));
+        let resolved = resolve_root(&entries, "exports", false).expect("granted and configured");
+        assert_eq!(resolved.path, PathBuf::from("/tmp/exports"));
     }
 
     #[test]
@@ -258,6 +306,44 @@ mod tests {
             panic!("expected ReadOnly, got a different variant");
         };
         assert_eq!(msg, "root exports is read-only");
+    }
+
+    #[test]
+    fn resolve_root_directory_entry_is_not_file() {
+        let entries = fs_entries(vec![fs_entry(true, "read", "/tmp/exports")]);
+        let resolved = resolve_root(&entries, "exports", false).unwrap();
+        assert!(!resolved.is_file);
+        assert_eq!(resolved.path, PathBuf::from("/tmp/exports"));
+    }
+
+    #[test]
+    fn resolve_root_file_entry_is_file() {
+        let entries = fs_entries(vec![fs_file_entry(true, "read", "/home/u/Status.json")]);
+        let resolved = resolve_root(&entries, "status", false).unwrap();
+        assert!(resolved.is_file);
+    }
+
+    #[test]
+    fn effective_fs_target_directory_passes_guest_path_through() {
+        let resolved = ResolvedRoot { path: PathBuf::from("/tmp/exports"), is_file: false };
+        let (dir, rel) = effective_fs_target(&resolved, "sub/a.txt").unwrap();
+        assert_eq!(dir, PathBuf::from("/tmp/exports"));
+        assert_eq!(rel, "sub/a.txt");
+    }
+
+    #[test]
+    fn effective_fs_target_file_splits_into_parent_and_name() {
+        let resolved = ResolvedRoot { path: PathBuf::from("/home/u/Status.json"), is_file: true };
+        let (dir, rel) = effective_fs_target(&resolved, "").unwrap();
+        assert_eq!(dir, PathBuf::from("/home/u"));
+        assert_eq!(rel, "Status.json");
+    }
+
+    #[test]
+    fn effective_fs_target_file_rejects_nonempty_guest_path() {
+        let resolved = ResolvedRoot { path: PathBuf::from("/home/u/Status.json"), is_file: true };
+        let err = effective_fs_target(&resolved, "other.json").expect_err("non-empty path on file root");
+        assert_eq!(err, "path must be empty for a file root");
     }
 
     #[test]
