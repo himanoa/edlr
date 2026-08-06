@@ -22,6 +22,8 @@ pub enum SettingsError {
     TypeMismatch { key: String, expected: &'static str },
     /// Select フィールドの値が `options` に含まれていない。
     NotAnOption { key: String, value: String },
+    /// Slider フィールドの値が `min..=max` の範囲外。
+    OutOfRange { key: String, min: f64, max: f64 },
     /// Map フィールドのエントリに空文字列のキーが含まれている。
     /// `TypeMismatch` と分けているのは、UI で「行を足したが名前を入力して
     /// いない」という具体的な状況を、型違いと同じ文言で報せると直しようが
@@ -45,6 +47,9 @@ impl fmt::Display for SettingsError {
                     f,
                     "settings key {key} value {value:?} is not one of the allowed options"
                 )
+            }
+            SettingsError::OutOfRange { key, min, max } => {
+                write!(f, "settings key {key} value must be between {min} and {max}")
             }
             SettingsError::EmptyMapKey { key } => {
                 write!(f, "settings key {key} must not contain an empty entry key")

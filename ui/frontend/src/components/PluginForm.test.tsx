@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, test, vi } from "vitest";
 import type { PluginInfo, SettingField } from "../types/plugin";
@@ -382,5 +382,64 @@ describe("layout", () => {
     );
     expect(screen.queryByRole("heading")).not.toBeInTheDocument();
     expect(screen.getByLabelText("Endpoint")).toBeInTheDocument();
+  });
+});
+
+describe("slider", () => {
+  const slider: SettingField = {
+    type: "slider",
+    key: "volume",
+    label: "音量",
+    default: 50,
+    min: 0,
+    max: 100,
+    step: 5,
+  };
+
+  function sliderPlugin(value = 50) {
+    return makePlugin({ settings: [slider], values: { volume: value } });
+  }
+
+  test("renders a range input with min/max/step and shows the current value", () => {
+    render(<PluginForm plugin={sliderPlugin(60)} onChange={vi.fn()} />);
+    const input = screen.getByLabelText("音量") as HTMLInputElement;
+    expect(input.type).toBe("range");
+    expect(input.min).toBe("0");
+    expect(input.max).toBe("100");
+    expect(input.step).toBe("5");
+    expect(input.value).toBe("60");
+    expect(screen.getByText("60")).toBeInTheDocument();
+  });
+
+  test("dragging does not commit until release, then commits once as a number", async () => {
+    const onChange = vi.fn().mockResolvedValue(undefined);
+    render(<PluginForm plugin={sliderPlugin(50)} onChange={onChange} />);
+    const input = screen.getByLabelText("音量");
+
+    // ドラッグ中の change 連発では保存しない
+    fireEvent.change(input, { target: { value: "70" } });
+    fireEvent.change(input, { target: { value: "80" } });
+    expect(onChange).not.toHaveBeenCalled();
+
+    fireEvent.pointerUp(input);
+    expect(onChange).toHaveBeenCalledTimes(1);
+    expect(onChange).toHaveBeenCalledWith("volume", 80);
+  });
+
+  test("releasing without moving does not save", async () => {
+    const onChange = vi.fn().mockResolvedValue(undefined);
+    render(<PluginForm plugin={sliderPlugin(50)} onChange={onChange} />);
+    fireEvent.pointerUp(screen.getByLabelText("音量"));
+    expect(onChange).not.toHaveBeenCalled();
+  });
+
+  test("keyboard adjustment commits on blur", async () => {
+    const onChange = vi.fn().mockResolvedValue(undefined);
+    render(<PluginForm plugin={sliderPlugin(50)} onChange={onChange} />);
+    const input = screen.getByLabelText("音量");
+    fireEvent.change(input, { target: { value: "55" } });
+    fireEvent.blur(input);
+    expect(onChange).toHaveBeenCalledTimes(1);
+    expect(onChange).toHaveBeenCalledWith("volume", 55);
   });
 });

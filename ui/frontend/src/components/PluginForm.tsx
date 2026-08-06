@@ -333,6 +333,62 @@ function MapField({
   );
 }
 
+/**
+ * 有界な数値のスライダー。ドラッグ中は draft だけ動かし、離したとき
+ * (pointerup / キーボード操作後の blur)に値が変わっていれば 1 回だけ保存する。
+ * change のたびに保存するとドラッグで RPC を連打してしまう。
+ */
+function SliderField({
+  field,
+  value,
+  disabled,
+  onCommit,
+}: {
+  field: Extract<SettingField, { type: "slider" }>;
+  value: unknown;
+  disabled: boolean;
+  onCommit: (v: unknown) => void;
+}) {
+  const id = `field-${field.key}`;
+  const committed = Number(value ?? field.default);
+  const [draft, setDraft] = useState(committed);
+
+  // 外から値が変わったとき(保存失敗で巻き戻された等)に追従する。
+  useEffect(() => {
+    setDraft(committed);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [committed]);
+
+  const commit = () => {
+    if (draft === committed) return;
+    onCommit(draft);
+  };
+
+  return (
+    // 値の数値表示を <label> の中に入れると getByLabelText などが拾う
+    // アクセシブルネームに値まで混ざるので、行は div にして label を分ける。
+    <div className={ROW}>
+      <label htmlFor={id}>{field.label}</label>
+      <span className="flex w-full max-w-72 items-center gap-3">
+        <input
+          id={id}
+          type="range"
+          className="min-w-0 flex-1 accent-sky-400 disabled:opacity-50"
+          min={field.min}
+          max={field.max}
+          step={field.step}
+          value={draft}
+          disabled={disabled}
+          onChange={(e) => setDraft(Number(e.target.value))}
+          onPointerUp={commit}
+          onBlur={commit}
+        />
+        <span className="min-w-8 text-right tabular-nums">{draft}</span>
+      </span>
+    </div>
+  );
+}
+
 function Field({
   field,
   value,
@@ -364,6 +420,8 @@ function Field({
     case "string":
     case "number":
       return <DraftField field={field} value={value} disabled={disabled} onCommit={onChange} />;
+    case "slider":
+      return <SliderField field={field} value={value} disabled={disabled} onCommit={onChange} />;
     case "secret":
       return (
         <SecretField

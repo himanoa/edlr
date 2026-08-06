@@ -38,6 +38,23 @@ pub fn validate_value(
                 });
             }
         }
+        // step の倍数チェックはしない — UI 以外からの保存で丸め誤差の f64 を
+        // 弾いてしまうし、範囲内なら実害がない(設計書参照)。
+        SettingField::Slider { key, min, max, .. } => {
+            let Some(v) = value.as_f64() else {
+                return Err(SettingsError::TypeMismatch {
+                    key: key.clone(),
+                    expected: "number",
+                });
+            };
+            if v < *min || v > *max {
+                return Err(SettingsError::OutOfRange {
+                    key: key.clone(),
+                    min: *min,
+                    max: *max,
+                });
+            }
+        }
         SettingField::Select {
             key,
             options,
@@ -150,6 +167,17 @@ mod tests {
         }
     }
 
+    fn slider_field() -> SettingField {
+        SettingField::Slider {
+            key: "volume".into(),
+            label: "Volume".into(),
+            default: 50.0,
+            min: 0.0,
+            max: 100.0,
+            step: 5.0,
+        }
+    }
+
     fn select_field() -> SettingField {
         SettingField::Select {
             key: "mode".into(),
@@ -226,6 +254,34 @@ mod tests {
                 .unwrap_err()
                 .to_string(),
             "settings key count expected a number value"
+        );
+    }
+
+    #[test]
+    fn slider_accepts_a_number_within_range() {
+        assert!(validate_value(&slider_field(), &serde_json::json!(0.0)).is_ok());
+        assert!(validate_value(&slider_field(), &serde_json::json!(42)).is_ok());
+        assert!(validate_value(&slider_field(), &serde_json::json!(100.0)).is_ok());
+    }
+
+    #[test]
+    fn slider_rejects_a_number_out_of_range() {
+        assert_eq!(
+            validate_value(&slider_field(), &serde_json::json!(100.5))
+                .unwrap_err()
+                .to_string(),
+            "settings key volume value must be between 0 and 100"
+        );
+        assert!(validate_value(&slider_field(), &serde_json::json!(-1)).is_err());
+    }
+
+    #[test]
+    fn slider_rejects_a_non_number_value() {
+        assert_eq!(
+            validate_value(&slider_field(), &serde_json::json!("50"))
+                .unwrap_err()
+                .to_string(),
+            "settings key volume expected a number value"
         );
     }
 

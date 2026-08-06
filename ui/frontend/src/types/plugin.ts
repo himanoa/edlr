@@ -11,6 +11,17 @@ export type SettingField =
   | { type: "boolean"; key: string; label: string; default: boolean }
   | { type: "string"; key: string; label: string; default: string }
   | { type: "number"; key: string; label: string; default: number }
+  // 有界な数値(音量など)。UI はスライダーで描画する。min/max は必須、
+  // step はマニフェスト省略時にサーバが 1 を埋めて返す。
+  | {
+      type: "slider";
+      key: string;
+      label: string;
+      default: number;
+      min: number;
+      max: number;
+      step: number;
+    }
   // 候補は静的(マニフェストの `options`)でも動的(`options-from` でドライバの
   // retain トピックを指す)でもよいが、サーバは常に解決済みの `{value,label}` の
   // 配列にして返す。**`options: null` は「動的な候補をまだ取得できていない」**

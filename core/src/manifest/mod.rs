@@ -101,6 +101,20 @@ pub enum SettingField {
         label: String,
         default: f64,
     },
+    /// 有界な数値(音量など)。UI では range input で描画される。値の保存形式は
+    /// `number` と同じ f64。`min < max`・`min <= default <= max`・`step > 0` は
+    /// `validate_settings` が検証する。保存値の step 倍数チェックは行わない
+    /// (UI 以外からの保存で丸め誤差の f64 を弾かないため。範囲内なら実害がない)。
+    Slider {
+        key: String,
+        label: String,
+        default: f64,
+        min: f64,
+        max: f64,
+        /// 刻み幅。TOML で省略時は 1.0。
+        #[serde(default = "default_slider_step")]
+        step: f64,
+    },
     /// ドロップダウン。候補は **マニフェストに直接書く(`options`)か、ドライバの
     /// retain トピックから引く(`options-from`)かのどちらか一方**で、両方指定・
     /// 両方省略はいずれも `validate_settings` が弾く。
@@ -158,12 +172,18 @@ pub enum SettingField {
     Map { key: String, label: String },
 }
 
+/// `slider` の `step` 省略時の値(TOML の `step = 1` 相当)。
+fn default_slider_step() -> f64 {
+    1.0
+}
+
 impl SettingField {
     pub fn key(&self) -> &str {
         match self {
             SettingField::Boolean { key, .. } => key,
             SettingField::String { key, .. } => key,
             SettingField::Number { key, .. } => key,
+            SettingField::Slider { key, .. } => key,
             SettingField::Select { key, .. } => key,
             SettingField::Secret { key, .. } => key,
             SettingField::Map { key, .. } => key,
@@ -174,7 +194,7 @@ impl SettingField {
         match self {
             SettingField::Boolean { default, .. } => serde_json::Value::Bool(*default),
             SettingField::String { default, .. } => serde_json::Value::String(default.clone()),
-            SettingField::Number { default, .. } => {
+            SettingField::Number { default, .. } | SettingField::Slider { default, .. } => {
                 serde_json::json!(*default)
             }
             SettingField::Select { default, .. } => serde_json::Value::String(default.clone()),
@@ -518,6 +538,33 @@ pub(crate) fn validate_settings(settings: &[SettingField]) -> Result<(), Manifes
     for setting in settings {
         if !seen.insert(setting.key()) {
             return Err(ManifestError::DuplicateKey);
+        }
+
+        if let SettingField::Slider {
+            key,
+            default,
+            min,
+            max,
+            step,
+            ..
+        } = setting
+        {
+            if min >= max {
+                return Err(ManifestError::BadSetting(format!(
+                    "slider {key} min must be less than max"
+                )));
+            }
+            if default < min || default > max {
+                return Err(ManifestError::BadSetting(format!(
+                    "slider {key} default must be between min and max"
+                )));
+            }
+            if *step <= 0.0 {
+                return Err(ManifestError::BadSetting(format!(
+                    "slider {key} step must be greater than 0"
+                )));
+            }
+            continue;
         }
 
         let SettingField::Select {

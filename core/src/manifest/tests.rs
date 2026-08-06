@@ -1945,6 +1945,111 @@ options = []
 }
 
 #[test]
+fn slider_is_parsed_and_step_defaults_to_one() {
+    let m = manifest_from(
+        r#"
+[[settings]]
+key = "volume"
+label = "音量"
+type = "slider"
+default = 50
+min = 0
+max = 100
+"#,
+    );
+    assert_eq!(
+        m.settings[0],
+        SettingField::Slider {
+            key: "volume".into(),
+            label: "音量".into(),
+            default: 50.0,
+            min: 0.0,
+            max: 100.0,
+            step: 1.0,
+        }
+    );
+    assert_eq!(m.settings[0].default_value(), serde_json::json!(50.0));
+}
+
+#[test]
+fn slider_parses_an_explicit_step() {
+    let m = manifest_from(
+        r#"
+[[settings]]
+key = "volume"
+label = "音量"
+type = "slider"
+default = 50
+min = 0
+max = 100
+step = 5
+"#,
+    );
+    let SettingField::Slider { step, .. } = &m.settings[0] else {
+        panic!("expected a slider, got {:?}", m.settings[0]);
+    };
+    assert_eq!(*step, 5.0);
+}
+
+#[test]
+fn slider_rejects_min_not_less_than_max() {
+    let err = try_manifest_from(
+        r#"
+[[settings]]
+key = "volume"
+label = "音量"
+type = "slider"
+default = 50
+min = 100
+max = 100
+"#,
+    );
+    assert!(
+        matches!(&err, Err(ManifestError::BadSetting(msg)) if msg.contains("min must be less than max")),
+        "expected BadSetting, got {err:?}"
+    );
+}
+
+#[test]
+fn slider_rejects_a_default_outside_the_range() {
+    let err = try_manifest_from(
+        r#"
+[[settings]]
+key = "volume"
+label = "音量"
+type = "slider"
+default = 101
+min = 0
+max = 100
+"#,
+    );
+    assert!(
+        matches!(&err, Err(ManifestError::BadSetting(msg)) if msg.contains("default must be between min and max")),
+        "expected BadSetting, got {err:?}"
+    );
+}
+
+#[test]
+fn slider_rejects_a_non_positive_step() {
+    let err = try_manifest_from(
+        r#"
+[[settings]]
+key = "volume"
+label = "音量"
+type = "slider"
+default = 50
+min = 0
+max = 100
+step = 0
+"#,
+    );
+    assert!(
+        matches!(&err, Err(ManifestError::BadSetting(msg)) if msg.contains("step must be greater than 0")),
+        "expected BadSetting, got {err:?}"
+    );
+}
+
+#[test]
 fn select_rejects_options_from_with_a_bad_driver_id() {
     let err = try_manifest_from(
         r#"
