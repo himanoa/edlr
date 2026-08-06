@@ -468,6 +468,11 @@ fn to_wit_fs_entry(entry: edlr_driver_fs::Entry) -> WitFsEntry {
 }
 
 impl DriverFsHost for DriverCtx {
+    /// `resolve_root` → `effective_fs_target`(file ルートではゲストパスを ""
+    /// に限定し親ディレクトリ+ファイル名へ分解) → `fs_driver` の対応メソッド
+    /// 呼び出し → `FsError` を WIT の variant へ写像する。list/delete は
+    /// file ルートでは inline is_file 判定で拒否。パス検証・原子的書き込み・
+    /// サイズ上限はすべて `edlr_driver_fs::FsDriver` の責務で、ここでは持たない。
     fn read(&mut self, root: String, path: String) -> Result<Vec<u8>, WitFsError> {
         let resolved = self.resolve_root(&root, false)?;
         let (dir, rel) = effective_fs_target(&resolved, &path).map_err(WitFsError::InvalidPath)?;
