@@ -1,4 +1,7 @@
 import { render, screen, waitFor } from "@testing-library/react";
+// 各テストを独立した jotai store で走らせる(async atom のキャッシュが
+// テスト間に漏れないように)。store なし Provider はマウントごとに新規 store を作る。
+import { Provider } from "jotai";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import Dashboard from "./Dashboard";
 import type { DashboardListEntry } from "../types/plugin";
@@ -44,7 +47,7 @@ describe("Dashboard", () => {
       { ...running, widget: "broken", title: "Broken", size: "small", resolved: false },
       { ...running, widget: "stopped", title: "Stopped", state: "disabled" },
     ];
-    render(<Dashboard />);
+    render(<Provider><Dashboard /></Provider>);
     await waitFor(() => expect(screen.getByText("Status")).toBeInTheDocument());
     // 稼働中 + 解決済みの 1 件だけ iframe になる
     expect(document.querySelectorAll("iframe")).toHaveLength(1);
@@ -54,14 +57,14 @@ describe("Dashboard", () => {
 
   it("applies grid column span by size", async () => {
     widgets = [running];
-    render(<Dashboard />);
+    render(<Provider><Dashboard /></Provider>);
     await waitFor(() => expect(screen.getByText("Status")).toBeInTheDocument());
     const card = document.querySelector(".widget-card") as HTMLElement;
     expect(card.style.gridColumn).toBe("span 2");
   });
 
   it("shows guidance when no widgets are granted", async () => {
-    render(<Dashboard />);
+    render(<Provider><Dashboard /></Provider>);
     await waitFor(() =>
       expect(screen.getByText(/承認済みのウィジェットがありません/)).toBeInTheDocument(),
     );
@@ -69,7 +72,7 @@ describe("Dashboard", () => {
 
   it("shows an error when dashboard/list fails", async () => {
     listDashboardImpl = () => Promise.reject(new Error("boom"));
-    render(<Dashboard />);
+    render(<Provider><Dashboard /></Provider>);
     await waitFor(() => expect(screen.getByText(/boom/)).toBeInTheDocument());
   });
 });
