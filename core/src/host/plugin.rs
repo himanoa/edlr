@@ -42,8 +42,8 @@ use bindings::edlr::plugin::host_settings::Host as HostSettingsHost;
 use bindings::{Event as WitEvent, Plugin as PluginBindings};
 
 use super::resolve::{
-    check_bus_permission, check_http_permission, resolve_root, resolve_sidecar, BusDirection,
-    RootResolveError, SidecarResolveError,
+    check_bus_permission, check_http_permission, effective_fs_target, resolve_root,
+    resolve_sidecar, BusDirection, ResolvedRoot, RootResolveError, SidecarResolveError,
 };
 
 /// Public re-exports of the generated `driver-process` WIT types, for the
@@ -761,7 +761,7 @@ impl HostCtx {
     /// `resolve_sidecar` と揃える:「存在するか」→「承認済みか」→
     /// 「設定済みか」→(書き込み系なら)「mode が read-write か」。判定自体は
     /// `resolve::resolve_root` へ委譲し、ここでは variant を写像するだけ。
-    fn resolve_root(&self, root: &str, need_write: bool) -> Result<std::path::PathBuf, WitFsError> {
+    fn resolve_root(&self, root: &str, need_write: bool) -> Result<ResolvedRoot, WitFsError> {
         let raw = self
             .filesystem_json
             .lock()
@@ -769,14 +769,12 @@ impl HostCtx {
             .clone();
         let entries = crate::runtime::fs::parse_filesystem(&raw);
 
-        resolve_root(&entries, root, need_write)
-            .map(|resolved| resolved.path)
-            .map_err(|e| match e {
-                RootResolveError::Unknown(m) => WitFsError::UnknownRoot(m),
-                RootResolveError::NotGranted(m) => WitFsError::PermissionDenied(m),
-                RootResolveError::NotConfigured(m) => WitFsError::NotConfigured(m),
-                RootResolveError::ReadOnly(m) => WitFsError::PermissionDenied(m),
-            })
+        resolve_root(&entries, root, need_write).map_err(|e| match e {
+            RootResolveError::Unknown(m) => WitFsError::UnknownRoot(m),
+            RootResolveError::NotGranted(m) => WitFsError::PermissionDenied(m),
+            RootResolveError::NotConfigured(m) => WitFsError::NotConfigured(m),
+            RootResolveError::ReadOnly(m) => WitFsError::PermissionDenied(m),
+        })
     }
 }
 
@@ -803,10 +801,9 @@ impl DriverFsHost for HostCtx {
     /// WIT の variant へ写像するだけ。パス検証・原子的書き込み・サイズ上限
     /// はすべて `edlr_driver_fs::FsDriver` の責務で、ここでは持たない。
     fn read(&mut self, root: String, path: String) -> Result<Vec<u8>, WitFsError> {
-        let root_path = self.resolve_root(&root, false)?;
-        self.fs_driver
-            .read(&root_path, &path)
-            .map_err(to_wit_fs_error)
+        let resolved = self.resolve_root(&root, false)?;
+        let (dir, rel) = effective_fs_target(&resolved, &path).map_err(WitFsError::InvalidPath)?;
+        self.fs_driver.read(&dir, &rel).map_err(to_wit_fs_error)
     }
 
     fn read_range(
@@ -816,46 +813,60 @@ impl DriverFsHost for HostCtx {
         offset: u64,
         len: u32,
     ) -> Result<Vec<u8>, WitFsError> {
-        let root_path = self.resolve_root(&root, false)?;
+        let resolved = self.resolve_root(&root, false)?;
+        let (dir, rel) = effective_fs_target(&resolved, &path).map_err(WitFsError::InvalidPath)?;
         self.fs_driver
-            .read_range(&root_path, &path, offset, len)
+            .read_range(&dir, &rel, offset, len)
             .map_err(to_wit_fs_error)
     }
 
     fn stat(&mut self, root: String, path: String) -> Result<WitFsEntry, WitFsError> {
-        let root_path = self.resolve_root(&root, false)?;
+        let resolved = self.resolve_root(&root, false)?;
+        let (dir, rel) = effective_fs_target(&resolved, &path).map_err(WitFsError::InvalidPath)?;
         self.fs_driver
-            .stat(&root_path, &path)
+            .stat(&dir, &rel)
             .map(to_wit_fs_entry)
             .map_err(to_wit_fs_error)
     }
 
     fn list(&mut self, root: String, prefix: String) -> Result<Vec<WitFsEntry>, WitFsError> {
-        let root_path = self.resolve_root(&root, false)?;
+        let resolved = self.resolve_root(&root, false)?;
+        if resolved.is_file {
+            return Err(WitFsError::InvalidPath(format!(
+                "root {root} is a single file: list is not supported"
+            )));
+        }
         self.fs_driver
-            .list(&root_path, &prefix)
+            .list(&resolved.path, &prefix)
             .map(|entries| entries.into_iter().map(to_wit_fs_entry).collect())
             .map_err(to_wit_fs_error)
     }
 
     fn write(&mut self, root: String, path: String, bytes: Vec<u8>) -> Result<(), WitFsError> {
-        let root_path = self.resolve_root(&root, true)?;
+        let resolved = self.resolve_root(&root, true)?;
+        let (dir, rel) = effective_fs_target(&resolved, &path).map_err(WitFsError::InvalidPath)?;
         self.fs_driver
-            .write(&root_path, &path, &bytes)
+            .write(&dir, &rel, &bytes)
             .map_err(to_wit_fs_error)
     }
 
     fn append(&mut self, root: String, path: String, bytes: Vec<u8>) -> Result<(), WitFsError> {
-        let root_path = self.resolve_root(&root, true)?;
+        let resolved = self.resolve_root(&root, true)?;
+        let (dir, rel) = effective_fs_target(&resolved, &path).map_err(WitFsError::InvalidPath)?;
         self.fs_driver
-            .append(&root_path, &path, &bytes)
+            .append(&dir, &rel, &bytes)
             .map_err(to_wit_fs_error)
     }
 
     fn delete(&mut self, root: String, path: String) -> Result<(), WitFsError> {
-        let root_path = self.resolve_root(&root, true)?;
+        let resolved = self.resolve_root(&root, true)?;
+        if resolved.is_file {
+            return Err(WitFsError::InvalidPath(format!(
+                "root {root} is a single file: delete is not supported"
+            )));
+        }
         self.fs_driver
-            .delete(&root_path, &path)
+            .delete(&resolved.path, &path)
             .map_err(to_wit_fs_error)
     }
 }
@@ -1354,6 +1365,99 @@ mod tests {
                 .expect_err("escape attempt"),
             WitFsError::InvalidPath(_)
         ));
+    }
+
+    fn fs_file_entry(granted: bool, mode: &str, path: &str) -> crate::runtime::fs::FsRuntimeEntry {
+        crate::runtime::fs::FsRuntimeEntry {
+            name: "status".to_string(),
+            granted,
+            mode: mode.to_string(),
+            path: path.to_string(),
+            target: "file".to_string(),
+        }
+    }
+
+    #[test]
+    fn fs_read_on_file_root_reads_the_configured_file() {
+        use crate::runtime::fs::filesystem_json_string;
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("Status.json");
+        std::fs::write(&file, b"{\"ok\":true}").unwrap();
+        let mut ctx = fs_ctx(&filesystem_json_string(&[fs_file_entry(
+            true,
+            "read",
+            file.to_str().unwrap(),
+        )]));
+        let bytes = ctx.read("status".to_string(), "".to_string()).unwrap();
+        assert_eq!(bytes, b"{\"ok\":true}");
+    }
+
+    #[test]
+    fn fs_read_on_file_root_rejects_nonempty_path() {
+        use crate::runtime::fs::filesystem_json_string;
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("Status.json");
+        std::fs::write(&file, b"x").unwrap();
+        let mut ctx = fs_ctx(&filesystem_json_string(&[fs_file_entry(
+            true,
+            "read",
+            file.to_str().unwrap(),
+        )]));
+        let err = ctx
+            .read("status".to_string(), "Status.json".to_string())
+            .expect_err("non-empty path must be rejected");
+        assert!(matches!(err, WitFsError::InvalidPath(_)));
+    }
+
+    #[test]
+    fn fs_list_on_file_root_is_invalid_path() {
+        use crate::runtime::fs::filesystem_json_string;
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("Status.json");
+        std::fs::write(&file, b"x").unwrap();
+        let mut ctx = fs_ctx(&filesystem_json_string(&[fs_file_entry(
+            true,
+            "read",
+            file.to_str().unwrap(),
+        )]));
+        let err = ctx
+            .list("status".to_string(), "".to_string())
+            .expect_err("list on file root");
+        assert!(matches!(err, WitFsError::InvalidPath(_)));
+    }
+
+    #[test]
+    fn fs_delete_on_file_root_is_invalid_path() {
+        use crate::runtime::fs::filesystem_json_string;
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("Status.json");
+        std::fs::write(&file, b"x").unwrap();
+        let mut ctx = fs_ctx(&filesystem_json_string(&[fs_file_entry(
+            true,
+            "read-write",
+            file.to_str().unwrap(),
+        )]));
+        let err = ctx
+            .delete("status".to_string(), "".to_string())
+            .expect_err("delete on file root");
+        assert!(matches!(err, WitFsError::InvalidPath(_)));
+        assert!(file.exists());
+    }
+
+    #[test]
+    fn fs_write_on_file_root_overwrites_the_configured_file() {
+        use crate::runtime::fs::filesystem_json_string;
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("out.csv");
+        std::fs::write(&file, b"old").unwrap();
+        let mut ctx = fs_ctx(&filesystem_json_string(&[fs_file_entry(
+            true,
+            "read-write",
+            file.to_str().unwrap(),
+        )]));
+        ctx.write("status".to_string(), "".to_string(), b"new".to_vec())
+            .unwrap();
+        assert_eq!(std::fs::read(&file).unwrap(), b"new");
     }
 
     fn runtime_entry(granted: bool, command: &str) -> crate::runtime::sidecar::SidecarRuntimeEntry {
