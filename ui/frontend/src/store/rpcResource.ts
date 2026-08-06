@@ -6,6 +6,7 @@ import { atom } from "jotai";
  *
  * - read: local が空なら fetch の Promise を返す(コンポーネント側はサスペンド)
  * - write: `(prev) => next` を受けて local に確定値を積む。以後の read は同期値
+ * - write に値を直接渡すと fetch を経由せず local に積む(テストの seed 用)
  * - fetch 用クライアントは取得のたびに作って使い終わったら close する
  */
 export const createRpcResource$ = <T, C extends { close(): void }>(
@@ -25,9 +26,13 @@ export const createRpcResource$ = <T, C extends { close(): void }>(
 
   return atom(
     (get) => get(local$) ?? get(fetch$),
-    async (get, set, update: (prev: T) => T) => {
+    async (get, set, update: T | ((prev: T) => T)) => {
+      if (typeof update !== "function") {
+        set(local$, update);
+        return;
+      }
       const prev = get(local$) ?? (await get(fetch$));
-      set(local$, update(prev));
+      set(local$, (update as (prev: T) => T)(prev));
     },
   );
 };

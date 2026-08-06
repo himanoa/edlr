@@ -39,6 +39,17 @@ describe("createRpcResource$", () => {
     expect(client.fetch).toHaveBeenCalledTimes(1);
   });
 
+  it("値を直接書き込むと fetch を経由せず seed できる", async () => {
+    const client = makeFake(() => Promise.reject(new Error("fetch されてはいけない")));
+    const resource$ = createRpcResource$((c: typeof client) => c.fetch(), () => client);
+    const store = createStore();
+
+    await store.set(resource$, { value: 42 });
+
+    expect(await store.get(resource$)).toEqual({ value: 42 });
+    expect(client.fetch).not.toHaveBeenCalled();
+  });
+
   it("書き込みは前回の書き込み結果に積み重なる", async () => {
     const client = makeFake(() => Promise.resolve({ value: 1 }));
     const resource$ = createRpcResource$((c: typeof client) => c.fetch(), () => client);
