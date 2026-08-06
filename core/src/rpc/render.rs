@@ -420,6 +420,7 @@ mod tests {
                 name: "data".to_string(),
                 reason: "read config files".to_string(),
                 mode: FilesystemMode::ReadWrite,
+                target: Default::default(),
             },
             config: FilesystemConfig {
                 path: "/home/user/data".to_string(),

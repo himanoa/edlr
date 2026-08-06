@@ -887,6 +887,7 @@ mod tests {
                 name: "exports".into(),
                 reason: "reason".into(),
                 mode,
+                target: Default::default(),
             }],
             bus: vec![],
             dashboard: vec![],

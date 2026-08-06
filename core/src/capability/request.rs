@@ -49,6 +49,26 @@ impl FilesystemMode {
     }
 }
 
+/// `[[filesystem]]` の `target`(承認対象がディレクトリか単一ファイルか)。
+/// 省略時は directory(既存 manifest の互換のため)。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum FilesystemTarget {
+    #[default]
+    Directory,
+    File,
+}
+
+impl FilesystemTarget {
+    /// フィンガープリント・RPC 応答で使う安定した文字列表現。
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            FilesystemTarget::Directory => "directory",
+            FilesystemTarget::File => "file",
+        }
+    }
+}
+
 /// プラグインが要求するファイルアクセス 1 件。
 ///
 /// **ディレクトリの実パスはここに書けない** -- 必ずユーザーが UI で選ぶ。
@@ -60,6 +80,8 @@ pub struct FilesystemRequest {
     pub name: String,
     pub reason: String,
     pub mode: FilesystemMode,
+    #[serde(default)]
+    pub target: FilesystemTarget,
 }
 
 /// プラグインが要求するバス接続 1 件。

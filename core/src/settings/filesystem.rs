@@ -343,6 +343,7 @@ mod tests {
             name: name.into(),
             reason: "reason".into(),
             mode: FilesystemMode::ReadWrite,
+            target: Default::default(),
         }
     }
 

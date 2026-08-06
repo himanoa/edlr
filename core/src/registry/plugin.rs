@@ -882,6 +882,7 @@ pub(crate) mod tests {
                 name: "exports".into(),
                 reason: "reason".into(),
                 mode: crate::capability::request::FilesystemMode::ReadWrite,
+                target: Default::default(),
             }],
             bus: vec![],
             dashboard: vec![],

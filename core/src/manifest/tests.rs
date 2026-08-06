@@ -1248,6 +1248,38 @@ fn filesystem_fingerprint_is_stable_and_changes_with_the_request() {
     assert_ne!(first, changed.filesystem_fingerprint("exports").unwrap());
 }
 
+#[test]
+fn filesystem_target_defaults_to_directory() {
+    let manifest = parse_fs_manifest(
+        "[[filesystem]]\nname = \"exports\"\nreason = \"r\"\nmode = \"read\"\n",
+    )
+    .expect("target is optional");
+    assert_eq!(
+        manifest.filesystem[0].target,
+        crate::capability::request::FilesystemTarget::Directory
+    );
+}
+
+#[test]
+fn filesystem_target_file_parses() {
+    let manifest = parse_fs_manifest(
+        "[[filesystem]]\nname = \"status\"\nreason = \"r\"\nmode = \"read\"\ntarget = \"file\"\n",
+    )
+    .expect("file target parses");
+    assert_eq!(
+        manifest.filesystem[0].target,
+        crate::capability::request::FilesystemTarget::File
+    );
+}
+
+#[test]
+fn filesystem_target_rejects_unknown_value() {
+    parse_fs_manifest(
+        "[[filesystem]]\nname = \"a\"\nreason = \"r\"\nmode = \"read\"\ntarget = \"folder\"\n",
+    )
+    .expect_err("unknown target must be rejected");
+}
+
 fn manifest_with_bus(bus: Vec<BusRequest>) -> Manifest {
     Manifest {
         id: "translator".into(),

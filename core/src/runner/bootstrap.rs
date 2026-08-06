@@ -156,6 +156,7 @@ mod tests {
                 name: "workdir".to_string(),
                 reason: "reason".into(),
                 mode: FilesystemMode::Read,
+                target: Default::default(),
             }],
             bus: vec![],
             dashboard: vec![],

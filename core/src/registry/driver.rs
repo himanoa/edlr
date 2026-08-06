@@ -1060,6 +1060,7 @@ pub(crate) mod tests {
                 name: "cache".into(),
                 reason: "reason".into(),
                 mode: crate::capability::request::FilesystemMode::ReadWrite,
+                target: Default::default(),
             }],
         }
     }
