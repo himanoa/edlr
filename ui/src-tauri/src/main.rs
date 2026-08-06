@@ -299,6 +299,18 @@ async fn pick_directory(app: tauri::AppHandle) -> Option<String> {
     rx.await.ok().flatten().map(|path| path.to_string())
 }
 
+/// ネイティブのファイル選択ダイアログを開く(プラグインのファイル
+/// アクセス設定で target = "file" のルート用)。キャンセル時は None。
+#[tauri::command]
+async fn pick_file(app: tauri::AppHandle) -> Option<String> {
+    use tauri_plugin_dialog::DialogExt;
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    app.dialog().file().pick_file(move |picked| {
+        let _ = tx.send(picked);
+    });
+    rx.await.ok().flatten().map(|path| path.to_string())
+}
+
 fn main() {
     // ウィンドウを出してフロントエンドを表示する薄い皮 + デーモンの道連れ起動。
     // 既に起動済みのデーモンには spawn も kill もしない。
@@ -355,7 +367,8 @@ fn main() {
             clear_journal_dir,
             pick_journal_dir,
             pick_executable,
-            pick_directory
+            pick_directory,
+            pick_file
         ])
         .build(tauri::generate_context!())
     {

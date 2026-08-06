@@ -89,4 +89,48 @@ describe("FilesystemSection", () => {
     await userEvent.click(screen.getByRole("button", { name: "保存" }));
     expect(await screen.findByText(/protected directory/)).toBeInTheDocument();
   });
+
+  it("file target のルートはファイルとして表示される", () => {
+    render(
+      <FilesystemSection
+        roots={[
+          {
+            name: "status",
+            reason: "Status.json を監視する",
+            mode: "read",
+            target: "file",
+            granted: false,
+            staleGrant: false,
+            config: { path: "" },
+          },
+        ]}
+        onConfigChange={noop}
+        onGrantChange={noop}
+      />,
+    );
+    expect(screen.getByLabelText("ファイル")).toBeInTheDocument();
+    expect(
+      screen.getByLabelText("このファイルへのアクセスを承認する"),
+    ).toBeInTheDocument();
+  });
+
+  it("target が無い(旧デーモン)ルートはフォルダとして表示される", () => {
+    render(
+      <FilesystemSection
+        roots={[
+          {
+            name: "exports",
+            reason: "r",
+            mode: "read",
+            granted: false,
+            staleGrant: false,
+            config: { path: "" },
+          },
+        ]}
+        onConfigChange={noop}
+        onGrantChange={noop}
+      />,
+    );
+    expect(screen.getByLabelText("フォルダ")).toBeInTheDocument();
+  });
 });

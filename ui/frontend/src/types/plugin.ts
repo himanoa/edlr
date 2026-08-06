@@ -92,6 +92,8 @@ export interface FilesystemRoot {
   name: string;
   reason: string;
   mode: "read" | "read-write";
+  /** 欠落(旧デーモン)時は directory 扱い */
+  target?: "directory" | "file";
   granted: boolean;
   staleGrant: boolean;
   config: FilesystemConfig;

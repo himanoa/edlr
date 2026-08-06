@@ -20,6 +20,7 @@ function FilesystemRootCard({
   const [saving, setSaving] = useState(false);
   const [grantSaving, setGrantSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const isFile = root.target === "file";
 
   // `SidecarSection` と同じ理由: サーバの `root.config` が(別クライアント
   // 経由などで)変わったらフォーム state を追随させ、ユーザーの未保存入力を
@@ -32,7 +33,7 @@ function FilesystemRootCard({
   const handlePick = async () => {
     setError(null);
     try {
-      const picked = await invoke<string | null>("pick_directory");
+      const picked = await invoke<string | null>(isFile ? "pick_file" : "pick_directory");
       if (picked === null) return;
       setPath(picked);
     } catch (err) {
@@ -73,9 +74,9 @@ function FilesystemRootCard({
       </Badge>
 
       <label className="flex items-center justify-between gap-4 py-1.5">
-        <span>フォルダ</span>
+        <span>{isFile ? "ファイル" : "フォルダ"}</span>
         <input
-          aria-label="フォルダ"
+          aria-label={isFile ? "ファイル" : "フォルダ"}
           type="text"
           className="w-72 rounded border border-border bg-background px-3 py-1.5 text-foreground disabled:opacity-50"
           value={path}
@@ -94,14 +95,14 @@ function FilesystemRootCard({
       </Button>
 
       <label className="mt-2 flex items-center justify-between gap-4 py-1.5">
-        <span>このフォルダへのアクセスを承認する</span>
+        <span>{isFile ? "このファイルへのアクセスを承認する" : "このフォルダへのアクセスを承認する"}</span>
         {/*
           `SidecarSection` と同じ規律: `checked` はサーバから返った
           `root.granted` のみで駆動する(楽観的更新をしない)。RPC が返らない
           まま「承認済み」に見えるのを防ぐため。
         */}
         <Checkbox
-          aria-label="このフォルダへのアクセスを承認する"
+          aria-label={isFile ? "このファイルへのアクセスを承認する" : "このフォルダへのアクセスを承認する"}
           checked={root.granted}
           // `checked` と同じ理由で、`disabled` もローカルの未保存入力
           // (`path` state)ではなくサーバが確認済みの `root.config.path` で
@@ -117,7 +118,15 @@ function FilesystemRootCard({
         )}
       </label>
 
-      {root.mode === "read-write" ? (
+      {isFile ? (
+        root.mode === "read-write" ? (
+          <p className={WARNING}>
+            承認すると、このプラグインは選んだファイルを読み取り・上書きできます
+          </p>
+        ) : (
+          <p className={WARNING}>承認すると、このプラグインは選んだファイルを読み取れます</p>
+        )
+      ) : root.mode === "read-write" ? (
         <p className={WARNING}>
           承認すると、このプラグインは選んだフォルダ内のファイルを読み取り・作成・上書き・削除できます
         </p>
