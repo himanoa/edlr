@@ -237,6 +237,7 @@ impl<G: GrantStorage, E: FilesystemEntry> FilesystemService<G, E> {
                 granted: info.grant.granted,
                 mode: info.request.mode.as_str().to_string(),
                 path: info.config.path.clone(),
+                target: info.request.target.as_str().to_string(),
             })
             .collect();
         *filesystem_json

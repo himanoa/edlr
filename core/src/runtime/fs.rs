@@ -18,6 +18,9 @@ pub struct FsRuntimeEntry {
     pub mode: String,
     #[serde(default)]
     pub path: String,
+    /// "directory" / "file"。旧バッファには無いので空文字も directory 扱い。
+    #[serde(default)]
+    pub target: String,
 }
 
 /// エントリ一覧を `filesystem_json` バッファ用の JSON 文字列へ直列化する。
@@ -36,6 +39,7 @@ pub fn filesystem_json_string(entries: &[FsRuntimeEntry]) -> String {
                     granted: false,
                     mode: entry.mode.clone(),
                     path: String::new(),
+                    target: entry.target.clone(),
                 }
             }
         })
@@ -63,6 +67,7 @@ mod tests {
             granted,
             mode: "read-write".into(),
             path: "/home/u/exports".into(),
+            target: "directory".into(),
         }
     }
 
@@ -86,5 +91,26 @@ mod tests {
     #[test]
     fn broken_json_parses_as_no_roots() {
         assert!(parse_filesystem("not json {{{").is_empty());
+    }
+
+    #[test]
+    fn missing_target_in_old_buffers_defaults_to_empty() {
+        // target フィールド導入前に直列化されたバッファ。空文字は
+        // 「file ではない」= directory として扱われる(resolve 側の規則)。
+        let parsed = parse_filesystem(
+            r#"[{"name":"exports","granted":true,"mode":"read","path":"/tmp/e"}]"#,
+        );
+        assert_eq!(parsed.get("exports").unwrap().target, "");
+    }
+
+    #[test]
+    fn target_round_trips_and_survives_redaction() {
+        let mut e = entry(false);
+        e.target = "file".to_string();
+        let parsed = parse_filesystem(&filesystem_json_string(&[e]));
+        // 未承認で path は落ちるが、target は mode と同じく承認画面に出る
+        // 情報なので残る。
+        assert_eq!(parsed.get("exports").unwrap().target, "file");
+        assert_eq!(parsed.get("exports").unwrap().path, "");
     }
 }

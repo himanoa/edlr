@@ -111,6 +111,7 @@ pub(crate) fn build_initial_buffers<S: RegistrySubject>(
                 granted,
                 mode: request.mode.as_str().to_string(),
                 path,
+                target: request.target.as_str().to_string(),
             }
         })
         .collect();

@@ -1254,6 +1254,7 @@ mod tests {
             granted,
             mode: mode.to_string(),
             path: path.to_string(),
+            target: "directory".to_string(),
         }
     }
 
