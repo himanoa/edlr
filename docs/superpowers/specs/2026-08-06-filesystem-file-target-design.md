@@ -30,8 +30,10 @@ target = "file"   # 省略時 "directory"
 
 ### fingerprint / grants
 
-- `target` を fingerprint に含める。`directory` → `file` に変えた manifest
-  は既存の staleGrant 機構で自動的に再承認要求になる
+- `target` を fingerprint に含める(**file のときだけ**畳み込む — directory
+  で無条件に足すと、導入前に承認された既存 grants が全部失効してしまう)。
+  `directory` → `file` に変えた manifest は既存の staleGrant 機構で自動的に
+  再承認要求になる
 - grants ストアの形式は変更なし(path にファイルパスが入るだけ)
 
 ### runtime / host
@@ -43,11 +45,12 @@ target = "file"   # 省略時 "directory"
   - `read` / `read_range` / `stat`: `path == ""` のみ許可、非空は
     `invalid-path`
   - `list`: `invalid-path`
-  - `write`: mode が read-write かつ `path == ""` のみ許可(対象ファイル
-    への原子的上書き)。delete / mkdir 相当は拒否
+  - `write` / `append`: mode が read-write かつ `path == ""` のみ許可
+    (対象ファイルへの原子的上書き/追記)。`delete` は拒否
 - WIT は無変更。プラグインは `fs::read("status", "")` で読む
-- `edlr_driver_fs` にはファイルパスを直接渡す小さな分岐を足す
-  (root ディレクトリ + 相対パスの join を通らない)
+- `edlr_driver_fs` は**無変更**: host 側で承認済みファイルパスを
+  「親ディレクトリ + ファイル名」に分解して既存の `FsDriver` API に渡す
+  (パス検証・サイズ上限・原子的書き込みをそのまま流用)
 
 ## UI
 
