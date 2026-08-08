@@ -2,9 +2,10 @@ import { useAtomValue, useSetAtom } from "jotai";
 import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
 import { grantsPending } from "@/lib/grants";
+import { useOptionsPolling } from "@/lib/useOptionsPolling";
 import { driverList$ } from "@/store/driverList";
 import { rpcClient$ } from "@/store/rpcClient";
-import type { DriverInfo } from "../types/plugin";
+import type { DriverInfo, DriversList } from "../types/plugin";
 import { DriverPermissionWizard } from "./DriverPermissionWizard";
 import PluginForm from "./PluginForm";
 import { StateBadge } from "./StateBadge";
@@ -14,6 +15,11 @@ export function DriverDetail({ driver }: { driver: DriverInfo }) {
   // 権限系は DriverPermissionWizard のモーダルに任せる。
   const client = useAtomValue(rpcClient$);
   const setDriverList = useSetAtom(driverList$);
+
+  useOptionsPolling(driver.settings, async () => {
+    if (!client) return;
+    setDriverList(await client.call<DriversList>("drivers/list"));
+  });
 
   const handleChange = async (key: string, value: unknown) => {
     if (!client) throw new Error("RPC に接続されていません");

@@ -2,9 +2,10 @@ import { useAtomValue, useSetAtom } from "jotai";
 import { Separator } from "@/components/ui/separator";
 import { Skeleton } from "@/components/ui/skeleton";
 import { grantsPending } from "@/lib/grants";
+import { useOptionsPolling } from "@/lib/useOptionsPolling";
 import { pluginList$ } from "@/store/pluginList";
 import { rpcClient$ } from "@/store/rpcClient";
-import type { PluginInfo } from "../types/plugin";
+import type { PluginInfo, PluginsList } from "../types/plugin";
 import { DroppedSection } from "./DroppedSection";
 import { PermissionWizard } from "./PermissionWizard";
 import PluginForm from "./PluginForm";
@@ -28,6 +29,11 @@ export function PluginDetail({ plugin }: { plugin: PluginInfo }) {
   // PermissionWizard のモーダルに任せる。
   const client = useAtomValue(rpcClient$);
   const setPluginList = useSetAtom(pluginList$);
+
+  useOptionsPolling(plugin.settings, async () => {
+    if (!client) return;
+    setPluginList(await client.call<PluginsList>("plugins/list"));
+  });
 
   const handleChange = async (key: string, value: unknown) => {
     if (!client) throw new Error("RPC に接続されていません");
