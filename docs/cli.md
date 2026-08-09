@@ -18,7 +18,12 @@
 | `--drivers-dir` | `$XDG_CONFIG_HOME/edlr/drivers`(未設定なら `~/.config/edlr/drivers`) | ドライバディレクトリ |
 | `--settings-dir` | `$XDG_CONFIG_HOME/edlr/settings`(未設定なら `~/.config/edlr/settings`) | プラグイン設定の保存先 |
 | `--grants-dir` | `$XDG_CONFIG_HOME/edlr/grants`(未設定なら `~/.config/edlr/grants`) | capability 承認の保存先 |
-| `--state-dir` | `$XDG_STATE_HOME/edlr`(未設定なら `~/.local/state/edlr`) | Journal 読み取り位置の保存先(下記参照) |
+| `--state-dir` | `$XDG_STATE_HOME/edlr`(未設定なら `~/.local/state/edlr`) | Journal 読み取り位置とログファイルの保存先(下記参照) |
+
+ログは stderr に加えて `<state-dir>/edlr.<日付>.log` にも書かれる(日次
+ローテーション・直近 7 ファイル保持)。Tauri UI 経由で起動した場合 stderr は
+端末任せで残らないため、事後調査はこのファイルを見る。閾値は stderr と共通で、
+既定 info、`RUST_LOG` で上書きできる。
 
 `--plugins-dir` / `--drivers-dir` / `--settings-dir` / `--grants-dir` は、
 指すディレクトリが存在しなくてもエラーにはならない(それぞれプラグイン 0 件・
@@ -73,3 +78,11 @@
 - 外部サービスへのアップロード・集計系のプラグインは、位置の永続化により
   再起動をまたいだ重複配信が起きなくなったので、`replay` のイベントも
   安全に処理してよい(取りこぼしを避けたいなら処理すべき)
+
+**裏返しの契約: 一度配信したイベントは再配信されない。** デーモンを
+再起動しても、位置の永続化により現行セッションの既読部分(`LoadGame` を含む)は
+読み直されない。そのため、Journal から学習したセッション状態(コマンダー名・
+gameversion など)や未送信の作業キューを wasm のメモリ上にだけ持っていると、
+再起動で消えたまま埋め直されない。**イベントをまたいで意味を持つ状態は、
+プラグイン自身が `driver-fs` などで永続化して起動時に読み戻すこと**
+(実例: `examples/plugins/inara-uploader` と ship-build の `state.json`)。
