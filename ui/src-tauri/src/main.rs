@@ -136,6 +136,37 @@ fn restart_daemon(
     Ok(())
 }
 
+/// External と判定した相手が実はシャットダウン中だった場合の引き継ぎ番
+/// (経緯は `main` の呼び出し箇所のコメント参照)。`STOP_GRACE` + 余裕の
+/// あいだ 500ms ごとにポートを確認し、空いたら `restart_daemon` で spawn
+/// して監視を終える。窓いっぱいまで生きていれば本物の外部デーモンとみなして
+/// 何もせず終わる。
+///
+/// ponytail: 引き継いでも `owns_daemon` は変えない(起動時に一度だけ決まる
+/// 設計のまま)。UI の daemonManaged 表示が「外部」のままになるだけで、
+/// 終了時の後始末はスロットの中身を見るので正しく止まる。
+fn spawn_external_takeover_watch(
+    slot: Arc<Mutex<Option<std::process::Child>>>,
+    journal_dir: Option<PathBuf>,
+) {
+    std::thread::spawn(move || {
+        let deadline =
+            std::time::Instant::now() + daemon::STOP_GRACE + std::time::Duration::from_secs(5);
+        while std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            if daemon::daemon_running(daemon::DAEMON_ADDR) {
+                continue;
+            }
+            eprintln!("the external edlr daemon went away during the takeover window");
+            match restart_daemon(&slot, journal_dir.as_deref()) {
+                Ok(()) => eprintln!("spawned a replacement edlr daemon"),
+                Err(e) => eprintln!("failed to take over the daemon: {e}"),
+            }
+            return;
+        }
+    });
+}
+
 fn snapshot(state: &AppState) -> config::ConfigDto {
     let config = state.config.lock().unwrap_or_else(|p| p.into_inner());
     let error = state.config_error.lock().unwrap_or_else(|p| p.into_inner());
@@ -340,13 +371,24 @@ fn main() {
     let env_journal_dir = std::env::var_os("EDLR_JOURNAL_DIR").map(PathBuf::from);
     let resolved_journal_dir =
         config::resolve_journal_dir(env_journal_dir.clone(), loaded.config.journal_dir.clone());
-    let (child, startup) = autostart_daemon(resolved_journal_dir);
+    let (child, startup) = autostart_daemon(resolved_journal_dir.clone());
     signals::set_daemon_pid(child.as_ref().map(|c| c.id()));
     let owns_daemon = startup.owns_daemon();
     let daemon_error = startup.error();
 
     // state は manage へムーブされるため、停止用にこのハンドルを手元へ残す。
     let daemon = Arc::new(Mutex::new(child));
+
+    // External 判定は「TCP 接続できた」でしかなく、閉じた直後の UI が停止
+    // 処理中の(=もうすぐ消える)デーモンも同じに見える。判定を信じて
+    // 終わりにすると、旧デーモンが完全に終了した後は誰も spawn せず、UI は
+    // connection refused のまま座礁する(UI を閉じてすぐ開き直すと再現)。
+    // そこで旧デーモンの後始末の最悪時間のあいだだけポートを見張り、空いたら
+    // 自分で spawn して引き継ぐ。窓を過ぎたら手を引く(本物の外部デーモンを
+    // 後から勝手に置き換えない)。
+    if startup == config::DaemonStartup::External {
+        spawn_external_takeover_watch(Arc::clone(&daemon), resolved_journal_dir);
+    }
 
     let state = AppState {
         daemon: Arc::clone(&daemon),
