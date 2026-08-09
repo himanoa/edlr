@@ -166,6 +166,24 @@ export class RpcClient {
     });
   }
 
+  /**
+   * ウィジェット発のアクションをプラグインの
+   * `on-message(driver="dashboard")` へ届ける(`plugins/dashboard-action`)。
+   * plugin/widget は iframe を作った側(WidgetFrame)の値を使う —
+   * iframe の自己申告は信用しない。
+   */
+  dashboardAction(
+    pluginId: string,
+    widget: string,
+    name: string,
+  ): Promise<{ delivered: boolean }> {
+    return this.call<{ delivered: boolean }>("plugins/dashboard-action", {
+      plugin: pluginId,
+      widget,
+      name,
+    });
+  }
+
   /** grant 済みダッシュボードウィジェットの一覧(`dashboard/list`)。 */
   listDashboard(): Promise<{ widgets: DashboardListEntry[] }> {
     return this.call<{ widgets: DashboardListEntry[] }>("dashboard/list");
