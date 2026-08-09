@@ -254,6 +254,14 @@ fn load_and_run_plugin(
         reason: "plugin thread exited before reporting an init result".to_string(),
     });
     let running = matches!(state, PluginState::Running);
+    if let PluginState::Disabled { reason } = &state {
+        // 起動時の失敗(load/init の trap 等)はここが唯一のログ地点。
+        // Plugins 画面の reason だけだと、画面を開かない限り気付けない。
+        tracing::error!(
+            plugin_id = %manifest.id,
+            "plugin disabled at startup: {reason}"
+        );
+    }
 
     registry.push(PluginEntry {
         manifest: manifest.clone(),

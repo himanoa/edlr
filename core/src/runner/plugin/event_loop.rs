@@ -182,7 +182,11 @@ pub(super) fn run_plugin_thread(
     macro_rules! disable_and_break {
         ($reason:expr) => {{
             let reason = $reason;
-            tracing::warn!(
+            // 恒久 Disabled(trap = クラッシュ、または期限超過の諦め)は
+            // error。以後このプラグインの仕事は全部止まるので、warn だと
+            // ログ画面で埋もれて気付けない。一時的な遅さからの再起動
+            // (handle_call_result! の restart 分岐)は従来どおり warn。
+            tracing::error!(
                 plugin_id = %manifest.id,
                 "disabling plugin: {reason}"
             );

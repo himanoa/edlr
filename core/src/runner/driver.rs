@@ -335,7 +335,13 @@ fn load_and_run_driver(
         reason: "driver thread exited before reporting an init result".to_string(),
     });
 
-    if matches!(state, DriverState::Disabled { .. }) {
+    if let DriverState::Disabled { reason } = &state {
+        // 起動時の失敗(load/init の trap 等)はここが唯一のログ地点
+        // (plugin 側 start.rs と同じ理由)。
+        tracing::error!(
+            driver_id = %manifest.id,
+            "driver disabled at startup: {reason}"
+        );
         // load/init に失敗したドライバのスレッドはもう `messages_rx` を読ま
         // ない。登録済みの bus スロットを `available: true` のまま放置すると、
         // `get` はいつまでも古い/存在しない値を返し続け、プラグイン側が
@@ -455,7 +461,8 @@ fn run_driver_thread(
             DriverWork::Disconnected => break,
         };
         if let Err(e) = result {
-            tracing::warn!(
+            // 恒久 Disabled は error(plugin 側 disable_and_break! と同じ理由)。
+            tracing::error!(
                 driver_id = %manifest.id,
                 "{call} call failed, disabling driver: {e}"
             );
