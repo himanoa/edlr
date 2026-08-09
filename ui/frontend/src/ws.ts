@@ -88,6 +88,15 @@ export function defaultWsUrl(loc: LocationLike = window.location): string {
   return DAEMON_DEFAULT_WS_URL;
 }
 
+/**
+ * デーモン HTTP の絶対 URL。`defaultWsUrl` と同じ判定で origin を決めるため、
+ * Tauri シェル(origin が tauri://)でも相対パスのままにならない。
+ */
+export function daemonHttpUrl(path: string, loc: LocationLike = window.location): string {
+  const origin = defaultWsUrl(loc).replace(/^ws/, "http").replace(/\/ws$/, "");
+  return origin + path;
+}
+
 export function useEventStream(url: string): {
   entries: LogEntry[];
   connection: ConnectionState;

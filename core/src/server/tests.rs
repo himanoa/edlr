@@ -434,6 +434,7 @@ async fn plugin_ui_serves_granted_assets_with_csp_and_404s_everything_else() {
     let get = |uri: &str| {
         axum::http::Request::builder()
             .uri(uri)
+            .header("host", "127.0.0.1:8137")
             .body(axum::body::Body::empty())
             .unwrap()
     };
@@ -464,6 +465,9 @@ async fn plugin_ui_serves_granted_assets_with_csp_and_404s_everything_else() {
         .to_str()
         .unwrap();
     assert!(csp.contains("default-src 'none'"));
+    // opaque origin(sandbox iframe)では 'self' が WebKit で無効なため、
+    // Host から組んだ明示オリジンであること
+    assert!(csp.contains("script-src http://127.0.0.1:8137 'unsafe-inline'"));
     assert!(res
         .headers()
         .get("content-type")

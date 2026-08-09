@@ -49,7 +49,9 @@ describe("WidgetFrame", () => {
     const { container } = render(<WidgetFrame entry={entry} entries={[]} />);
     const iframe = container.querySelector("iframe")!;
     expect(iframe.getAttribute("sandbox")).toBe("allow-scripts");
-    expect(iframe.getAttribute("src")).toBe(entry.url);
+    // 相対パスのままだと Tauri シェルでは tauri:// origin に解決されて 404 に
+    // なるため、デーモンの origin へ絶対化されていること。
+    expect(iframe.getAttribute("src")).toBe(`http://localhost:3000${entry.url}`);
   });
 
   it("sends init and only matching events after ready", () => {

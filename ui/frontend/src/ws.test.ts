@@ -1,4 +1,4 @@
-import { defaultWsUrl, parseWsMessage } from "./ws";
+import { daemonHttpUrl, defaultWsUrl, parseWsMessage } from "./ws";
 
 test("parses hello", () => {
   expect(parseWsMessage('{"type":"hello","protocol":1}')).toEqual({
@@ -73,4 +73,24 @@ test("defaultWsUrl falls back to the daemon default for a non-http protocol (tau
   expect(defaultWsUrl({ protocol: "tauri:", host: "", hostname: "" })).toBe(
     "ws://127.0.0.1:8137/ws",
   );
+});
+
+test("daemonHttpUrl absolutizes against the page origin on a plain http(s) page", () => {
+  expect(
+    daemonHttpUrl("/plugin-ui/p/w/index.html", {
+      protocol: "http:",
+      host: "localhost:5173",
+      hostname: "localhost",
+    }),
+  ).toBe("http://localhost:5173/plugin-ui/p/w/index.html");
+});
+
+test("daemonHttpUrl points at the daemon default under Tauri", () => {
+  expect(
+    daemonHttpUrl("/plugin-ui/p/w/index.html", {
+      protocol: "http:",
+      host: "tauri.localhost",
+      hostname: "tauri.localhost",
+    }),
+  ).toBe("http://127.0.0.1:8137/plugin-ui/p/w/index.html");
 });

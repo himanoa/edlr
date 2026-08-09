@@ -211,12 +211,19 @@ mod rpc_plugins;
 const PLUGIN_UI_SDK: &str = include_str!("../plugin_ui_sdk.js");
 
 /// ウィジェットアセットに付ける CSP。外部ネットワークへのサブリソース
-/// 読み込み・fetch を遮断し、自ウィジェットのアセット(相対パス = この
-/// デーモンのオリジン)のみ許可する。iframe 側は opaque origin
-/// (sandbox="allow-scripts")だが、CSP の 'self' はドキュメント URL の
-/// オリジンを指すため、相対パスのサブリソースは通る。
-const WIDGET_CSP: &str = "default-src 'none'; script-src 'self' 'unsafe-inline'; \
-     style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'none'";
+/// 読み込み・fetch を遮断し、このデーモンのオリジンのみ許可する。
+///
+/// `'self'` は使えない: iframe は opaque origin(sandbox="allow-scripts")で
+/// 動き、WebKit(= Tauri シェル)は `'self'` を opaque origin と照合して
+/// サブリソースを全ブロックする(Chrome はドキュメント URL 基準で通すため
+/// ブラウザでは気づけない)。要求の Host からオリジンを明示する。
+fn widget_csp(host: Option<&str>) -> String {
+    let origin = host.map(|h| format!("http://{h}")).unwrap_or_else(|| "'self'".into());
+    format!(
+        "default-src 'none'; script-src {origin} 'unsafe-inline'; \
+         style-src {origin} 'unsafe-inline'; img-src {origin} data:; connect-src 'none'"
+    )
+}
 
 /// 拡張子ベースの Content-Type。ウィジェットアセットは信頼済みインストール
 /// 物なので sniffing 対策よりも単純さを優先し、未知の拡張子は
@@ -246,9 +253,11 @@ fn content_type_for(path: &std::path::Path) -> &'static str {
 async fn plugin_ui_handler(
     axum::extract::State(state): axum::extract::State<ServerState>,
     axum::extract::Path((plugin, widget, path)): axum::extract::Path<(String, String, String)>,
+    headers: axum::http::HeaderMap,
 ) -> axum::response::Response {
     use axum::http::{header, StatusCode};
     use axum::response::IntoResponse;
+    let csp = widget_csp(headers.get(header::HOST).and_then(|v| v.to_str().ok()));
     let Some(registry) = state.registry.clone() else {
         return StatusCode::NOT_FOUND.into_response();
     };
@@ -264,8 +273,8 @@ async fn plugin_ui_handler(
         Ok(Ok((bytes, content_type))) => (
             StatusCode::OK,
             [
-                (header::CONTENT_TYPE, content_type),
-                (header::CONTENT_SECURITY_POLICY, WIDGET_CSP),
+                (header::CONTENT_TYPE, content_type.to_string()),
+                (header::CONTENT_SECURITY_POLICY, csp),
             ],
             bytes,
         )

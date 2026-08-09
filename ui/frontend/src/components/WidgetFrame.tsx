@@ -4,6 +4,7 @@ import type { DashboardListEntry } from "../types/plugin";
 import type { LogEntry } from "../lib/filter";
 import { matchesEvent } from "../lib/events";
 import { rpcClient$ } from "@/store/rpcClient";
+import { daemonHttpUrl } from "../ws";
 
 const MIN_HEIGHT_PX = 120;
 const MAX_HEIGHT_PX = 800;
@@ -83,7 +84,7 @@ export function WidgetFrame({
     <iframe
       ref={iframeRef}
       title={`${entry.plugin}/${entry.widget}`}
-      src={entry.url}
+      src={daemonHttpUrl(entry.url)}
       sandbox="allow-scripts"
       className="w-full border-none"
       style={{ height }}

@@ -12,6 +12,7 @@ let listDashboardImpl: () => Promise<{ widgets: DashboardListEntry[] }> = () =>
 
 vi.mock("../ws", () => ({
   defaultWsUrl: () => "ws://test/ws",
+  daemonHttpUrl: (path: string) => `http://test${path}`,
   useEventStream: () => ({ entries: [], connection: "open" }),
 }));
 vi.mock("../rpc", () => ({
