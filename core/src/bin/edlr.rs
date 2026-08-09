@@ -54,7 +54,7 @@ struct Args {
     #[arg(long)]
     drivers_dir: Option<PathBuf>,
 
-    /// Journal 読み取り位置の保存先ディレクトリ(未指定時は
+    /// Journal 読み取り位置とログファイルの保存先ディレクトリ(未指定時は
     /// $XDG_STATE_HOME/edlr、未設定なら ~/.local/state/edlr)
     #[arg(long)]
     state_dir: Option<PathBuf>,
@@ -72,16 +72,50 @@ async fn main() {
     // レベルが黙って捨てられていた -- issue `info-host-log-debug-efeq`)。
     use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::util::SubscriberInitExt;
-    let (log_layer, log_rx) = edlr_core::logs::log_channel();
-    tracing_subscriber::registry()
-        .with(edlr_core::logs::env_filter())
-        .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
-        .with(log_layer)
-        .init();
     let args = Args::parse();
 
     let home = std::env::var_os("HOME").map(PathBuf::from);
     let xdg_config_home = std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from);
+    let state_dir = args.state_dir.clone().unwrap_or_else(|| {
+        let xdg_state_home = std::env::var_os("XDG_STATE_HOME").map(PathBuf::from);
+        config::state_base(xdg_state_home.as_deref(), home.as_deref())
+    });
+
+    // stderr は本番(Tauri UI 経由の起動)では端末任せで残らないため、
+    // <state-dir>/edlr.<日付>.log にも残す(issue `stderr-0k6r`)。日次
+    // ローテーション・直近 7 ファイル保持。開けない場合はファイル出力
+    // なしで起動を続け、init 後に警告する。
+    let (file_log, file_log_err) = match tracing_appender::rolling::RollingFileAppender::builder()
+        .rotation(tracing_appender::rolling::Rotation::DAILY)
+        .filename_prefix("edlr")
+        .filename_suffix("log")
+        .max_log_files(7)
+        .build(&state_dir)
+    {
+        Ok(appender) => (Some(appender), None),
+        Err(e) => (None, Some(e)),
+    };
+    // non_blocking の WorkerGuard は drop されると以降のログがファイルへ
+    // 書かれなくなるため、この束縛ごと main が終わるまで保持する。
+    let file_log = file_log.map(tracing_appender::non_blocking);
+    let file_layer = file_log.as_ref().map(|(writer, _)| {
+        tracing_subscriber::fmt::layer()
+            .with_writer(writer.clone())
+            .with_ansi(false)
+    });
+    let (log_layer, log_rx) = edlr_core::logs::log_channel();
+    tracing_subscriber::registry()
+        .with(edlr_core::logs::env_filter())
+        .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
+        .with(file_layer)
+        .with(log_layer)
+        .init();
+    if let Some(e) = file_log_err {
+        tracing::warn!(
+            "failed to open a log file under {} ({e}); logging to stderr only",
+            state_dir.display()
+        );
+    }
 
     // config.json(UI の Settings 画面が保存するのと同じファイル)の
     // journalDir を CLI 引数と自動検出の間に挟む。壊れた config.json は
@@ -149,12 +183,9 @@ async fn main() {
     let drivers_dir = args.drivers_dir.clone().unwrap_or_else(|| {
         config::config_subdir(xdg_config_home.as_deref(), home.as_deref(), "drivers")
     });
-    let state_dir = args.state_dir.clone().unwrap_or_else(|| {
-        let xdg_state_home = std::env::var_os("XDG_STATE_HOME").map(PathBuf::from);
-        config::state_base(xdg_state_home.as_deref(), home.as_deref())
-    });
-    let positions =
-        std::sync::Arc::new(edlr_core::journal::position::PositionStore::new(state_dir));
+    let positions = std::sync::Arc::new(edlr_core::journal::position::PositionStore::new(
+        state_dir.clone(),
+    ));
 
     if let Some(ui_dir) = &args.ui_dir {
         if !ui_dir.is_dir() {
