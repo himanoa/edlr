@@ -15,6 +15,7 @@ use std::time::{Duration, Instant};
 
 use crate::runner::plugin::queue::{PluginWorkSender, PushError};
 use crate::runner::plugin::PluginWork;
+use edlr_driver_channel::Delivery;
 use crate::runtime::dropped::{DropCounters, DroppedCounts};
 use crate::schedule::ScheduleView;
 
@@ -29,6 +30,16 @@ const PLUGIN_STOP_JOIN_TIMEOUT: Duration =
 /// 強い意味は無く、`PLUGIN_STOP_JOIN_TIMEOUT` に対して十分細かく、かつ
 /// 無駄なビジーポーリングにならない程度、という程度の選択。
 const PLUGIN_STOP_JOIN_POLL_INTERVAL: Duration = Duration::from_millis(20);
+
+/// `ThreadSupervisor::deliver_message` の失敗理由。`Registry` が
+/// `RegistryError` へ写す。
+#[derive(Debug, PartialEq)]
+pub(crate) enum DeliverError {
+    /// 対象プラグインのスレッドが登録されていない(Disabled または未起動)。
+    NotRunning,
+    /// 作業キューが満杯(`PLUGIN_WORK_QUEUE_CAPACITY`)。
+    QueueFull,
+}
 
 /// `ThreadSupervisor::plugin_threads` の 1 エントリ。`shutdown_all` 専用。
 struct PluginThreadHandle {
@@ -117,6 +128,24 @@ impl ThreadSupervisor {
                     stop_flag,
                 },
             );
+    }
+
+    /// ホスト起点の `Delivery` をプラグインの作業キューへ積む
+    /// (`plugins/dashboard-action` RPC 用)。
+    ///
+    /// bus 配信(`spawn_bus_subscriber`)と違い、失敗は呼び出し元へ同期的に
+    /// 返る(RPC がエラー応答にする)ので drop counter には数えない。
+    pub(crate) fn deliver_message(&self, id: &str, delivery: Delivery) -> Result<(), DeliverError> {
+        let threads = self
+            .plugin_threads
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let handle = threads.get(id).ok_or(DeliverError::NotRunning)?;
+        match handle.work_tx.push(PluginWork::Message(delivery)) {
+            Ok(()) => Ok(()),
+            Err(PushError::Dropped) => Err(DeliverError::QueueFull),
+            Err(PushError::Disconnected) => Err(DeliverError::NotRunning),
+        }
     }
 
     /// プラグイン専用スレッドが、自分のスケジュール状態を公開する窓口を

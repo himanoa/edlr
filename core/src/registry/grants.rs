@@ -314,6 +314,24 @@ impl<G: GrantStorage> GrantService<G, PluginEntry> {
             .collect()
     }
 
+    /// ダッシュボードアクション(`plugins/dashboard-action`)の前提を検証する:
+    /// widget が manifest に宣言されており、かつ grant 済みであること。
+    /// 判定材料・規則は `dashboard_asset_path` の grant チェックと同じ。
+    pub(crate) fn ensure_dashboard_granted(
+        &self,
+        plugin: &str,
+        widget: &str,
+    ) -> Result<(), RegistryError> {
+        let manifest = self.find_manifest(plugin)?;
+        if manifest.dashboard_widget(widget).is_none() {
+            return Err(RegistryError::UnknownDashboard(widget.to_string()));
+        }
+        if !self.grants_store.dashboard_state(&manifest, widget).granted {
+            return Err(RegistryError::DashboardNotGranted(widget.to_string()));
+        }
+        Ok(())
+    }
+
     /// ウィジェットアセットの実ファイルパスを解決する。grant 必須・entry の
     /// ディレクトリ外へのトラバーサルは拒否(`/plugin-ui/...` ハンドラの
     /// 心臓部。HTTP 層は薄く保ち、判定はここで単体テストする)。

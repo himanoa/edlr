@@ -45,5 +45,12 @@
     context: function () {
       return context;
     },
+    // プラグインへのアクション要求。親が plugins/dashboard-action RPC に
+    // 変換し、プラグインの on-message(driver="dashboard", topic=name) へ届く。
+    // どのプラグインへ届くかは親(iframe を作った側)が決める — この iframe が
+    // 属するプラグイン自身にしか届かない。
+    action: function (name) {
+      window.parent.postMessage({ type: "edlr:action", name: String(name) }, "*");
+    },
   };
 })();

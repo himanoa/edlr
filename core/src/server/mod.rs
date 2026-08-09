@@ -160,6 +160,7 @@ pub fn handle_rpc_with_drivers(
         "plugins/list" => rpc_plugins::list(registry, params),
         "plugins/set-bus-grant" => rpc_plugins::set_bus_grant(registry, params),
         "plugins/set-dashboard-grant" => rpc_plugins::set_dashboard_grant(registry, params),
+        "plugins/dashboard-action" => rpc_plugins::dashboard_action(registry, params),
         "dashboard/list" => rpc_plugins::dashboard_list(registry, params),
         "plugins/get-settings" => rpc_plugins::get_settings(registry, params),
         "plugins/set-settings" => rpc_plugins::set_settings(registry, params),

@@ -28,7 +28,27 @@ entry = "plugin.wasm"
     );
     let err = load_manifest(&plugin_dir)
         .expect_err("the id \"host\" is reserved for host-synthesized messages");
-    assert!(matches!(err, ManifestError::ReservedId));
+    assert!(matches!(err, ManifestError::ReservedId(id) if id == "host"));
+}
+
+#[test]
+fn rejects_the_reserved_plugin_id_dashboard() {
+    let tmp = tempfile::tempdir().unwrap();
+    let plugin_dir = tmp.path().join("dashboard");
+    fs::create_dir_all(&plugin_dir).unwrap();
+    write_entry(&plugin_dir, "plugin.wasm");
+    write_manifest(
+        &plugin_dir,
+        r#"
+id = "dashboard"
+name = "Dashboard Impersonator"
+version = "0.1.0"
+entry = "plugin.wasm"
+"#,
+    );
+    let err = load_manifest(&plugin_dir)
+        .expect_err("the id \"dashboard\" is reserved for dashboard actions");
+    assert!(matches!(err, ManifestError::ReservedId(id) if id == "dashboard"));
 }
 
 #[test]

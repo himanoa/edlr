@@ -466,11 +466,12 @@ pub enum ManifestError {
     IdMismatch,
     /// `id` が `[a-z0-9-]+` にマッチしない。
     BadId,
-    /// `id` がホスト予約語(`edlr_driver_channel::HOST_SENDER` = "host")。
-    /// `host` は字種 `[a-z0-9-]+` として合法だが、ホストが合成する
-    /// `sidecar-ready` メッセージの `from` に使うため、なりすまし余地を
-    /// 塞ぐ目的で予約する(設計書 sidecar-ready 参照)。
-    ReservedId,
+    /// `id` が予約語(`edlr_driver_channel::HOST_SENDER` = "host"、
+    /// `DASHBOARD_SENDER` = "dashboard")。いずれも字種 `[a-z0-9-]+` として
+    /// 合法だが、ホストが合成するメッセージの送信元 id(`sidecar-ready` の
+    /// `from`、ダッシュボードアクションの `driver`)に使うため、なりすまし
+    /// 余地を塞ぐ目的で予約する。中身は当該 id。
+    ReservedId(String),
     /// `entry` が指すファイルが存在しない。
     MissingEntry,
     /// `settings` 内で `key` が重複している。
@@ -506,10 +507,9 @@ impl fmt::Display for ManifestError {
                 write!(f, "manifest id does not match plugin directory name")
             }
             ManifestError::BadId => write!(f, "manifest id must match [a-z0-9-]+"),
-            ManifestError::ReservedId => write!(
+            ManifestError::ReservedId(id) => write!(
                 f,
-                "manifest id \"{}\" is reserved for host-synthesized messages",
-                edlr_driver_channel::HOST_SENDER
+                "manifest id \"{id}\" is reserved for host-synthesized messages"
             ),
             ManifestError::MissingEntry => write!(f, "entry file does not exist"),
             ManifestError::DuplicateKey => write!(f, "duplicate settings key"),
@@ -840,6 +840,17 @@ pub(crate) fn warn_unknown_top_level_keys(file: &str, id: &str, unknown: &[Strin
 ///
 /// 検証エラーは `Err` として返す(panic しない)。呼び出し側は当該プラグインのみ
 /// ロードスキップして warn するなど、エラーを握りつぶさずに扱うこと。
+/// `id` が予約語なら、その予約語を返す(`ManifestError::ReservedId` の判定部)。
+/// プラグイン(`load_manifest`)とドライバ(`load_driver_manifest`)で共通。
+pub(crate) fn reserved_id(id: &str) -> Option<&'static str> {
+    [
+        edlr_driver_channel::HOST_SENDER,
+        edlr_driver_channel::DASHBOARD_SENDER,
+    ]
+    .into_iter()
+    .find(|reserved| id == *reserved)
+}
+
 pub fn load_manifest(dir: &Path) -> Result<Manifest, ManifestError> {
     let manifest_path = dir.join("manifest.toml");
     let content = fs::read_to_string(&manifest_path).map_err(ManifestError::Io)?;
@@ -849,8 +860,8 @@ pub fn load_manifest(dir: &Path) -> Result<Manifest, ManifestError> {
         return Err(ManifestError::BadId);
     }
 
-    if manifest.id == edlr_driver_channel::HOST_SENDER {
-        return Err(ManifestError::ReservedId);
+    if let Some(reserved) = reserved_id(&manifest.id) {
+        return Err(ManifestError::ReservedId(reserved.to_string()));
     }
 
     let dir_name = dir.file_name().and_then(|s| s.to_str()).unwrap_or("");

@@ -172,6 +172,20 @@ API・`result-json` の形・in-flight 上限(8)・タイムアウト規定は
   待った時間はそのままキューの詰まりになる。TTS のような遅い呼び出しは
   `submit-send` に逃がすとキューが流れ続ける
 
+## 予約 driver id: `host` と `dashboard`
+
+プラグインの `on-message(driver, topic, payload)` に届く `driver` には、
+実ドライバ以外に 2 つの予約 id がある(なりすましを塞ぐため、manifest 検証は
+この id を持つプラグイン/ドライバを拒否する):
+
+- **`host`** — ホストが合成する通知(`sidecar-ready` など)の送信元
+- **`dashboard`** — ダッシュボードウィジェットのボタン等から
+  `edlr.action(name)`(plugin-ui-sdk)で要求されたアクション。
+  `plugins/dashboard-action` RPC 経由で、そのウィジェットが属するプラグイン
+  自身へ `on-message("dashboard", name, [])` として届く。grant 済み
+  ウィジェットからのみ受け付け、他プラグインへは送れない。配送は
+  fire-and-forget で、キュー満杯時は RPC がエラーを返す
+
 ## ドライバ無効化時の retained 値の破棄
 
 ドライバが `on-message`/`init` の失敗で無効化(`Disabled`)されると、その

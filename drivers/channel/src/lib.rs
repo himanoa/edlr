@@ -17,6 +17,11 @@ pub const BUS_MAX_PAYLOAD: usize = 256 * 1024;
 /// manifest 検証はこの id を持つプラグイン/ドライバを拒否する。
 pub const HOST_SENDER: &str = "host";
 
+/// ダッシュボードウィジェット発のアクションが `on-message` で届くときの
+/// 予約送信元 id(`Delivery::driver_id`)。`HOST_SENDER` と同じく、core の
+/// manifest 検証はこの id を持つプラグイン/ドライバを拒否する。
+pub const DASHBOARD_SENDER: &str = "dashboard";
+
 use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::mpsc::{SyncSender, TrySendError};

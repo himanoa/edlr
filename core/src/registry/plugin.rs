@@ -137,6 +137,11 @@ pub enum RegistryError {
     UnknownDashboard(String),
     /// 未承認のダッシュボードウィジェットのアセットが要求された。
     DashboardNotGranted(String),
+    /// ダッシュボードアクションの宛先プラグインが動いていない
+    /// (Disabled または未起動)。
+    PluginNotRunning(String),
+    /// ダッシュボードアクションを積む作業キューが満杯。
+    ActionQueueFull(String),
     /// 指定された `id` のドライバが登録されていない。`UnknownPlugin` とは
     /// 別の variant にしてある: `crate::registry::driver::DriverRegistry` の
     /// サイドカー/ファイルアクセス系メソッド(`find_manifest_for_shared` /
@@ -166,6 +171,10 @@ impl fmt::Display for RegistryError {
             RegistryError::UnknownDashboard(id) => write!(f, "unknown dashboard widget: {id}"),
             RegistryError::DashboardNotGranted(id) => {
                 write!(f, "dashboard widget not granted: {id}")
+            }
+            RegistryError::PluginNotRunning(id) => write!(f, "plugin is not running: {id}"),
+            RegistryError::ActionQueueFull(id) => {
+                write!(f, "plugin work queue is full, try again: {id}")
             }
             RegistryError::UnknownDriver(id) => write!(f, "unknown driver: {id}"),
         }
@@ -504,6 +513,39 @@ impl Registry {
     ) -> Result<PathBuf, RegistryError> {
         self.grant_service
             .dashboard_asset_path(plugin, widget, rel_path)
+    }
+
+    /// ダッシュボードウィジェット発のアクションを、そのウィジェットが属する
+    /// プラグインの `on-message(driver = "dashboard", topic = name)` へ届ける
+    /// (`plugins/dashboard-action` RPC の実体)。
+    ///
+    /// grant 済みのウィジェットからのみ受け付ける(アセット配信と同じ判定)。
+    /// 配送はプラグインの作業キューに積むだけで、実行の完了は待たない。
+    pub fn dashboard_action(
+        &self,
+        plugin: &str,
+        widget: &str,
+        name: &str,
+    ) -> Result<(), RegistryError> {
+        self.grant_service.ensure_dashboard_granted(plugin, widget)?;
+        self.supervisor
+            .deliver_message(
+                plugin,
+                edlr_driver_channel::Delivery {
+                    plugin_id: plugin.to_string(),
+                    driver_id: edlr_driver_channel::DASHBOARD_SENDER.to_string(),
+                    topic: name.to_string(),
+                    payload: Vec::new(),
+                },
+            )
+            .map_err(|e| match e {
+                super::supervisor::DeliverError::NotRunning => {
+                    RegistryError::PluginNotRunning(plugin.to_string())
+                }
+                super::supervisor::DeliverError::QueueFull => {
+                    RegistryError::ActionQueueFull(plugin.to_string())
+                }
+            })
     }
 
     /// `id` のプラグインの capability 要求一覧と現在の承認状態を返す。実体は
@@ -1481,6 +1523,48 @@ pub(crate) mod tests {
         assert!(registry
             .dashboard_asset_path("nope", "status", "index.html")
             .is_err());
+    }
+
+    /// `plugins/dashboard-action` の実体の検証: grant 必須、スレッド未登録なら
+    /// `PluginNotRunning`、登録済みなら `on-message(driver = "dashboard")` の
+    /// 形(`PluginWork::Message`)で作業キューへ届く。
+    #[test]
+    fn dashboard_action_requires_grant_and_delivers_to_the_work_queue() {
+        let (registry, _tmp) = test_registry_with_dashboard();
+
+        let err = registry
+            .dashboard_action("widgety", "status", "resync")
+            .unwrap_err();
+        assert!(matches!(err, RegistryError::DashboardNotGranted(_)));
+
+        registry
+            .set_dashboard_grant("widgety", "status", true)
+            .unwrap();
+
+        let err = registry
+            .dashboard_action("widgety", "status", "resync")
+            .unwrap_err();
+        assert!(matches!(err, RegistryError::PluginNotRunning(id) if id == "widgety"));
+
+        let (work_tx, work_rx) = crate::runner::plugin::queue::channel();
+        registry.register_plugin_thread(
+            "widgety",
+            work_tx,
+            thread::spawn(|| {}),
+            Arc::new(AtomicBool::new(false)),
+        );
+        registry
+            .dashboard_action("widgety", "status", "resync")
+            .unwrap();
+        match work_rx.recv_timeout(Duration::from_secs(5)).unwrap() {
+            PluginWork::Message(delivery) => {
+                assert_eq!(delivery.plugin_id, "widgety");
+                assert_eq!(delivery.driver_id, "dashboard");
+                assert_eq!(delivery.topic, "resync");
+                assert!(delivery.payload.is_empty());
+            }
+            _ => panic!("expected PluginWork::Message"),
+        }
     }
 
     #[test]

@@ -93,6 +93,22 @@ pub(super) fn set_dashboard_grant(
     Ok(dashboard_result_json(&dashboard))
 }
 
+pub(super) fn dashboard_action(
+    registry: &Registry,
+    params: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let plugin = param_str(params, "plugin")?;
+    let widget = param_str(params, "widget")?;
+    let name = param_str(params, "name")?;
+    // アクション名はウィジェットの JS が指定する文字列。トピック名と同じ
+    // 字種制約を掛けて、ログや on-message 側で扱いやすい形に限定する。
+    edlr_driver_channel::topic::validate_name(name)?;
+    registry
+        .dashboard_action(plugin, widget, name)
+        .map_err(|e| e.to_string())?;
+    Ok(serde_json::json!({ "delivered": true }))
+}
+
 pub(super) fn dashboard_list(
     registry: &Registry,
     _params: &serde_json::Value,

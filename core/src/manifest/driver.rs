@@ -115,8 +115,8 @@ pub fn load_driver_manifest(dir: &Path) -> Result<DriverManifest, ManifestError>
         return Err(ManifestError::BadId);
     }
 
-    if manifest.id == edlr_driver_channel::HOST_SENDER {
-        return Err(ManifestError::ReservedId);
+    if let Some(reserved) = crate::manifest::reserved_id(&manifest.id) {
+        return Err(ManifestError::ReservedId(reserved.to_string()));
     }
 
     let dir_name = dir.file_name().and_then(|s| s.to_str()).unwrap_or("");
@@ -215,7 +215,27 @@ entry = "driver.wasm"
         );
         let err = load_driver_manifest(&sub)
             .expect_err("the id \"host\" is reserved for host-synthesized messages");
-        assert!(matches!(err, ManifestError::ReservedId));
+        assert!(matches!(err, ManifestError::ReservedId(id) if id == "host"));
+    }
+
+    #[test]
+    fn rejects_the_reserved_driver_id_dashboard() {
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("dashboard");
+        std::fs::create_dir(&sub).unwrap();
+        write_entry(&sub);
+        write(
+            &sub,
+            r#"
+id = "dashboard"
+name = "Dashboard Impersonator"
+version = "0.1.0"
+entry = "driver.wasm"
+"#,
+        );
+        let err = load_driver_manifest(&sub)
+            .expect_err("the id \"dashboard\" is reserved for dashboard actions");
+        assert!(matches!(err, ManifestError::ReservedId(id) if id == "dashboard"));
     }
 
     #[test]
