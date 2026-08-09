@@ -36,6 +36,21 @@ name = "state"
 mode = "read-write"
 reason = "Journal から学習したコマンダー名とゲームバージョンを再起動をまたいで保持するため"
 
+# 手動同期(ダッシュボードの「現行セッションを再送」)が Journal を読み直す
+# ためのルート。Journal ディレクトリを指定して承認する。
+[[filesystem]]
+name = "journal"
+mode = "read"
+reason = "手動同期で現行セッションの Journal を読み直して INARA へ再送するため"
+
+# 手動同期ボタン。押すと on-message(driver="dashboard", topic="resync") が
+# 届き、現行セッションの Journal を読み直して再送する。
+[[dashboard]]
+id = "sync"
+title = "INARA 同期"
+entry = "ui/sync/index.html"
+size = "small"
+
 # 直近のイベントで送り切れなかった端数を定期的に拾い上げる。
 # minIntervalSeconds は uploader 側で尊重するので、ここでの間隔と一致
 # していなくても連打にはならない。

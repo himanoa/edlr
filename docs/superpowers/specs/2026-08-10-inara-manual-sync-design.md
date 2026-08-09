@@ -35,7 +35,7 @@
 
 ## 3. 再送エンジン(プラグイン側)
 
-- manifest に `[[filesystem]] name="journal" mode="read-only"`(ユーザーが
+- manifest に `[[filesystem]] name="journal" mode="read"`(ユーザーが
   Journal ディレクトリを指定して承認する。log-db と同じ方式)。
 - `on-message("dashboard", "resync")` で開始: driver-fs の list で最新
   `Journal.*.log` を特定 → `read_range` でチャンク読み → 行を既存

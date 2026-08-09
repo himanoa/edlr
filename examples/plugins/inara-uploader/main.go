@@ -46,7 +46,16 @@ const (
 	stateFile = "state.json"
 )
 
+// journalRoot は manifest の [[filesystem]] name="journal"(手動同期が
+// Journal を読み直すルート)。actionResync はダッシュボードウィジェットが
+// `edlr.action("resync")` で送るアクション名。
+const (
+	journalRoot  = "journal"
+	actionResync = "resync"
+)
+
 var up *uploader.Uploader
+var resync *uploader.Resync
 
 // lastSavedState は最後に保存した(または保存を試みた)状態のスナップショット。
 // イベントのたびに書き込まないための比較用。
@@ -56,6 +65,7 @@ func init() {
 	edlrplugin.Register(edlrplugin.Hooks{
 		Init:       onInit,
 		OnEvent:    onEvent,
+		OnMessage:  onMessage,
 		OnSchedule: onSchedule,
 		OnStop:     onStop,
 	})
@@ -67,8 +77,20 @@ func main() {}
 
 func onInit() {
 	up = uploader.New(func() time.Time { return time.Now().UTC() }, httpSender{})
+	resync = uploader.NewResync(journalFS{}, asyncSender{})
 	loadState()
 	logf(hostlog.LevelInfo, "inara-uploader initialized")
+}
+
+// onMessage はダッシュボードウィジェットのアクションを受ける
+// (driver は core の予約 id "dashboard"。docs/drivers.md 参照)。
+func onMessage(driver, topic string, _ []byte) {
+	if driver != "dashboard" || topic != actionResync {
+		logf(hostlog.LevelWarn, "unknown message: %s/%s", driver, topic)
+		return
+	}
+	cfg := settings.Parse(hostsettings.GetAll())
+	reportResync(resync.Start(cfg))
 }
 
 func onEvent(ev edlrplugin.Event) {
@@ -192,6 +214,86 @@ func driverErrorMessage(err *driverhttp.DriverError) string {
 		return *m
 	}
 	return "unknown driver error"
+}
+
+// journalFS は uploader.FS の driver-fs 実装(手動同期の Journal 読み直し)。
+type journalFS struct{}
+
+func (journalFS) List() ([]uploader.FileInfo, error) {
+	result := driverfs.List(journalRoot, "")
+	if err := result.Err(); err != nil {
+		return nil, fmt.Errorf("%s", err.String())
+	}
+	entries := result.OK().Slice()
+	infos := make([]uploader.FileInfo, 0, len(entries))
+	for _, e := range entries {
+		infos = append(infos, uploader.FileInfo{Path: e.Path, Size: e.Size})
+	}
+	return infos, nil
+}
+
+func (journalFS) ReadRange(path string, offset uint64, n uint32) ([]byte, error) {
+	result := driverfs.ReadRange(journalRoot, path, offset, n)
+	if err := result.Err(); err != nil {
+		return nil, fmt.Errorf("%s", err.String())
+	}
+	return result.OK().Slice(), nil
+}
+
+// asyncSender は uploader.AsyncSender の SubmitHTTP 実装。完了時に
+// resync.OnSendResult を呼んで数珠つなぎを続ける。
+type asyncSender struct{}
+
+func (asyncSender) Submit(body []byte) error {
+	req := edlrplugin.Request{
+		Method: "POST",
+		URL:    inaraEndpoint,
+		Headers: cm.ToList([][2]string{
+			{"content-type", "application/json"},
+			{"accept", "application/json"},
+		}),
+		Body: cm.Some(cm.ToList(body)),
+	}
+	_, err := edlrplugin.SubmitHTTP(req, nil, func(resp *edlrplugin.Response, err error) {
+		cfg := settings.Parse(hostsettings.GetAll())
+		if err != nil {
+			reportResync(resync.OnSendResult(0, nil, err, cfg))
+			return
+		}
+		reportResync(resync.OnSendResult(int(resp.Status), resp.Body, nil, cfg))
+	})
+	return err
+}
+
+// reportResync は ResyncOutcome をログへ落とす。判断はせず整形だけ。
+func reportResync(out uploader.ResyncOutcome) {
+	if out.Refused != "" {
+		logf(hostlog.LevelWarn, "resync: %s", out.Refused)
+		return
+	}
+	for _, rejected := range out.Rejected {
+		logf(hostlog.LevelWarn, "resync: inara rejected event %d: %d %s",
+			rejected.Index, rejected.Status, rejected.StatusText)
+	}
+	if out.Warning != "" {
+		logf(hostlog.LevelWarn, "resync: inara returned a warning for the batch: %s", out.Warning)
+	}
+	for _, warned := range out.Warned {
+		logf(hostlog.LevelWarn, "resync: inara returned a warning for event %d: %d %s",
+			warned.Index, warned.Status, warned.StatusText)
+	}
+	if out.Err != nil {
+		logf(hostlog.LevelError, "resync: %v", out.Err)
+		return
+	}
+	if out.Done {
+		logf(hostlog.LevelInfo, "resync: 完了(%d 件送信)", out.Total)
+		return
+	}
+	if out.Submitted > 0 {
+		logf(hostlog.LevelInfo, "resync: %d 件送信中(%d/%d bytes)",
+			out.Submitted, out.OffsetBytes, out.SizeBytes)
+	}
 }
 
 // report は Outcome をログへ落とす。判断はせず、起きたことをそのまま出す。

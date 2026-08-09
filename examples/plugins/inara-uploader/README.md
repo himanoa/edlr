@@ -73,7 +73,30 @@ cp plugin.wasm manifest.toml ~/.config/edlr/plugins/inara-uploader/
    いて `LoadGame` は再配信されないため、未設定のままだと**セッション途中で
    デーモンを再起動したとき、次にゲームへログインし直すまで何も送信されない**
    (INARA が Live 版のデータしか受け付けないことによるゲートが閉じたままになる)
-4. 動作確認が済むまでは `isBeingDeveloped`(既定 true)を そのままにしておく
+4. 手動同期を使う場合は、filesystem(`journal`、read)に **Journal
+   ディレクトリを指定して承認**し、Plugins 画面でダッシュボードウィジェット
+   「INARA 同期」も承認する
+5. 動作確認が済むまでは `isBeingDeveloped`(既定 true)を そのままにしておく
+
+### 手動同期(現行セッションの再送)
+
+ダッシュボードの「INARA 同期」ウィジェットのボタンを押すと、**現行セッションの
+Journal ファイルを先頭から読み直して INARA へ送り直す**。セッション途中で
+デーモンを再起動した・送信できない時間帯があった、などで欠測した分を
+取り戻すための手動操作。
+
+- 経路: ボタン → `plugins/dashboard-action` RPC →
+  `on-message(driver="dashboard", topic="resync")` → driver-fs で最新
+  `Journal.*.log` をチャンク読み → 変換 → 非同期送信(`submit-send`)の
+  数珠つなぎ(1 バッチ 100 件)
+- 変換は専用の状態で行い、ファイル先頭の `LoadGame` から学習し直す。INARA が
+  受け付けない Legacy セッションは送らない(通常経路と同じゲート)
+- `minIntervalSeconds` は適用しない。`enabled` off・`apiKey` 未設定・
+  `dryRun` on のときは開始を拒否して理由をログに出す
+- 進行状態はメモリのみ(再起動したら押し直す)。実行中の再押下は無視
+- **重複について**: 変換先の大半は `set*` 系(所持金・ランク・素材など)で
+  再送しても冪等。`addCommanderTravelDock` などの履歴系は INARA 側の
+  重複破棄に委ねる。進捗と結果はログ画面に `resync:` 接頭辞で出る
 
 ### バインディング
 
