@@ -86,7 +86,7 @@ pub const SIDECAR_SPAWN_MIN_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Maximum linear memory (bytes) a single driver instance may allocate.
 /// Mirrors `crate::host::plugin`'s `PLUGIN_MEMORY_LIMIT`.
-const DRIVER_MEMORY_LIMIT: usize = 64 * 1024 * 1024;
+const DRIVER_MEMORY_LIMIT: usize = 256 * 1024 * 1024;
 
 /// Maximum number of component instances / tables a single driver `Store`
 /// may create. Mirrors `crate::host::plugin`'s `PLUGIN_INSTANCE_LIMIT` /

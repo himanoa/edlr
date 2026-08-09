@@ -139,11 +139,18 @@ pub const SIDECAR_SPAWN_MIN_INTERVAL: Duration = Duration::from_secs(1);
 /// `HTTP_TIMEOUT`'s doc comment for that half of the story). Without a
 /// memory cap a plugin can grow its linear memory without bound and OOM-kill
 /// the whole daemon, defeating the isolation the plugin host is meant to
-/// provide. 64 MiB is a generous ceiling for the kind of small,
-/// single-purpose plugins this host targets (log formatters, simple
-/// notifiers, ...); it is a fixed constant for now but can be made
-/// configurable per-plugin later if a legitimate use case needs more.
-const PLUGIN_MEMORY_LIMIT: usize = 64 * 1024 * 1024;
+/// provide. The ceiling only needs to be low enough that a runaway plugin
+/// cannot take the daemon down with it; it is a fixed constant for now but
+/// can be made configurable per-plugin later if a legitimate use case
+/// needs more.
+///
+/// 2026-08: raised from 64 MiB. TinyGo's non-moving conservative GC cannot
+/// give fragmented pages back, so the effective utilization of guest heaps
+/// is poor, and legitimate workloads already approached the old ceiling in
+/// practice (voice-notify's ~100k-entry BEP dictionary expands to 10-20 MiB;
+/// shipai was observed at 48 MiB sys). On a desktop running a handful of
+/// plugins, 256 MiB still serves the isolation goal.
+const PLUGIN_MEMORY_LIMIT: usize = 256 * 1024 * 1024;
 
 /// Maximum number of component instances / tables a single plugin `Store`
 /// may create. Plugins in this host are single-component and single-table by
