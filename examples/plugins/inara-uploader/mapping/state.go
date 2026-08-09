@@ -1,7 +1,10 @@
 package mapping
 
-// State はイベントをまたいで覚えておく情報。プラグインのプロセス内にしか無く、
-// 永続化はされない(デーモンを再起動すると Journal の replay で埋め直される)。
+// State はイベントをまたいで覚えておく情報。edlr は Journal の読み取り位置を
+// 永続化しているため、デーモンを再起動しても現行セッションの LoadGame は
+// **再配信されない**。そのため State は persist.go で JSON 化して driver-fs に
+// 保存し、再起動時に読み戻す(揮発のままだと、セッション途中の再起動で次の
+// LoadGame まで Live ゲートが閉じ、全イベントを捨ててしまう)。
 type State struct {
 	CommanderName string
 	FrontierID    string

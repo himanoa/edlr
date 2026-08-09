@@ -17,12 +17,14 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
 	"time"
 
 	"go.bytecodealliance.org/cm"
 
 	"github.com/himanoa/edlr/sdk/go/edlrplugin"
+	driverfs "github.com/himanoa/edlr/sdk/go/gen/edlr/plugin/driver-fs"
 	driverhttp "github.com/himanoa/edlr/sdk/go/gen/edlr/plugin/driver-http"
 	hostlog "github.com/himanoa/edlr/sdk/go/gen/edlr/plugin/host-log"
 	hostsettings "github.com/himanoa/edlr/sdk/go/gen/edlr/plugin/host-settings"
@@ -35,7 +37,20 @@ import (
 // 場合にだけ `driver-http.send` が通る。
 const inaraEndpoint = "https://inara.cz/inapi/v1/"
 
+// stateRoot は manifest の [[filesystem]] name、stateFile はその中のファイル名。
+// Journal から学習した状態(コマンダー名・gameversion)の保存先。edlr は
+// 読み取り位置を永続化していて LoadGame は再配信されないため、ここへ保存
+// しないとセッション途中のデーモン再起動で Live ゲートが閉じたままになる。
+const (
+	stateRoot = "state"
+	stateFile = "state.json"
+)
+
 var up *uploader.Uploader
+
+// lastSavedState は最後に保存した(または保存を試みた)状態のスナップショット。
+// イベントのたびに書き込まないための比較用。
+var lastSavedState []byte
 
 func init() {
 	edlrplugin.Register(edlrplugin.Hooks{
@@ -52,6 +67,7 @@ func main() {}
 
 func onInit() {
 	up = uploader.New(func() time.Time { return time.Now().UTC() }, httpSender{})
+	loadState()
 	logf(hostlog.LevelInfo, "inara-uploader initialized")
 }
 
@@ -64,6 +80,7 @@ func onEvent(ev edlrplugin.Event) {
 		Payload:   ev.PayloadJSON,
 		Replay:    ev.Replay,
 	}))
+	saveState()
 }
 
 // onSchedule は manifest の `[[schedule]]` から呼ばれる。このプラグインが
@@ -87,6 +104,46 @@ func onSchedule(name string) {
 func onStop() {
 	cfg := settings.Parse(hostsettings.GetAll())
 	report(cfg, up.HandleStop(cfg))
+	saveState()
+}
+
+// loadState は保存済みの学習状態を driver-fs から読み戻す。
+//
+// 読めないのは異常ではない(ルート未承認・ディレクトリ未設定・初回起動)ので
+// 情報ログ 1 行にとどめ、空から始める(次の LoadGame まで送信しない従来挙動)。
+func loadState() {
+	result := driverfs.Read(stateRoot, stateFile)
+	if err := result.Err(); err != nil {
+		logf(hostlog.LevelInfo,
+			"保存済みの状態を読めませんでした。次の LoadGame まで学習し直します: %s",
+			err.String())
+		return
+	}
+	raw := result.OK().Slice()
+	up.RestoreState(raw)
+	lastSavedState = raw
+}
+
+// saveState は学習状態が変わっていれば driver-fs へ書く。
+//
+// 書けなかった場合も lastSavedState を進める: 書けない状況(未承認など)で
+// イベントのたびに警告を繰り返さず、状態が変わったときだけ再試行する。
+func saveState() {
+	raw, err := up.StateSnapshot()
+	if err != nil {
+		logf(hostlog.LevelWarn, "状態を JSON にできませんでした: %v", err)
+		return
+	}
+	if bytes.Equal(raw, lastSavedState) {
+		return
+	}
+	lastSavedState = raw
+	result := driverfs.Write(stateRoot, stateFile, cm.ToList(raw))
+	if e := result.Err(); e != nil {
+		logf(hostlog.LevelWarn,
+			"状態を保存できませんでした(デーモン再起動でコマンダー名と gameversion を再学習します): %s",
+			e.String())
+	}
 }
 
 // option は WIT の option<string> を素の string にする。

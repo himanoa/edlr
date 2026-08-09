@@ -104,6 +104,18 @@ func New(now func() time.Time, sender Sender) *Uploader {
 	}
 }
 
+// StateSnapshot は学習状態(コマンダー名・gameversion など)を永続化用に
+// 書き出す。main が driver-fs へ保存し、再起動時に RestoreState で読み戻す。
+func (u *Uploader) StateSnapshot() ([]byte, error) {
+	return u.state.Marshal()
+}
+
+// RestoreState は保存済みの学習状態を読み戻す。壊れた入力は空の状態として
+// 扱われる(mapping.UnmarshalState 参照)。
+func (u *Uploader) RestoreState(data []byte) {
+	u.state = mapping.UnmarshalState(data)
+}
+
 // Handle は Journal イベントを 1 件処理する。
 func (u *Uploader) Handle(cfg settings.Settings, ev Event) Outcome {
 	if !cfg.Enabled {

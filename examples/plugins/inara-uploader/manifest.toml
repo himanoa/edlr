@@ -27,6 +27,15 @@ kind = "http"
 hosts = ["https://inara.cz"]
 reason = "Journal イベントを INARA の API へアップロードするため"
 
+# Journal から学習した状態(コマンダー名・gameversion)の保存先。edlr は
+# Journal の読み取り位置を永続化していて LoadGame は再配信されないため、
+# ここへ保存しないとセッション途中のデーモン再起動で Live ゲートが閉じた
+# ままになり、以後のイベントを送れなくなる。
+[[filesystem]]
+name = "state"
+mode = "read-write"
+reason = "Journal から学習したコマンダー名とゲームバージョンを再起動をまたいで保持するため"
+
 # 直近のイベントで送り切れなかった端数を定期的に拾い上げる。
 # minIntervalSeconds は uploader 側で尊重するので、ここでの間隔と一致
 # していなくても連打にはならない。
