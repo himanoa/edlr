@@ -180,7 +180,8 @@ API・`result-json` の形・in-flight 上限(8)・タイムアウト規定は
 
 - **`host`** — ホストが合成する通知(`sidecar-ready` など)の送信元
 - **`dashboard`** — ダッシュボードウィジェットのボタン等から
-  `edlr.action(name)`(plugin-ui-sdk)で要求されたアクション。
+  `api.action(name)`(ウィジェットの `mount(el, api)` に渡る API)で
+  要求されたアクション。
   `plugins/dashboard-action` RPC 経由で、そのウィジェットが属するプラグイン
   自身へ `on-message("dashboard", name, [])` として届く。grant 済み
   ウィジェットからのみ受け付け、他プラグインへは送れない。配送は

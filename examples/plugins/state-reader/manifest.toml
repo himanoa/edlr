@@ -13,5 +13,5 @@ reason = "ジャンプ先を ed-state ドライバへ渡し、配り直された
 [[dashboard]]
 id = "last-jump"
 title = "Last Jump"
-entry = "ui/last-jump/index.html"
+entry = "ui/last-jump/index.js"
 size = "small"

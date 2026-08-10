@@ -48,7 +48,7 @@ reason = "手動同期で現行セッションの Journal を読み直して INA
 [[dashboard]]
 id = "sync"
 title = "INARA 同期"
-entry = "ui/sync/index.html"
+entry = "ui/sync/index.js"
 size = "small"
 
 # 直近のイベントで送り切れなかった端数を定期的に拾い上げる。

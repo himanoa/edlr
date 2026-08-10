@@ -113,7 +113,7 @@ pub(super) fn dashboard_list(
     registry: &Registry,
     _params: &serde_json::Value,
 ) -> Result<serde_json::Value, String> {
-    // Dashboard 画面用: grant 済みウィジェットだけを、iframe が
+    // Dashboard 画面用: grant 済みウィジェットだけを、dynamic import が
     // そのまま使える URL 付きで返す。未 grant を混ぜないのは、
     // アセット配信側も未 grant を 404 にする(見えないものは
     // 取得もできない)のと対になる。
