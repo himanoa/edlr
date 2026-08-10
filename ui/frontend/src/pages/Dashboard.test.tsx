@@ -42,7 +42,7 @@ beforeEach(() => {
 });
 
 describe("Dashboard", () => {
-  it("renders granted widgets as iframe cards and placeholders for unresolved ones", async () => {
+  it("renders granted widget cards and placeholders for unresolved ones", async () => {
     widgets = [
       running,
       { ...running, widget: "broken", title: "Broken", size: "small", resolved: false },
@@ -50,8 +50,9 @@ describe("Dashboard", () => {
     ];
     render(<Provider><Dashboard /></Provider>);
     await waitFor(() => expect(screen.getByText("Status")).toBeInTheDocument());
-    // 稼働中 + 解決済みの 1 件だけ iframe になる
-    expect(document.querySelectorAll("iframe")).toHaveLength(1);
+    // iframe 方式は廃止 — 稼働中 + 解決済みの 1 件だけ WidgetHost がマウントする
+    expect(document.querySelectorAll("iframe")).toHaveLength(0);
+    expect(document.querySelectorAll(".widget-card")).toHaveLength(3);
     expect(screen.getByText(/entry ファイルが見つかりません/)).toBeInTheDocument();
     expect(screen.getByText(/プラグインが停止しています/)).toBeInTheDocument();
   });

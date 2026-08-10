@@ -1,5 +1,5 @@
 import { Suspense } from "react";
-import WidgetFrame from "../components/WidgetFrame";
+import WidgetHost from "../components/WidgetHost";
 import { defaultWsUrl, useEventStream } from "../ws";
 import type { LogEntry } from "../lib/filter";
 import type { WidgetSize } from "../types/plugin";
@@ -32,7 +32,7 @@ function LoadErrorFallback({ error }: FallbackProps) {
  * `dashboard/list` で grant 済みウィジェットを取得し、CSS Grid に自動配置
  * する(small=1 / medium=2 / large=3 カラムスパン、並びは登録順)。
  * イベントは親がここで一本の WS(`useEventStream`)から受け、各
- * `WidgetFrame` がプラグインの events フィルタに従って iframe へ転送する。
+ * `WidgetHost` がプラグインの events フィルタに従ってウィジェットへ配る。
  *
  * widgets$ の読み取りはサスペンドするため、Suspense/ErrorBoundary の内側の
  * WidgetGrid で行う(この階層で読むと自分の境界では捕まえられない)。
@@ -77,7 +77,7 @@ function WidgetGrid({ entries }: { entries: LogEntry[] }) {
             ) : !w.resolved ? (
               <p className="text-muted-foreground">entry ファイルが見つかりません</p>
             ) : (
-              <WidgetFrame entry={w} entries={entries} />
+              <WidgetHost entry={w} entries={entries} />
             )}
           </article>
         ))}
