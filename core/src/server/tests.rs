@@ -420,7 +420,7 @@ async fn attached_log_frames_reach_the_replay_buffer_and_broadcast() {
 }
 
 #[tokio::test]
-async fn plugin_ui_serves_granted_assets_with_csp_and_404s_everything_else() {
+async fn plugin_ui_serves_granted_assets_with_cors_and_404s_everything_else() {
     use tower::ServiceExt;
     let (registry, tmp) = crate::registry::plugin::tests::test_registry_with_dashboard();
     let ui_dir = tmp.path().join("plugins").join("widgety").join("ui");
@@ -451,23 +451,20 @@ async fn plugin_ui_serves_granted_assets_with_csp_and_404s_everything_else() {
         .set_dashboard_grant("widgety", "status", true)
         .unwrap();
 
-    // grant 済み → 200 + CSP + Content-Type
+    // grant 済み → 200 + CORS + Content-Type。ホストページ(tauri://localhost 等)
+    // からの cross-origin dynamic import には CORS 許可が必須。
     let res = app
         .clone()
         .oneshot(get("/plugin-ui/widgety/status/index.html"))
         .await
         .unwrap();
     assert_eq!(res.status(), axum::http::StatusCode::OK);
-    let csp = res
-        .headers()
-        .get("content-security-policy")
-        .expect("csp header present")
-        .to_str()
-        .unwrap();
-    assert!(csp.contains("default-src 'none'"));
-    // opaque origin(sandbox iframe)では 'self' が WebKit で無効なため、
-    // Host から組んだ明示オリジンであること
-    assert!(csp.contains("script-src http://127.0.0.1:8137 'unsafe-inline'"));
+    assert_eq!(
+        res.headers()
+            .get("access-control-allow-origin")
+            .expect("cors header present"),
+        "*"
+    );
     assert!(res
         .headers()
         .get("content-type")
@@ -497,17 +494,6 @@ async fn plugin_ui_serves_granted_assets_with_csp_and_404s_everything_else() {
         .await
         .unwrap();
     assert_eq!(res.status(), axum::http::StatusCode::NOT_FOUND);
-
-    // SDK は grant 不要で配信
-    let res = app.clone().oneshot(get("/plugin-ui-sdk.js")).await.unwrap();
-    assert_eq!(res.status(), axum::http::StatusCode::OK);
-    assert!(res
-        .headers()
-        .get("content-type")
-        .unwrap()
-        .to_str()
-        .unwrap()
-        .contains("javascript"));
 }
 
 #[test]
