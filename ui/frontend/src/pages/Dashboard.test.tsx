@@ -57,12 +57,15 @@ describe("Dashboard", () => {
     expect(screen.getByText(/プラグインが停止しています/)).toBeInTheDocument();
   });
 
-  it("applies grid column span by size", async () => {
+  it("renders widget cards as draggable grid items", async () => {
     widgets = [running];
     render(<Provider><Dashboard /></Provider>);
     await waitFor(() => expect(screen.getByText("Status")).toBeInTheDocument());
+    // 配置・サイズは react-grid-layout が受け持つ(初期幅は mergeLayout が
+    // manifest size から決める — そちらは widgetLayout.test.ts で担保)
     const card = document.querySelector(".widget-card") as HTMLElement;
-    expect(card.style.gridColumn).toBe("span 2");
+    expect(card.classList.contains("react-grid-item")).toBe(true);
+    expect(card.querySelector(".widget-drag-handle")).not.toBeNull();
   });
 
   it("shows guidance when no widgets are granted", async () => {
