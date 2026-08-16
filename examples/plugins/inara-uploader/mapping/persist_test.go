@@ -10,6 +10,9 @@ func TestStateRoundTripPreservesLiveGateAndIdentity(t *testing.T) {
 	s.learnGameVersion("4.0.0.1904")
 	s.learnIdentity("Commander Foo", "F123")
 	s.LastSystem = "Sol"
+	s.LastStation = "Abraham Lincoln"
+	s.ShipType = "Krait_MkII"
+	s.ShipID = ptr(int64(3))
 	s.ranks["combat"] = 5
 	s.progress["combat"] = 42.5
 
@@ -27,6 +30,12 @@ func TestStateRoundTripPreservesLiveGateAndIdentity(t *testing.T) {
 	}
 	if got.LastSystem != "Sol" {
 		t.Errorf("LastSystem が失われました: %q", got.LastSystem)
+	}
+	if got.LastStation != "Abraham Lincoln" {
+		t.Errorf("LastStation が失われました: %q", got.LastStation)
+	}
+	if got.ShipType != "Krait_MkII" || got.ShipID == nil || *got.ShipID != 3 {
+		t.Errorf("現在の船が失われました: %q %v", got.ShipType, got.ShipID)
 	}
 	if got.ranks["combat"] != 5 || got.progress["combat"] != 42.5 {
 		t.Errorf("ranks/progress が失われました: %v %v", got.ranks, got.progress)

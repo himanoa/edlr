@@ -159,7 +159,27 @@ WIT バインディング(`gen/`)は `sdk/go`(`edlrplugin`)が同梱している
 | `EngineerProgress` | `setCommanderRankEngineer` | 起動時の配列形式・単体形式の両方に対応 |
 | `Materials` | `setCommanderInventoryMaterials` | Raw / Manufactured / Encoded を 1 本にまとめる |
 | `Statistics` | `setCommanderGameStatistics` | Journal の中身をそのまま |
+| `FSDJump` / `Location` の `Factions` | `setCommanderReputationMinorFaction` | `MyReputation` の -100..100 を -1..1 に換算 |
+| `Touchdown` | `addCommanderTravelLand` | INARA が船種を必須にするため、現在の船を学習するまでは送らない |
+| `Promotion` | `setCommanderRankPilot` | `Rank` と同じ形なので同じ変換を流用 |
+| `Powerplay` | `setCommanderRankPower` | |
+| `Cargo` | `setCommanderInventoryCargo` | イベント本体に `Inventory` が入っているときだけ(以降は `Cargo.json` 参照のみで在庫が入っていない) |
 | `Died` | `addCommanderCombatDeath` | 星系名は直近の移動イベントから補う(`Died` 自体には入っていない) |
+| `PVPKill` | `addCommanderCombatKill` | 星系名は直近の移動イベントから補う(未学習なら送らない) |
+| `Interdiction` / `Interdicted` / `EscapeInterdiction` | `addCommanderCombatInterdiction` / `...Interdicted` / `...InterdictionEscape` | 星系名は直近の移動イベントから補う |
+| `Loadout` | `setCommanderShip` + `setCommanderShipLoadout` | 現在の船の学習も兼ねる |
+| `ShipyardNew` / `ShipyardSell` / `ShipyardSwap` | `addCommanderShip` / `delCommanderShip` / `setCommanderShip` | |
+| `ShipyardTransfer` | `setCommanderShipTransfer` | 輸送先(= 今いるステーション)が未学習なら送らない |
+| `SetUserShipName` | `setCommanderShip` | 船名・識別子の更新 |
+| `StoredShips` | `setCommanderShip` ×N | 保管中の船を場所つきで列挙 |
+| `StoredModules` | `setCommanderStorageModules` | 保管モジュールの全量 |
+| `MissionAccepted` | `addCommanderMission` | 受注地は直近の移動イベントから補う |
+| `MissionCompleted` | `setCommanderMissionCompleted` + `addCommanderPermit` ×N | 報酬の許可証は独立したイベントとして送る |
+| `MissionFailed` / `MissionAbandoned` | `setCommanderMissionFailed` / `setCommanderMissionAbandoned` | |
+| `SuitLoadout` / `SwitchSuitLoadout` / `CreateSuitLoadout` | `setCommanderSuitLoadout` | いずれも装備一式の全量なので同じ変換 |
+| `RenameSuitLoadout` / `DeleteSuitLoadout` | `updateCommanderSuitLoadout` / `delCommanderSuitLoadout` | |
+| `CommunityGoal` | `setCommunityGoal` + `setCommanderCommunityGoalProgress` | ゴールごとに 2 イベント |
+| `Friends` | `addCommanderFriend` / `delCommanderFriend` | `Added` / `Lost` のみ(在席通知は送らない) |
 | `Shutdown` | (送信トリガのみ) | 溜まっているぶんを送り切る |
 
 `manifest.toml` の `events` に列挙したイベントしかプラグインへ届かない。イベントを
@@ -263,21 +283,22 @@ Journal を最高速で読み進める場面であり、`ReplayBatchSize`(100 �
 非ゼロのときだけ "Dropped" として表示される。これで
 `PLUGIN_WORK_QUEUE_CAPACITY` のチューニングが当て推量でなくなる。
 
-### 5. マッピングが INARA のごく一部
+### 5. マッピングの対象範囲
 
-INARA API v1 のイベントは 100 種類以上ある。このプラグインが対応しているのは
-上の対応表のとおり(Journal 側で 14 イベントを購読し、13 種類の INARA API を
-呼ぶ)。少なくとも次は未対応:
+INARA API v1 が文書化している送信イベントのうち、Journal から作れるものは
+上の対応表ですべてカバーしている(Journal 側で 40 イベント超を購読)。
+意図的に送らないものは:
 
-- 市場・カーゴ・資産(`Market`, `Cargo`, `Loadout`, `ShipyardBuy` ...)
-- ミッション(`MissionAccepted` / `MissionCompleted` / `MissionFailed`)
-- 探査(`Scan`, `SAASignalsFound`, `FSSDiscoveryScan`)
-- 戦闘(`PVPKill`, `Bounty`, `FactionKillBond`)
-- コミュニティゴール、艦隊キャリア、パワープレイ
+- `get*` 系(クエリであり、送信イベントではない)
+- 素材・カーゴの add/del アイテム差分(`setCommanderInventoryMaterialsItem`
+  など)。スナップショット(`Materials` / `Cargo`)が全量を上書きするので、
+  差分も送ると二重になるだけ
+- 汎用の `setCommanderInventory` 系(cargo / materials 特化版でカバー済み)
 
-`Market` / `Cargo` などは Journal ではなく別ファイル(`Market.json`,
-`Cargo.json`)に書かれる。**edlr は現在 `Journal.*.log` と `Status.json` しか
-監視していない**ので、これらを扱うにはコア側の監視対象を増やす必要がある。
+なお `Cargo` の在庫はイベント本体に `Inventory` が入っているときしか送れない。
+在庫の実体は `Cargo.json` に書かれるが、**edlr は現在 `Journal.*.log` と
+`Status.json` しか監視していない**ため、常時追従するにはコア側の監視対象を
+増やす必要がある。
 
 ### 6. Go プラグインのビルドがリポジトリに組み込まれていない
 

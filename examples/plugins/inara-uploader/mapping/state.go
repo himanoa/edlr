@@ -11,6 +11,16 @@ type State struct {
 	// LastSystem は直近に確認した星系。Died は星系名を含まないため、
 	// 移動系イベントから覚えておいたものを添える。
 	LastSystem string
+	// LastStation は直近にドッキングしたステーション。ミッション受注地や
+	// 船の輸送先(ShipyardTransfer)のように、Journal 側がステーション名を
+	// 含まないイベントに添える。
+	LastStation string
+
+	// ShipType / ShipID は現在搭乗している船。Touchdown(着陸)が INARA 側で
+	// 船種を要求するため、Loadout / Shipyard 系イベントから覚えておく。
+	// ShipID がポインタなのは「0 番の船」と「未学習」を区別するため。
+	ShipType string
+	ShipID   *int64
 
 	// ranks / progress は INARA の rankName をキーにした段位と進捗。
 	// Journal では別イベントで来るため、揃うまで送れない(ranks.go 参照)。

@@ -96,6 +96,24 @@ func (p progress) convert(st *State) []inara.Event {
 	return events
 }
 
+// powerplay はパワープレイの所属。
+type powerplay struct {
+	Power  string `json:"Power"`
+	Rank   int    `json:"Rank"`
+	Merits *int64 `json:"Merits"`
+}
+
+func (p powerplay) convert(*State) []inara.Event {
+	if p.Power == "" {
+		return nil
+	}
+	return []inara.Event{inara.New("setCommanderRankPower", struct {
+		Name   string `json:"powerName"`
+		Rank   int    `json:"rankValue"`
+		Merits *int64 `json:"meritsValue,omitempty"`
+	}{p.Power, p.Rank, p.Merits})}
+}
+
 // reputation は主要勢力への評判。Journal は -100..100 のパーセント、
 // INARA は -1..1 の比率。
 type reputation struct {

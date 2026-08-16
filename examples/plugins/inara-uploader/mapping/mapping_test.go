@@ -91,6 +91,8 @@ func TestSwitchingBackToLiveReenablesUploads(t *testing.T) {
 	}
 }
 
+func ptr[T any](v T) *T { return &v }
+
 // newLiveState は Live 版ゲートが開いた状態の State を作る(ゲートの
 // 挙動自体を検証しないテスト用)。
 func newLiveState() *State {

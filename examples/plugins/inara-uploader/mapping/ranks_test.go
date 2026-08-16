@@ -91,3 +91,28 @@ func TestEngineerProgressAcceptsBothShapes(t *testing.T) {
 		t.Errorf("unexpected payload: %s", body)
 	}
 }
+
+func TestPowerplaySendsThePowerRank(t *testing.T) {
+	st := newLiveState()
+	res := convertOne(t, st, "Powerplay", `{"Power":"Zemina Torval","Rank":3,"Merits":880,"TimePledged":86400}`)
+	if len(res.Events) != 1 || res.Events[0].Name != "setCommanderRankPower" {
+		t.Fatalf("unexpected events: %+v", res.Events)
+	}
+	body, _ := json.Marshal(res.Events[0].Data)
+	if string(body) != `{"powerName":"Zemina Torval","rankValue":3,"meritsValue":880}` {
+		t.Errorf("unexpected payload: %s", body)
+	}
+}
+
+// Promotion は Rank と同じ形(昇進した分野だけが入る)。
+func TestPromotionBehavesLikeRank(t *testing.T) {
+	st := newLiveState()
+	st.progress["combat"] = 0.1
+	res := convertOne(t, st, "Promotion", `{"Combat":6}`)
+	if len(res.Events) != 1 || res.Events[0].Name != "setCommanderRankPilot" {
+		t.Fatalf("unexpected events: %+v", res.Events)
+	}
+	if st.ranks["combat"] != 6 {
+		t.Errorf("Promotion must update the learned rank, got %v", st.ranks)
+	}
+}

@@ -7,6 +7,9 @@ type persisted struct {
 	CommanderName string             `json:"commanderName,omitempty"`
 	FrontierID    string             `json:"frontierID,omitempty"`
 	LastSystem    string             `json:"lastSystem,omitempty"`
+	LastStation   string             `json:"lastStation,omitempty"`
+	ShipType      string             `json:"shipType,omitempty"`
+	ShipID        *int64             `json:"shipID,omitempty"`
 	Ranks         map[string]int     `json:"ranks,omitempty"`
 	Progress      map[string]float64 `json:"progress,omitempty"`
 	GameVersion   string             `json:"gameVersion,omitempty"`
@@ -18,6 +21,9 @@ func (s *State) Marshal() ([]byte, error) {
 		CommanderName: s.CommanderName,
 		FrontierID:    s.FrontierID,
 		LastSystem:    s.LastSystem,
+		LastStation:   s.LastStation,
+		ShipType:      s.ShipType,
+		ShipID:        s.ShipID,
 		Ranks:         s.ranks,
 		Progress:      s.progress,
 		GameVersion:   s.gameVersion,
@@ -35,6 +41,9 @@ func UnmarshalState(data []byte) *State {
 	s.CommanderName = p.CommanderName
 	s.FrontierID = p.FrontierID
 	s.LastSystem = p.LastSystem
+	s.LastStation = p.LastStation
+	s.ShipType = p.ShipType
+	s.ShipID = p.ShipID
 	for k, v := range p.Ranks {
 		s.ranks[k] = v
 	}
