@@ -36,8 +36,9 @@ function LoadErrorFallback({ error }: FallbackProps) {
  * プラグイン拡張可能なダッシュボード。
  *
  * `dashboard/list` で grant 済みウィジェットを取得し、react-grid-layout の
- * グリッドに配置する。タイトルバーのドラッグで再配置、右下ハンドルでリサイズ
- * でき、配置は localStorage に保存する(manifest `size` は初期幅のみに使う)。
+ * グリッドに配置する。タイトルバーのドラッグで再配置、外周(4辺 + 4隅)の
+ * ハンドルでリサイズでき、配置は localStorage に保存する(manifest `size` は
+ * 初期幅のみに使う)。
  * イベントは親がここで一本の WS(`useEventStream`)から受け、各
  * `WidgetHost` がプラグインの events フィルタに従ってウィジェットへ配る。
  *
@@ -88,6 +89,8 @@ function WidgetGrid({ entries }: { entries: LogEntry[] }) {
           // カード全体をドラッグ可能にするとウィジェット内の操作と衝突する
           // ため、掴めるのはタイトルバーだけにする
           dragConfig={{ handle: ".widget-drag-handle" }}
+          // リサイズは既定の右下だけだと掴みにくいので、4辺 + 4隅の全部を出す
+          resizeConfig={{ handles: ["s", "w", "e", "n", "sw", "nw", "se", "ne"] }}
           onLayoutChange={(next) => {
             const items: LayoutItem[] = next.map(({ i, x, y, w, h }) => ({ i, x, y, w, h }));
             setLayout(items);

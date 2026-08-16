@@ -68,6 +68,15 @@ describe("Dashboard", () => {
     expect(card.querySelector(".widget-drag-handle")).not.toBeNull();
   });
 
+  it("exposes resize handles on every edge and corner", async () => {
+    widgets = [running];
+    render(<Provider><Dashboard /></Provider>);
+    await waitFor(() => expect(screen.getByText("Status")).toBeInTheDocument());
+    const card = document.querySelector(".widget-card") as HTMLElement;
+    // 右下だけでなく外周のどこからでも掴めること(4辺 + 4隅)
+    expect(card.querySelectorAll(".react-resizable-handle")).toHaveLength(8);
+  });
+
   it("shows guidance when no widgets are granted", async () => {
     render(<Provider><Dashboard /></Provider>);
     await waitFor(() =>
