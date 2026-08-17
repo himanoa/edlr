@@ -216,6 +216,10 @@ async fn main() {
     // させる。
     let router_for_plugins = router.clone();
     let handle = tokio::runtime::Handle::current();
+    // bus emit を WS へ転送するタップの受け渡しチャネル。attach は
+    // ServerState 構築後(下記)。それまでの emit はバッファ(256)に乗る。
+    let (bus_frames_tx, bus_frames_rx) =
+        tokio::sync::broadcast::channel::<std::sync::Arc<String>>(256);
     let registry_and_drivers = match (
         PluginHost::new(handle.clone()),
         DriverHost::new(handle.clone()),
@@ -261,6 +265,14 @@ async fn main() {
             );
 
             let bus = edlr_driver_channel::Bus::new();
+            {
+                let tx = bus_frames_tx.clone();
+                bus.set_tap(move |driver, topic, payload| {
+                    let _ = tx.send(std::sync::Arc::new(edlr_core::server::bus_ws_frame(
+                        driver, topic, payload,
+                    )));
+                });
+            }
             let drivers_dir_for_blocking = drivers_dir.clone();
             match tokio::task::spawn_blocking(move || {
                 let drivers = start_drivers(
@@ -319,6 +331,9 @@ async fn main() {
     // のは複製(`DriverRegistry` も `Clone` = 内部は `Arc` 共有で安価)。
     let state = server::ServerState::new(&router, registry.clone(), drivers.clone());
     state.attach_log_stream(log_rx);
+    // bus フレームもログと同じ ReplayBuffer + broadcast 経路に合流させる
+    state.attach_log_stream(bus_frames_rx);
+    drop(bus_frames_tx);
     tokio::spawn(server::serve(listener, state, args.ui_dir.clone()));
 
     let mut rx = router.subscribe();

@@ -1,5 +1,22 @@
 use super::*;
 
+/// bus フレームは kind="bus" で driver/topic/payload を運ぶ。payload は
+/// UTF-8 文字列(非 UTF-8 は lossy)。
+#[test]
+fn bus_ws_frame_carries_driver_topic_and_lossy_payload() {
+    let frame = bus_ws_frame("eddn", "upload-status", b"{\"ok\":true}");
+    let v: serde_json::Value = serde_json::from_str(&frame).unwrap();
+    assert_eq!(v["type"], "event");
+    assert_eq!(v["kind"], "bus");
+    assert_eq!(v["driver"], "eddn");
+    assert_eq!(v["topic"], "upload-status");
+    assert_eq!(v["payload"], "{\"ok\":true}");
+
+    let frame = bus_ws_frame("eddn", "upload-status", &[0xff, 0xfe]);
+    let v: serde_json::Value = serde_json::from_str(&frame).unwrap();
+    assert_eq!(v["payload"], "\u{fffd}\u{fffd}");
+}
+
 #[test]
 fn ws_json_carries_replay_for_journal_events_and_never_for_status() {
     let journal = Event::Journal {

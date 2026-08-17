@@ -43,6 +43,20 @@ pub fn event_to_ws_json(event: &Event) -> String {
     }
 }
 
+/// bus emit 1 件を WS フレーム JSON にする。UI は既に全ログ・全 journal
+/// イベントを見られる承認サーフェスなので、bus フレームも全クライアントへ
+/// 流す(設計書の承認モデル参照)。payload は UTF-8 文字列(lossy)。
+pub fn bus_ws_frame(driver: &str, topic: &str, payload: &[u8]) -> String {
+    serde_json::json!({
+        "type": "event",
+        "kind": "bus",
+        "driver": driver,
+        "topic": topic,
+        "payload": String::from_utf8_lossy(payload),
+    })
+    .to_string()
+}
+
 /// WS 配信用の共有状態。feeder タスクがロックを保持したままリングバッファ追記と
 /// broadcast 送信を行うため、新規接続のスナップショット+購読(同じくロック下)
 /// との間で欠落も重複も起きない。
