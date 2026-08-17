@@ -49,6 +49,21 @@ pub(super) fn list(
     }))
 }
 
+/// `drivers/bus-retained`: driver/topic の retained 値を返す。未保持は
+/// null(ウィジェットの初期表示用 -- 設計書参照)。payload は UTF-8 文字列
+/// (lossy、`bus_ws_frame` と同じ妥協)。
+pub(super) fn bus_retained(
+    drivers: &DriverRegistry,
+    params: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let driver = param_str(params, "driver")?;
+    let topic = param_str(params, "topic")?;
+    let payload = drivers
+        .bus_retained(driver, topic)
+        .map(|p| String::from_utf8_lossy(&p).into_owned());
+    Ok(serde_json::json!({ "payload": payload }))
+}
+
 pub(super) fn get_settings(
     drivers: &DriverRegistry,
     params: &serde_json::Value,

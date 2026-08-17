@@ -205,6 +205,7 @@ fn handle_drivers_rpc(
 ) -> Result<serde_json::Value, String> {
     match method {
         "list" => rpc_drivers::list(drivers, params),
+        "bus-retained" => rpc_drivers::bus_retained(drivers, params),
         "get-settings" => rpc_drivers::get_settings(drivers, params),
         "set-settings" => rpc_drivers::set_settings(drivers, params),
         "set-capabilities" => rpc_drivers::set_capabilities(drivers, params),

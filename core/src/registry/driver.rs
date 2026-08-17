@@ -333,6 +333,12 @@ impl DriverRegistry {
         self.filesystem_service.filesystem(id)
     }
 
+    /// UI ウィジェット向け: driver/topic の retained 値。未保持・未知の
+    /// driver/topic は None(エラーにしない -- 表示側は「値なし」扱い)。
+    pub fn bus_retained(&self, driver_id: &str, topic: &str) -> Option<Vec<u8>> {
+        self.bus.retained_for(driver_id, topic)
+    }
+
     /// `id` のドライバの `name` ファイルアクセスルートの設定を検証・永続化し、
     /// 稼働中ドライバが参照する `filesystem_json` を作り直してから最新の
     /// `FilesystemInfo` 一覧を返す。実体は

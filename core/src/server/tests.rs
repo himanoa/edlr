@@ -17,6 +17,43 @@ fn bus_ws_frame_carries_driver_topic_and_lossy_payload() {
     assert_eq!(v["payload"], "\u{fffd}\u{fffd}");
 }
 
+/// drivers/bus-retained は retain 済みの最新値を返し、未保持なら null。
+#[test]
+fn drivers_bus_retained_returns_the_value_or_null() {
+    let bus = edlr_driver_channel::Bus::new();
+    let (tx, _rx) = std::sync::mpsc::sync_channel::<edlr_driver_channel::Message>(4);
+    bus.register_driver(
+        "eddn",
+        vec![edlr_driver_channel::TopicSpec {
+            name: "upload-status".into(),
+            retain: true,
+            description: String::new(),
+        }],
+        tx,
+    );
+    bus.emit("eddn", "upload-status", b"{\"ok\":true}".to_vec())
+        .unwrap();
+    let drivers = crate::registry::driver::tests::test_registry(bus);
+
+    let result = handle_rpc_with_drivers(
+        None,
+        Some(&drivers),
+        "drivers/bus-retained",
+        &serde_json::json!({"driver": "eddn", "topic": "upload-status"}),
+    )
+    .unwrap();
+    assert_eq!(result["payload"], "{\"ok\":true}");
+
+    let result = handle_rpc_with_drivers(
+        None,
+        Some(&drivers),
+        "drivers/bus-retained",
+        &serde_json::json!({"driver": "eddn", "topic": "nope"}),
+    )
+    .unwrap();
+    assert_eq!(result["payload"], serde_json::Value::Null);
+}
+
 #[test]
 fn ws_json_carries_replay_for_journal_events_and_never_for_status() {
     let journal = Event::Journal {
