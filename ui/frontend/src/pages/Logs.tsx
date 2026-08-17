@@ -80,6 +80,7 @@ export default function Logs() {
     journal: true,
     status: true,
     log: true,
+    bus: true,
   });
   const [levels, setLevels] = useState<Record<Level, boolean>>({
     error: true,

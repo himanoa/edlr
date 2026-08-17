@@ -189,6 +189,14 @@ export class RpcClient {
     return this.call<{ widgets: DashboardListEntry[] }>("dashboard/list");
   }
 
+  /** driver/topic の retained 値(`drivers/bus-retained`)。未保持なら null。 */
+  busRetained(driver: string, topic: string): Promise<string | null> {
+    return this.call<{ payload: string | null }>("drivers/bus-retained", {
+      driver,
+      topic,
+    }).then((r) => r.payload);
+  }
+
   private rejectAllPending(reason: unknown): void {
     for (const [id, pending] of this.pending) {
       clearTimeout(pending.timer);

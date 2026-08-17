@@ -65,6 +65,34 @@ describe("WidgetHost", () => {
     await waitFor(() => expect(received).toHaveLength(2));
   });
 
+  it("delivers bus frames to onBus listeners regardless of the events filter", async () => {
+    const received: Array<{ driver: string; topic: string; payload: string }> = [];
+    const load = async () => ({
+      default: (el: HTMLElement, api: WidgetApi) => {
+        el.textContent = "widget body";
+        api.onBus((msg) => received.push(msg));
+      },
+    });
+    const busEntry: LogEntry = {
+      id: 1,
+      kind: "bus",
+      driver: "eddn",
+      topic: "upload-status",
+      payload: '{"ok":true}',
+      event: "eddn/upload-status",
+      raw: {},
+    };
+    // entry.events は ["FSDJump"] のままでも bus フレームは届く
+    render(<WidgetHost entry={entry} entries={[busEntry, jump]} load={load} />);
+    await screen.findByText("widget body");
+    await waitFor(() => expect(received).toHaveLength(1));
+    expect(received[0]).toEqual({
+      driver: "eddn",
+      topic: "upload-status",
+      payload: '{"ok":true}',
+    });
+  });
+
   it("calls cleanup on unmount", async () => {
     const captured = { cleanups: 0 } as Parameters<typeof fakeLoader>[0];
     const { unmount } = render(
