@@ -149,6 +149,40 @@ test("a remote/unexpected socket close rejects all pending calls with a remote-c
 
   await expect(p1).rejects.toThrow(/websocket closed/i);
   await expect(p2).rejects.toThrow(/websocket closed/i);
+  client.close();
+});
+
+test("reconnects after a remote close; later calls queue and flush on the new socket", async () => {
+  vi.useFakeTimers();
+  const client = new RpcClient("ws://x/ws");
+  const ws1 = FakeWebSocket.instances[0];
+  ws1.triggerOpen();
+
+  ws1.triggerClose();
+  await vi.advanceTimersByTimeAsync(1000);
+  expect(FakeWebSocket.instances).toHaveLength(2);
+
+  const ws2 = FakeWebSocket.instances[1];
+  const promise = client.call("after-reconnect");
+  expect(ws2.sent).toHaveLength(0); // 未接続の間はキュー
+
+  ws2.triggerOpen();
+  expect(ws2.sent).toHaveLength(1);
+
+  ws2.triggerMessage({ type: "rpc-result", id: 1, result: "ok" });
+  await expect(promise).resolves.toBe("ok");
+  client.close();
+});
+
+test("close() cancels reconnection", async () => {
+  vi.useFakeTimers();
+  const client = new RpcClient("ws://x/ws");
+  FakeWebSocket.instances[0].triggerOpen();
+
+  FakeWebSocket.instances[0].triggerClose();
+  client.close();
+  await vi.advanceTimersByTimeAsync(5000);
+  expect(FakeWebSocket.instances).toHaveLength(1);
 });
 
 test("client.close() rejects in-flight calls with a caller-initiated message", async () => {

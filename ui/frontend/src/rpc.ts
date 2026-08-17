@@ -7,6 +7,7 @@ import type {
 } from "./types/plugin";
 
 const DEFAULT_TIMEOUT_MS = 5000;
+const RECONNECT_DELAY_MS = 1000;
 
 export type RpcResponse =
   | { type: "rpc-result"; id: number; result: unknown }
@@ -44,19 +45,28 @@ export class RpcClient {
   private queue: string[] = [];
   private open = false;
   private closed = false;
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private readonly url: string;
   private readonly timeoutMs: number;
 
   constructor(url: string, timeoutMs: number = DEFAULT_TIMEOUT_MS) {
+    this.url = url;
     this.timeoutMs = timeoutMs;
-    this.ws = new WebSocket(url);
-    this.ws.onopen = () => {
+    this.ws = this.connect();
+  }
+
+  private connect(): WebSocket {
+    const ws = new WebSocket(this.url);
+    ws.onopen = () => {
+      if (ws !== this.ws) return; // 旧ソケットの遅延イベント
       this.open = true;
       for (const frame of this.queue) {
         this.ws.send(frame);
       }
       this.queue = [];
     };
-    this.ws.onmessage = (event: { data: unknown }) => {
+    ws.onmessage = (event: { data: unknown }) => {
+      if (ws !== this.ws) return;
       const response = parseRpcResponse(String(event.data));
       if (!response) return;
       const pending = this.pending.get(response.id);
@@ -69,13 +79,21 @@ export class RpcClient {
         pending.reject(new Error(response.error));
       }
     };
-    this.ws.onclose = () => {
+    ws.onclose = () => {
       // caller-initiated close() already rejected pending calls with "RpcClient closed"
       // before calling ws.close(); this handler only fires for remote/unexpected closes.
-      if (this.closed) return;
-      this.closed = true;
+      if (this.closed || ws !== this.ws) return;
+      // デーモン再起動などの切断では閉じきりにせず再接続する。in-flight は
+      // 応答が来ないので reject し、以後の call はキューに積んで再接続後に流す。
+      this.open = false;
+      this.queue = [];
       this.rejectAllPending(new Error("WebSocket closed"));
+      this.reconnectTimer = setTimeout(() => {
+        this.reconnectTimer = null;
+        this.ws = this.connect();
+      }, RECONNECT_DELAY_MS);
     };
+    return ws;
   }
 
   call<T = unknown>(method: string, params?: unknown): Promise<T> {
@@ -110,6 +128,7 @@ export class RpcClient {
   close(): void {
     if (this.closed) return;
     this.closed = true;
+    if (this.reconnectTimer !== null) clearTimeout(this.reconnectTimer);
     this.rejectAllPending(new Error("RpcClient closed"));
     this.ws.close();
   }
