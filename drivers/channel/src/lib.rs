@@ -123,10 +123,15 @@ struct Subscription {
     sender: SyncSender<Delivery>,
 }
 
+/// emit 成功を外へ知らせるタップ(UI への WS 転送用)。承認判定を持たない
+/// 本クレートの分担どおり、タップにも判定はない(誰に見せるかは core 側)。
+type BusTap = Arc<dyn Fn(&str, &str, &[u8]) + Send + Sync>;
+
 #[derive(Default)]
 struct BusState {
     drivers: BTreeMap<String, DriverSlot>,
     subscriptions: Vec<Subscription>,
+    tap: Option<BusTap>,
 }
 
 /// プラグインとドライバの間のメッセージ経路。`Clone` は内部状態を共有する。
@@ -151,6 +156,12 @@ impl Bus {
         self.state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// emit 成功のたびに `(driver_id, topic, payload)` で呼ばれるタップを
+    /// 設定する。1 本だけ(2 回目は上書き)。バスのロック外で呼ばれる。
+    pub fn set_tap(&self, tap: impl Fn(&str, &str, &[u8]) + Send + Sync + 'static) {
+        self.lock_state().tap = Some(Arc::new(tap));
     }
 
     pub fn register_driver(
@@ -360,6 +371,12 @@ impl Bus {
                 keep
             });
         }
+        // タップはロック外で呼ぶ(タップ実装がバスを再度触っても死なない)。
+        let tap = state.tap.clone();
+        drop(state);
+        if let Some(tap) = tap {
+            tap(driver_id, topic, &payload);
+        }
         Ok(())
     }
 
@@ -547,6 +564,32 @@ mod tests {
         assert_eq!(
             bus.get("ed-state", "current-system").unwrap(),
             Some(b"Sol".to_vec())
+        );
+    }
+
+    #[test]
+    fn emit_calls_the_tap_with_driver_topic_and_payload() {
+        let (bus, _rx) = bus_with_driver(4);
+        let seen = Arc::new(Mutex::new(Vec::<(String, String, Vec<u8>)>::new()));
+        let seen_in_tap = seen.clone();
+        bus.set_tap(move |driver, topic, payload| {
+            seen_in_tap
+                .lock()
+                .unwrap()
+                .push((driver.to_string(), topic.to_string(), payload.to_vec()));
+        });
+        bus.emit("ed-state", "current-system", b"Sol".to_vec())
+            .unwrap();
+        // 失敗した emit(未宣言トピック)ではタップを呼ばない
+        bus.emit("ed-state", "nope", b"x".to_vec()).unwrap_err();
+        let seen = seen.lock().unwrap();
+        assert_eq!(
+            *seen,
+            vec![(
+                "ed-state".to_string(),
+                "current-system".to_string(),
+                b"Sol".to_vec()
+            )]
         );
     }
 
