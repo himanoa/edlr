@@ -1,6 +1,6 @@
 export interface LogEntry {
   id: number;
-  kind: "journal" | "status" | "log";
+  kind: "journal" | "status" | "log" | "bus";
   timestamp?: string;
   event?: string;
   /** kind === "log" のみ: info | warn | error */
@@ -9,6 +9,10 @@ export interface LogEntry {
   message?: string;
   /** kind === "log" のみ: 発生元モジュールパス */
   target?: string;
+  /** kind === "bus" のみ: 送信元ドライバ id / トピック名 / UTF-8 payload */
+  driver?: string;
+  topic?: string;
+  payload?: string;
   raw: unknown;
 }
 

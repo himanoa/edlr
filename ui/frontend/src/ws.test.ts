@@ -48,6 +48,31 @@ test("rejects log frames without level or message", () => {
   ).toBeNull();
 });
 
+test("parses a bus frame", () => {
+  const msg = parseWsMessage(
+    JSON.stringify({
+      type: "event",
+      kind: "bus",
+      driver: "eddn",
+      topic: "upload-status",
+      payload: '{"ok":true}',
+    }),
+  );
+  expect(msg).toEqual({
+    type: "event",
+    kind: "bus",
+    driver: "eddn",
+    topic: "upload-status",
+    payload: '{"ok":true}',
+  });
+});
+
+test("rejects a bus frame with a missing field", () => {
+  expect(
+    parseWsMessage(JSON.stringify({ type: "event", kind: "bus", driver: "eddn" })),
+  ).toBeNull();
+});
+
 test("returns null for garbage or unknown types", () => {
   expect(parseWsMessage("not json")).toBeNull();
   expect(parseWsMessage('{"type":"mystery"}')).toBeNull();

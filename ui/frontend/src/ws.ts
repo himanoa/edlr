@@ -12,7 +12,8 @@ export type WsMessage =
       level: string;
       target?: string;
       message: string;
-    };
+    }
+  | { type: "event"; kind: "bus"; driver: string; topic: string; payload: string };
 
 export type ConnectionState = "connecting" | "open" | "closed";
 
@@ -54,6 +55,16 @@ export function parseWsMessage(data: string): WsMessage | null {
         ...(typeof msg.target === "string" ? { target: msg.target } : {}),
         message: msg.message,
       };
+    }
+    return null;
+  }
+  if (msg.type === "event" && msg.kind === "bus") {
+    if (
+      typeof msg.driver === "string" &&
+      typeof msg.topic === "string" &&
+      typeof msg.payload === "string"
+    ) {
+      return { type: "event", kind: "bus", driver: msg.driver, topic: msg.topic, payload: msg.payload };
     }
     return null;
   }
@@ -131,7 +142,19 @@ export function useEventStream(url: string): {
                   // raw 展開(クリック時)にも同じ内容を出す
                   raw: { level: msg.level, target: msg.target, message: msg.message },
                 }
-              : { id: nextId.current++, kind: "status", raw: msg.raw };
+              : msg.kind === "bus"
+                ? {
+                    id: nextId.current++,
+                    kind: "bus",
+                    driver: msg.driver,
+                    topic: msg.topic,
+                    payload: msg.payload,
+                    // Logs の行表示(entry.event)と検索がそのまま効く形にする
+                    event: `${msg.driver}/${msg.topic}`,
+                    // raw 展開(クリック時)で payload を読めるように
+                    raw: { driver: msg.driver, topic: msg.topic, payload: msg.payload },
+                  }
+                : { id: nextId.current++, kind: "status", raw: msg.raw };
         setEntries((prev) => {
           const next = [...prev, entry];
           return next.length > CLIENT_BUFFER_LIMIT

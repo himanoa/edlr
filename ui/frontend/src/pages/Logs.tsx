@@ -20,6 +20,7 @@ const KIND_STYLE: Record<string, string> = {
   journal: "text-sky-400",
   status: "text-violet-400",
   log: "text-foreground",
+  bus: "text-emerald-400",
 };
 
 const LEVEL_STYLE: Record<string, string> = {
@@ -56,7 +57,7 @@ function Row({ entry }: { entry: LogEntry }) {
   );
 }
 
-const KINDS = ["journal", "status", "log"] as const;
+const KINDS = ["journal", "status", "log", "bus"] as const;
 type Kind = (typeof KINDS)[number];
 
 const LEVELS = ["error", "warn", "info", "debug", "trace"] as const;
