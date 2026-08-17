@@ -133,6 +133,36 @@
   }
 }
 
+/* ウィジェットのリサイズハンドル(4辺)を点ではなく辺全体に広げる。
+   四隅は react-grid-layout デフォルトの 20px 角のままなので、辺側は
+   両端 20px を空けて角ハンドルと重ねない。 */
+.react-grid-item > .react-resizable-handle.react-resizable-handle-n,
+.react-grid-item > .react-resizable-handle.react-resizable-handle-s {
+  left: 20px;
+  right: 20px;
+  width: auto;
+  margin-left: 0;
+  height: 12px;
+  transform: none;
+}
+.react-grid-item > .react-resizable-handle.react-resizable-handle-e,
+.react-grid-item > .react-resizable-handle.react-resizable-handle-w {
+  top: 20px;
+  bottom: 20px;
+  height: auto;
+  margin-top: 0;
+  width: 12px;
+  transform: none;
+}
+/* 引き伸ばした辺ハンドルでは矢印グリフが端に寄って不自然なので消す
+   (カーソル形状で分かる) */
+.react-grid-item > .react-resizable-handle.react-resizable-handle-n::after,
+.react-grid-item > .react-resizable-handle.react-resizable-handle-s::after,
+.react-grid-item > .react-resizable-handle.react-resizable-handle-e::after,
+.react-grid-item > .react-resizable-handle.react-resizable-handle-w::after {
+  content: none;
+}
+
 /* HUD 風に罫線を太く。デフォルト幅の border 系ユーティリティだけ 2px に
    上書きする(border-2 等の明示指定はそのまま)。 */
 @layer utilities {
