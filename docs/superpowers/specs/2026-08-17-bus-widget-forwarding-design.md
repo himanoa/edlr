@@ -34,7 +34,8 @@ bus 転送の実装。最初のユースケースは eddn-sender プラグイン
 
 ### core: retained RPC
 
-- 新規 RPC `bus/retained`。params `{driver, topic}`、結果は
+- 新規 RPC `drivers/bus-retained`（既存の `drivers/*` dispatch に相乗り）。
+  params `{driver, topic}`、結果は
   `payload`（文字列）または `null`。実装は `Bus::retained_for` を呼ぶだけの
   read-only ハンドラ。
 - 必要な理由: UI を後から開いた場合、最後の emit が ReplayBuffer の窓から
