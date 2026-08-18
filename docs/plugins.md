@@ -541,6 +541,16 @@ manifest.toml と違い、layout ファイルの不備は**プラグインのロ
   捨てられ、その捨てられた側の種別で数えられる。`delivery = "reliable"` の
   プラグインは何も捨てないため常に 0。
 
+## Profiler タブ
+
+UI の Profiler タブでは、プラグイン/ドライバごとの wasm 呼び出し所要時間・
+作業キュー長・ドロップ件数・メモリ使用量を確認できる(RPC は
+`profiler/summary` / `profiler/series`)。計測した生サンプルは間引かずに
+すべて `<state-base>/profiler/YYYY-MM-DD.jsonl` に残るため、DuckDB の
+`read_json_auto('profiler/*.jsonl')` で任意の切り口から SQL 分析できる。
+ローテーション(保持日数設定)は未実装で、ファイルは日付ごとに増え続ける
+(現時点ではスコープ外)。
+
 ## プラグインが無効化される条件
 
 wasm 呼び出しが失敗したとき、ホストは 2 つの原因を区別する:
