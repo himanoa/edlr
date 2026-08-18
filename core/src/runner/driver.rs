@@ -314,7 +314,10 @@ fn load_and_run_driver(
 
     // `work_tx` はこのすぐ後の `thread::spawn` に move されるので、gauge 用の
     // プローブは move の前に取っておく(`WorkSender::len_probe` は `&self`
-    // で、`Arc` 越しなので `work_tx` の生存とは無関係に使える)。
+    // で、`Arc` 越しなので `work_tx` の生存とは無関係に使える)。gauge の
+    // 登録自体は `run_driver_thread` 内(Running 送信直後)で行う -- register/
+    // unregister を同じスレッドで完結させ、Running 送信直後にスレッドが
+    // 死んでも register だけ残る順序を作らないため。
     let queue_probe = work_tx.len_probe();
     // ドライバはインスタンス再作成が無い(プラグイン側と違い `load` は
     // 1 回だけ)ので、`memory_gauge` もこの 1 回きりの `Arc` でよい。
@@ -347,6 +350,7 @@ fn load_and_run_driver(
                 ready_tx,
                 memory_gauge,
                 profiler,
+                queue_probe,
             );
         }
     });
@@ -354,24 +358,6 @@ fn load_and_run_driver(
     let state = ready_rx.recv().unwrap_or_else(|_| DriverState::Disabled {
         reason: "driver thread exited before reporting an init result".to_string(),
     });
-
-    if matches!(state, DriverState::Running) {
-        // gauge 登録は Running のときだけ(Disabled は work_tx が無い/意味を
-        // 持たないので登録しようがない)。対応する unregister は
-        // `run_driver_thread` がスレッド終了直前に自分で呼ぶ(trap による
-        // disable・`Disconnected` の両方をここ 1 箇所でカバーする、
-        // `crate::runner::plugin::event_loop::run_plugin_thread` と対称)。
-        // **万一この unregister が漏れると**、死んだドライバ id の gauge が
-        // 毎秒の走査で拾われ続け、更新されない stale なサンプルを永遠に
-        // 吐き続ける(次のデーモン再起動まで気付きにくい)。
-        profiler.register_gauge(GaugeSource {
-            subject: Subject::Driver,
-            id: manifest.id.clone(),
-            queue: queue_probe,
-            drops: None,
-            memory_bytes: memory_gauge,
-        });
-    }
 
     if let DriverState::Disabled { reason } = &state {
         // 起動時の失敗(load/init の trap 等)はここが唯一のログ地点
@@ -417,6 +403,7 @@ fn run_driver_thread(
     ready_tx: std_mpsc::Sender<DriverState>,
     memory_gauge: Arc<AtomicU64>,
     profiler: Profiler,
+    queue_probe: crate::runner::plugin::queue::QueueLenProbe,
 ) {
     // submit 系ジョブの共有状態。ドライバはインスタンス再作成が無いため
     // 世代は進まないが、プラグイン側と同じ型・同じ照合で対称に扱う。
@@ -435,7 +422,7 @@ fn run_driver_thread(
         work_tx,
         jobs.clone(),
     );
-    let mut instance = match host.load(&entry_path, ctx, memory_gauge) {
+    let mut instance = match host.load(&entry_path, ctx, memory_gauge.clone()) {
         Ok(instance) => instance,
         Err(e) => {
             let _ = ready_tx.send(DriverState::Disabled {
@@ -468,6 +455,23 @@ fn run_driver_thread(
         // start_drivers 側が既に受信を諦めている(通常起こらない)。
         return;
     }
+
+    // gauge 登録は「Running を送った直後・ループに入る前」にこのスレッド
+    // 自身が行う(load_and_run_driver 側の親スレッドではない)。register/
+    // unregister の両方をこのスレッド内で完結させることで、Running 送信直後に
+    // このスレッドが死んでも「登録だけ残る」順序が起こらないようにする
+    // (対応する unregister はこの関数の末尾、`crate::runner::plugin::
+    // event_loop::run_plugin_thread` と対称)。
+    // **万一この unregister が漏れると**、死んだドライバ id の gauge が
+    // 毎秒の走査で拾われ続け、更新されない stale なサンプルを永遠に
+    // 吐き続ける(次のデーモン再起動まで気付きにくい)。
+    profiler.register_gauge(GaugeSource {
+        subject: Subject::Driver,
+        id: manifest.id.clone(),
+        queue: queue_probe,
+        drops: None,
+        memory_bytes: memory_gauge,
+    });
 
     // 全センダー切断(`Err`)は起こらない想定(自分の `DriverCtx` が送信側を
     // 持つため)だが、起きても素直に終了する。通常の終了経路は
@@ -536,8 +540,8 @@ fn run_driver_thread(
     // ループに入った後の全ての exit(`Disconnected`・trap による disable・
     // 全センダー切断)がここへ合流する。ループより前の 3 箇所の早期
     // `return`(load 失敗・init 失敗・`ready_tx.send` 失敗)はここを通らないが、
-    // いずれも `load_and_run_driver` 側の `register_gauge`(Running 確定後)
-    // より前なので、登録されていないものを解除し損ねる心配はない。
+    // いずれも上の `register_gauge`(Running 送信直後)より前なので、
+    // 登録されていないものを解除し損ねる心配はない。
     // `crate::runner::plugin::event_loop::run_plugin_thread` 末尾と同じ理由で、
     // 登録の有無に関わらず無条件に呼んでよい。
     profiler.unregister_gauge(Subject::Driver, &manifest.id);

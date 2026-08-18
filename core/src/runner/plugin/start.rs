@@ -12,7 +12,7 @@ use edlr_driver_channel::{Bus, Delivery};
 use crate::capability::grants::GrantsStore;
 use crate::host::plugin::PluginHost;
 use crate::manifest::{load_manifest, Manifest};
-use crate::profiler::{GaugeSource, Profiler, Subject};
+use crate::profiler::Profiler;
 use crate::registry::driver::DriverRegistry;
 use crate::registry::plugin::{PluginEntry, PluginState, Registry};
 use crate::router::Router;
@@ -229,6 +229,12 @@ fn load_and_run_plugin(
     // のドキュメント参照)。
     let memory_gauge = Arc::new(AtomicU64::new(0));
 
+    // 作業キュー満杯で捨てた件数を数える窓口。両方の購読タスク(書き手)と
+    // `plugins/list`(読み手)が共有する。gauge 登録(下の thread::spawn 内)と
+    // `registry.register_drop_counters` の両方が同じ `Arc` を見るように、
+    // スレッド起動より前に作っておく。
+    let drops = DropCounters::new();
+
     let thread_handle = thread::spawn({
         let host = host.clone();
         let manifest = manifest.clone();
@@ -243,6 +249,7 @@ fn load_and_run_plugin(
         let schedule_store = schedule_store.clone();
         let memory_gauge = memory_gauge.clone();
         let profiler = profiler.clone();
+        let drops = drops.clone();
         // `submit-send` の完了通知(`PluginWork::JobComplete`)を自分の
         // キューへ push するため、スレッド自身も送信側を持つ
         // (`HostCtx::submit_send` が spawn するタスクへ配る)。
@@ -266,6 +273,7 @@ fn load_and_run_plugin(
                 schedule_store,
                 memory_gauge,
                 profiler,
+                drops,
             );
         }
     });
@@ -304,27 +312,12 @@ fn load_and_run_plugin(
         // 自体はもう終了しているか、終了する寸前でしかない。
         registry.register_plugin_thread(&manifest.id, work_tx.clone(), thread_handle, stop_flag);
 
-        // 作業キュー満杯で捨てた件数を数える窓口。両方の購読タスク(書き手)と
-        // `plugins/list`(読み手)が共有する。
-        let drops = DropCounters::new();
+        // gauge の登録は `run_plugin_thread` 自身が Running 送信直後に行う
+        // (register/unregister を同じスレッド内で完結させ、Running 送信直後に
+        // そのスレッドが死んでも register だけ残る順序を作らないため。
+        // `event_loop::run_plugin_thread` 参照)。ここでは `drops` を
+        // registry へ登録するだけでよい。
         registry.register_drop_counters(&manifest.id, drops.clone());
-
-        // gauge 登録は「起動して Running になった」タイミングでのみ行う
-        // (Disabled のままなら work_tx/drops もこのブロックの外なので登録
-        // しようがない)。対応する unregister は `run_plugin_thread` がスレッド
-        // 終了直前(trap による disable・`Stop` の両方)に自分で呼ぶ
-        // (`event_loop::run_plugin_thread` のループ末尾のコメント参照)。
-        // **万一この unregister が漏れると**、死んだプラグイン id の gauge が
-        // 毎秒の走査で拾われ続け、queue_len/memory_bytes が更新されない
-        // stale なサンプルを永遠に吐き続ける(次のデーモン再起動まで気付き
-        // にくい)。
-        profiler.register_gauge(GaugeSource {
-            subject: Subject::Plugin,
-            id: manifest.id.clone(),
-            queue: work_tx.len_probe(),
-            drops: Some(drops.clone()),
-            memory_bytes: memory_gauge.clone(),
-        });
 
         spawn_event_subscriber(
             manifest.clone(),

@@ -13,8 +13,9 @@ use edlr_driver_channel::Bus;
 use crate::event::Event;
 use crate::host::plugin::{HostCtx, PluginCallError, PluginHost, PluginInstance, PluginJobs};
 use crate::manifest::Manifest;
-use crate::profiler::{self, CallKind, Profiler, Sample, Subject};
+use crate::profiler::{self, CallKind, GaugeSource, Profiler, Sample, Subject};
 use crate::registry::plugin::{PluginState, Registry};
+use crate::runtime::dropped::DropCounters;
 use crate::schedule::store::ScheduleStore;
 use crate::schedule::{Clock, ScheduleState, ScheduleView};
 
@@ -105,6 +106,7 @@ pub(super) fn run_plugin_thread(
     schedule_store: Arc<ScheduleStore>,
     memory_gauge: Arc<AtomicU64>,
     profiler: Profiler,
+    drops: Arc<DropCounters>,
 ) {
     // submit 系ジョブの共有状態。インスタンス再作成をまたいで同じ `Arc` を
     // 各 `HostCtx` へ配る(`PluginJobs` のドキュメントコメント参照)。
@@ -160,6 +162,22 @@ pub(super) fn run_plugin_thread(
         // start_plugins 側が既に受信を諦めている(通常起こらない)。
         return;
     }
+
+    // gauge 登録は「Running を送った直後・ループに入る前」にこのスレッド
+    // 自身が行う(呼び出し元の `start_plugins` 側の親スレッドではない)。
+    // register/unregister を同じスレッド内で完結させることで、Running 送信
+    // 直後にこのスレッドが死んでも「登録だけ残る」順序が起こらないようにする
+    // (対応する unregister はこの関数の末尾)。
+    // **万一この unregister が漏れると**、死んだプラグイン id の gauge が
+    // 毎秒の走査で拾われ続け、queue_len/memory_bytes が更新されない stale な
+    // サンプルを永遠に吐き続ける(次のデーモン再起動まで気付きにくい)。
+    profiler.register_gauge(GaugeSource {
+        subject: Subject::Plugin,
+        id: manifest.id.clone(),
+        queue: work_tx.len_probe(),
+        drops: Some(drops.clone()),
+        memory_bytes: memory_gauge.clone(),
+    });
 
     // 時計はここ(ループ側)でのみ読む。`ScheduleState` 自身は時刻を
     // 引数でしか受け取らない(`schedule` モジュールのドキュメントコメント
@@ -427,11 +445,11 @@ pub(super) fn run_plugin_thread(
 
     // ループに入った後の全ての `break`(trap による disable、`Stop`、
     // 送信側全断)がここへ合流する。ループより前の 2 箇所の早期 `return`
-    // (load/init 失敗)はここを通らないが、どちらも `load_and_run_plugin` 側の
-    // `register_gauge` より前(`ready_tx.send(Running)` にすら届いていない)
-    // なので、登録されていないものを解除し損ねる心配はない。gauge は
-    // 「登録している場合だけ」意味を持つ操作なので、未登録でも無条件に
-    // 呼んで構わない(`Profiler::unregister_gauge` は無ければ何もしない)。
+    // (load/init 失敗)はここを通らないが、どちらも上の `register_gauge`
+    // より前(`ready_tx.send(Running)` にすら届いていない)なので、登録され
+    // ていないものを解除し損ねる心配はない。gauge は「登録している場合だけ」
+    // 意味を持つ操作なので、未登録でも無条件に呼んで構わない
+    // (`Profiler::unregister_gauge` は無ければ何もしない)。
     profiler.unregister_gauge(Subject::Plugin, &manifest.id);
 }
 
