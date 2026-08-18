@@ -314,6 +314,10 @@ fn load_and_run_plugin(
         // しようがない)。対応する unregister は `run_plugin_thread` がスレッド
         // 終了直前(trap による disable・`Stop` の両方)に自分で呼ぶ
         // (`event_loop::run_plugin_thread` のループ末尾のコメント参照)。
+        // **万一この unregister が漏れると**、死んだプラグイン id の gauge が
+        // 毎秒の走査で拾われ続け、queue_len/memory_bytes が更新されない
+        // stale なサンプルを永遠に吐き続ける(次のデーモン再起動まで気付き
+        // にくい)。
         profiler.register_gauge(GaugeSource {
             subject: Subject::Plugin,
             id: manifest.id.clone(),

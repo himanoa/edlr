@@ -70,7 +70,7 @@ pub(super) fn deadline_verdict(strikes: u32) -> DeadlineVerdict {
 /// 世代を進めるため、submit 時点の世代と現在の世代が一致しない完了は
 /// 「旧インスタンスのジョブ」であり、状態を失った新インスタンスへは
 /// 届けない(issue-sizx 決定 6)。
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 enum JobCompletionVerdict {
     Deliver,
     DropStale,
@@ -320,6 +320,17 @@ pub(super) fn run_plugin_thread(
         match next_action(recv_result, due) {
             LoopAction::Handle(work) => {
                 let started = Instant::now();
+                // `JobComplete` の verdict はここで 1 回だけ判定する: match
+                // アーム内でも使うし、下の「実際に wasm を呼んだか」の判定
+                // (`DropStale` は `Ok(())` を返すだけで wasm を呼ばない)にも
+                // 使う。呼んでいない仕事を計測サンプルとして記録すると、
+                // duration≈0 の偽の `Ok` が Logs/Profiler に混じる。
+                let job_verdict = match &work {
+                    PluginWork::JobComplete { generation, .. } => {
+                        Some(job_completion_verdict(*generation, jobs.current_generation()))
+                    }
+                    _ => None,
+                };
                 let result = match &work {
                     PluginWork::Event(event) => {
                         let (kind, timestamp, name, payload_json, replay) = event_params(event);
@@ -336,26 +347,24 @@ pub(super) fn run_plugin_thread(
                         &delivery.topic,
                         &delivery.payload,
                     ),
-                    PluginWork::JobComplete {
-                        generation,
-                        job_id,
-                        result_json,
-                    } => match job_completion_verdict(*generation, jobs.current_generation()) {
-                        JobCompletionVerdict::Deliver => {
-                            instance.call_on_job_complete(*job_id, result_json)
+                    PluginWork::JobComplete { job_id, result_json, .. } => {
+                        match job_verdict.expect("job_verdict is Some for PluginWork::JobComplete") {
+                            JobCompletionVerdict::Deliver => {
+                                instance.call_on_job_complete(*job_id, result_json)
+                            }
+                            JobCompletionVerdict::DropStale => {
+                                // 旧世代のインスタンスが submit したジョブ。新
+                                // インスタンスはそのジョブを知らない(wasm 線形
+                                // メモリごと状態を失っている)ので、呼ばずに捨てる。
+                                tracing::debug!(
+                                    plugin_id = %manifest.id,
+                                    job_id,
+                                    "dropping a job completion from a previous instance generation"
+                                );
+                                Ok(())
+                            }
                         }
-                        JobCompletionVerdict::DropStale => {
-                            // 旧世代のインスタンスが submit したジョブ。新
-                            // インスタンスはそのジョブを知らない(wasm 線形
-                            // メモリごと状態を失っている)ので、呼ばずに捨てる。
-                            tracing::debug!(
-                                plugin_id = %manifest.id,
-                                job_id,
-                                "dropping a job completion from a previous instance generation"
-                            );
-                            Ok(())
-                        }
-                    },
+                    }
                     // `next_action` は `PluginWork::Stop` を `LoopAction::Handle`
                     // ではなく専用の `LoopAction::Stop` に振り分けるので、ここに
                     // 来ることはない。
@@ -363,15 +372,19 @@ pub(super) fn run_plugin_thread(
                         "next_action routes PluginWork::Stop to LoopAction::Stop, not Handle"
                     ),
                 };
-                profiler.record(Sample::Call(profiler::call_sample(
-                    Subject::Plugin,
-                    &manifest.id,
-                    call_kind_of(&work),
-                    &detail_of(&work),
-                    started,
-                    &result,
-                    profiler::now_ts(),
-                )));
+                // 実際に wasm を呼んだ呼び出しだけを記録する(`DropStale` は
+                // 呼んでいないので記録しない、driver 側の `continue` と対称)。
+                if !matches!(job_verdict, Some(JobCompletionVerdict::DropStale)) {
+                    profiler.record(Sample::Call(profiler::call_sample(
+                        Subject::Plugin,
+                        &manifest.id,
+                        call_kind_of(&work),
+                        &detail_of(&work),
+                        started,
+                        &result,
+                        profiler::now_ts(),
+                    )));
+                }
                 handle_call_result!(result);
                 handle_call_result!(fire_all_due(
                     &mut schedule_state,
@@ -412,10 +425,13 @@ pub(super) fn run_plugin_thread(
         }
     }
 
-    // 全ての `break`(trap による disable、`Stop`、送信側全断)がここへ
-    // 合流する。gauge は「登録している場合だけ」意味を持つ操作なので、
-    // 未登録でも(= 起動直後に即終了した場合でも)無条件に呼んで構わない
-    // (`Profiler::unregister_gauge` は無ければ何もしない)。
+    // ループに入った後の全ての `break`(trap による disable、`Stop`、
+    // 送信側全断)がここへ合流する。ループより前の 2 箇所の早期 `return`
+    // (load/init 失敗)はここを通らないが、どちらも `load_and_run_plugin` 側の
+    // `register_gauge` より前(`ready_tx.send(Running)` にすら届いていない)
+    // なので、登録されていないものを解除し損ねる心配はない。gauge は
+    // 「登録している場合だけ」意味を持つ操作なので、未登録でも無条件に
+    // 呼んで構わない(`Profiler::unregister_gauge` は無ければ何もしない)。
     profiler.unregister_gauge(Subject::Plugin, &manifest.id);
 }
 
@@ -529,14 +545,20 @@ fn call_kind_of(work: &PluginWork) -> CallKind {
 
 /// `PluginWork` から計測点の `detail`(サンプルの人間可読な補足)を組み立てる
 /// 純関数。journal イベントはイベント名(status イベントは名前が無いので
-/// `kind`("status")で代用)、バス配信はプラグイン側から見た接続先の
+/// `"status"` で代用)、バス配信はプラグイン側から見た接続先の
 /// `"driver_id/topic"` 形、ジョブ完了は `job_id`。
+///
+/// **`event_params` は使わない**: `event_params` は `raw.to_string()` で
+/// ペイロード全体を毎回シリアライズしてから名前だけ使う(`call_on_event` の
+/// 引数を組み立てるための関数)。`detail_of` は `Profiler::noop()` でも
+/// 必ず実行される hot path なので、ここでは `Event` を直接 match して
+/// 名前だけを取り出す(ペイロードの二重シリアライズを避ける)。
 fn detail_of(work: &PluginWork) -> String {
     match work {
-        PluginWork::Event(event) => {
-            let (kind, _timestamp, name, _payload_json, _replay) = event_params(event);
-            name.unwrap_or_else(|| kind.to_string())
-        }
+        PluginWork::Event(event) => match &**event {
+            Event::Journal { event: name, .. } => name.clone(),
+            Event::Status { .. } => "status".to_string(),
+        },
         PluginWork::Message(delivery) => format!("{}/{}", delivery.driver_id, delivery.topic),
         PluginWork::JobComplete { job_id, .. } => job_id.to_string(),
         PluginWork::Stop => unreachable!(

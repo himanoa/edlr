@@ -7,4 +7,4 @@ pub mod collector;
 pub mod wiring;
 pub use collector::{GaugeSource, Profiler};
 pub use sample::{CallKind, CallSample, GaugeSample, Outcome, Sample, Subject};
-pub use wiring::{call_sample, now_ts};
+pub use wiring::{call_sample, call_sample_from_outcome, driver_call_outcome, now_ts};

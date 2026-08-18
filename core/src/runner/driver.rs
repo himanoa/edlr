@@ -32,7 +32,7 @@ use crate::runner::plugin::queue::{
 use crate::capability::grants::GrantsStore;
 use crate::host::driver::{DriverCtx, DriverHost};
 use crate::manifest::driver::{load_driver_manifest, DriverManifest};
-use crate::profiler::{GaugeSource, Profiler, Subject};
+use crate::profiler::{self, CallKind, GaugeSource, Profiler, Sample, Subject};
 use crate::registry::driver::{DriverEntry, DriverRegistry, DriverState};
 use crate::runner::bootstrap::{build_initial_buffers, InitialBuffers};
 use crate::settings::filesystem::FilesystemConfigStore;
@@ -361,6 +361,9 @@ fn load_and_run_driver(
         // `run_driver_thread` がスレッド終了直前に自分で呼ぶ(trap による
         // disable・`Disconnected` の両方をここ 1 箇所でカバーする、
         // `crate::runner::plugin::event_loop::run_plugin_thread` と対称)。
+        // **万一この unregister が漏れると**、死んだドライバ id の gauge が
+        // 毎秒の走査で拾われ続け、更新されない stale なサンプルを永遠に
+        // 吐き続ける(次のデーモン再起動まで気付きにくい)。
         profiler.register_gauge(GaugeSource {
             subject: Subject::Driver,
             id: manifest.id.clone(),
@@ -471,9 +474,13 @@ fn run_driver_thread(
     // `DriverWork::Disconnected`(`DriverQueueSink` の `Drop`)。
     while let Ok(work) = work_rx.recv() {
         let started = Instant::now();
-        let (call, detail, result) = match &work {
+        // `call` はログ用の export 名(`&'static str`)、`call_kind` は
+        // 計測用の `CallKind`。文字列比較で後者を導くのではなく、ここで
+        // 両方を直接組み立てる。
+        let (call, call_kind, detail, result) = match &work {
             DriverWork::Message(message) => (
                 "on-message",
+                CallKind::OnMessage,
                 format!("{}/{}", message.from, message.topic),
                 instance.call_on_message(&message.from, &message.topic, &message.payload),
             ),
@@ -494,37 +501,27 @@ fn run_driver_thread(
                 }
                 (
                     "on-job-complete",
+                    CallKind::OnJobComplete,
                     job_id.to_string(),
                     instance.call_on_job_complete(*job_id, result_json),
                 )
             }
             DriverWork::Disconnected => break,
         };
-        // `DriverInstance` の呼び出しは `anyhow::Result` を返すのみで、
-        // `crate::host::plugin::PluginCallError` のような期限超過/trap の
-        // 区別を保持しない(ドライバは期限超過も即 `Disabled` にする設計
-        // -- `DriverInstance::call_on_message` のドキュメントコメント参照)。
-        // そのため `profiler::call_sample`(`PluginCallError` 専用)は使わず、
-        // ここで直接 `Outcome::Ok`/`Error` の二択に組み立てる
-        // (`Timeout` はドライバでは観測できないので使わない)。
-        let outcome = match &result {
-            Ok(()) => crate::profiler::Outcome::Ok,
-            Err(_) => crate::profiler::Outcome::Error,
-        };
-        let call_kind = if call == "on-message" {
-            crate::profiler::CallKind::OnMessage
-        } else {
-            crate::profiler::CallKind::OnJobComplete
-        };
-        profiler.record(crate::profiler::Sample::Call(crate::profiler::CallSample {
-            ts: crate::profiler::now_ts(),
-            subject: Subject::Driver,
-            id: manifest.id.clone(),
-            call: call_kind,
-            detail,
-            duration_us: started.elapsed().as_micros() as u64,
-            outcome,
-        }));
+        // `DriverInstance` の呼び出しは生の `anyhow::Result` を返すので、
+        // outcome の判定は `profiler::driver_call_outcome`(epoch deadline
+        // trap = `Timeout`、それ以外の `Err` = `Error`、`PluginCallError::classify`
+        // と同じ判定)へ委ね、`CallSample` の組み立ては `call_sample`(プラグ
+        // イン側)と共通の `call_sample_from_outcome` に寄せる。
+        profiler.record(Sample::Call(profiler::call_sample_from_outcome(
+            Subject::Driver,
+            &manifest.id,
+            call_kind,
+            &detail,
+            started,
+            profiler::driver_call_outcome(&result),
+            profiler::now_ts(),
+        )));
         if let Err(e) = result {
             // 恒久 Disabled は error(plugin 側 disable_and_break! と同じ理由)。
             tracing::error!(
@@ -536,9 +533,13 @@ fn run_driver_thread(
         }
     }
 
-    // 全ての exit(`Disconnected`・trap による disable・全センダー切断)が
-    // ここへ合流する。`crate::runner::plugin::event_loop::run_plugin_thread`
-    // 末尾と同じ理由で、登録の有無に関わらず無条件に呼んでよい。
+    // ループに入った後の全ての exit(`Disconnected`・trap による disable・
+    // 全センダー切断)がここへ合流する。ループより前の 3 箇所の早期
+    // `return`(load 失敗・init 失敗・`ready_tx.send` 失敗)はここを通らないが、
+    // いずれも `load_and_run_driver` 側の `register_gauge`(Running 確定後)
+    // より前なので、登録されていないものを解除し損ねる心配はない。
+    // `crate::runner::plugin::event_loop::run_plugin_thread` 末尾と同じ理由で、
+    // 登録の有無に関わらず無条件に呼んでよい。
     profiler.unregister_gauge(Subject::Driver, &manifest.id);
 }
 
