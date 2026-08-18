@@ -51,6 +51,45 @@ entry = "plugin.wasm"
     assert!(matches!(err, ManifestError::ReservedId(id) if id == "dashboard"));
 }
 
+/// `delivery`(issue-hdly): 省略時は lossy、`"reliable"` で無制限キュー、
+/// 未知の値はパースエラー(黙って lossy に落とさない)。
+#[test]
+fn parses_the_delivery_policy() {
+    let manifest = |body: &str| -> Result<Manifest, ManifestError> {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin_dir = tmp.path().join("delivery-test");
+        fs::create_dir_all(&plugin_dir).unwrap();
+        write_entry(&plugin_dir, "plugin.wasm");
+        write_manifest(
+            &plugin_dir,
+            &format!(
+                r#"
+id = "delivery-test"
+name = "Delivery Test"
+version = "0.1.0"
+entry = "plugin.wasm"
+{body}
+"#
+            ),
+        );
+        load_manifest(&plugin_dir)
+    };
+
+    assert_eq!(manifest("").unwrap().delivery, DeliveryPolicy::Lossy);
+    assert_eq!(
+        manifest(r#"delivery = "lossy""#).unwrap().delivery,
+        DeliveryPolicy::Lossy
+    );
+    assert_eq!(
+        manifest(r#"delivery = "reliable""#).unwrap().delivery,
+        DeliveryPolicy::Reliable
+    );
+    assert!(matches!(
+        manifest(r#"delivery = "best-effort""#),
+        Err(ManifestError::Parse(_))
+    ));
+}
+
 #[test]
 fn parses_full_manifest_with_all_setting_types() {
     let tmp = tempfile::tempdir().unwrap();
@@ -743,6 +782,7 @@ fn fingerprint_is_stable_order_independent_and_sensitive_to_content() {
             bus: vec![],
             dashboard: vec![],
             schedules: vec![],
+            delivery: Default::default(),
         }
     }
 
@@ -806,6 +846,7 @@ fn fingerprint_does_not_collide_when_reason_contains_delimiter_like_content() {
         bus: vec![],
         dashboard: vec![],
         schedules: vec![],
+        delivery: Default::default(),
     };
 
     // Set B: two separate requests that request an additional host
@@ -833,6 +874,7 @@ fn fingerprint_does_not_collide_when_reason_contains_delimiter_like_content() {
         bus: vec![],
         dashboard: vec![],
         schedules: vec![],
+        delivery: Default::default(),
     };
 
     let fp_a = set_a
@@ -907,6 +949,7 @@ fn fingerprint_differs_when_host_added_even_with_previously_colliding_reason() {
             bus: vec![],
             dashboard: vec![],
             schedules: vec![],
+            delivery: Default::default(),
         }
     }
 
@@ -1039,6 +1082,7 @@ fn old_fnv_format_fingerprint_does_not_validate_against_new_sha256_fingerprint()
         bus: vec![],
         dashboard: vec![],
         schedules: vec![],
+        delivery: Default::default(),
     };
 
     let old_style_fingerprint = "0123456789abcdef"; // 16 hex chars, FNV-1a-64 shape
@@ -1350,6 +1394,7 @@ fn manifest_with_bus(bus: Vec<BusRequest>) -> Manifest {
         bus,
         dashboard: Vec::new(),
         schedules: Vec::new(),
+        delivery: Default::default(),
     }
 }
 
@@ -1605,6 +1650,7 @@ fn manifest_with_dashboard_widget(widget: DashboardWidget) -> Manifest {
         bus: vec![],
         dashboard: vec![widget],
         schedules: vec![],
+        delivery: Default::default(),
     }
 }
 

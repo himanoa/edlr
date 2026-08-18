@@ -4,6 +4,10 @@ version = "0.1.0"
 description = "Journal イベントを INARA (inara.cz) へアップロードする"
 entry = "plugin.wasm"
 
+# INARA へのアップロードはイベントを取りこぼせないので、作業キュー満杯時に
+# 捨てられる既定の "lossy" ではなく無制限キューを使う(issue-hdly)。
+delivery = "reliable"
+
 # 変換対象の Journal イベント。ここに無いイベントはプラグインへ届かない。
 events = [
   "Commander",

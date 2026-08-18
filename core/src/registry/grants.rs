@@ -403,6 +403,7 @@ mod tests {
             bus: vec![],
             dashboard: vec![],
             schedules: vec![],
+            delivery: Default::default(),
         }
     }
 

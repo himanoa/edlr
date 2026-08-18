@@ -929,6 +929,7 @@ pub(crate) mod tests {
             bus: vec![],
             dashboard: vec![],
             schedules: vec![],
+            delivery: Default::default(),
         }
     }
 
@@ -952,6 +953,7 @@ pub(crate) mod tests {
             }],
             dashboard: vec![],
             schedules: vec![],
+            delivery: Default::default(),
         }
     }
 
@@ -1185,6 +1187,7 @@ pub(crate) mod tests {
                 size: WidgetSize::Small,
             }],
             schedules: vec![],
+            delivery: Default::default(),
         }
     }
 
@@ -1216,6 +1219,7 @@ pub(crate) mod tests {
                     catch_up: false,
                 },
             ],
+            delivery: Default::default(),
         }
     }
 
@@ -1799,6 +1803,7 @@ pub(crate) mod tests {
             bus: vec![],
             dashboard: vec![],
             schedules: vec![],
+            delivery: Default::default(),
         }
     }
 
@@ -2161,6 +2166,7 @@ pub(crate) mod tests {
             bus: vec![],
             dashboard: vec![],
             schedules: vec![],
+            delivery: Default::default(),
         }
     }
 
@@ -2370,6 +2376,7 @@ pub(crate) mod tests {
             bus: vec![],
             dashboard: vec![],
             schedules: vec![],
+            delivery: Default::default(),
         }
     }
 

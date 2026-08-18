@@ -78,6 +78,7 @@ impl DriverManifest {
             bus: Vec::new(),
             dashboard: Vec::new(),
             schedules: Vec::new(),
+            delivery: Default::default(),
         }
     }
 }

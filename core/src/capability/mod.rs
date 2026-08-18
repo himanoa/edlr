@@ -130,6 +130,7 @@ mod tests {
             bus: vec![],
             dashboard: vec![],
             schedules: vec![],
+            delivery: Default::default(),
         };
         let state = state_via_trait(&store, &manifest);
         assert_eq!(

@@ -729,7 +729,7 @@ mod tests {
     fn test_work_tx() -> crate::runner::plugin::queue::WorkSender<crate::runner::driver::DriverWork>
     {
         let (tx, rx) = crate::runner::plugin::queue::channel_for(
-            crate::runner::driver::admit_driver_work,
+            crate::runner::driver::admit_driver_work, |_| false,
         );
         std::mem::forget(rx);
         tx
@@ -743,7 +743,7 @@ mod tests {
         crate::runner::plugin::queue::WorkReceiver<crate::runner::driver::DriverWork>,
     ) {
         let (work_tx, work_rx) = crate::runner::plugin::queue::channel_for(
-            crate::runner::driver::admit_driver_work,
+            crate::runner::driver::admit_driver_work, |_| false,
         );
         let ctx = DriverCtx::new(
             "ed-state".to_string(),

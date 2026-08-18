@@ -69,17 +69,11 @@ pub(super) fn spawn_event_subscriber(
                         continue;
                     }
                     match work_tx.push(PluginWork::Event(event)) {
-                        Ok(()) => {}
+                        Ok(evicted) => record_eviction(&drops, &manifest.id, evicted),
                         Err(PushError::Dropped) => {
-                            // journal の読み取り位置は配送の成否と独立に進むので、
-                            // ここで捨てたイベントは replay でも戻らない。
-                            // `plugins/list` に出すために数えておく。
+                            // lossy キューは DropOldest なのでここには来ない
+                            // はずだが、数え漏らすよりは数えておく。
                             drops.record_event_drop();
-                            tracing::warn!(
-                                plugin_id = %manifest.id,
-                                "event queue full ({PLUGIN_WORK_QUEUE_CAPACITY} pending), \
-                                 dropping event for a slow/blocked plugin"
-                            );
                         }
                         Err(PushError::Disconnected) => {
                             // プラグインスレッドが終了(disabled)済み。
@@ -184,15 +178,11 @@ pub(super) fn spawn_bus_subscriber(
             continue;
         }
         match work_tx.push(PluginWork::Message(delivery)) {
-            Ok(()) => {}
+            Ok(evicted) => record_eviction(&drops, &manifest.id, evicted),
             Err(PushError::Dropped) => {
-                // バス配信は再送されないので、ここで捨てた分は失われる。
+                // lossy キューは DropOldest なのでここには来ないはずだが、
+                // 数え漏らすよりは数えておく。
                 drops.record_bus_delivery_drop();
-                tracing::warn!(
-                    plugin_id = %manifest.id,
-                    "work queue full ({PLUGIN_WORK_QUEUE_CAPACITY} pending), \
-                     dropping a bus delivery for a slow/blocked plugin"
-                );
             }
             Err(PushError::Disconnected) => {
                 // プラグインスレッドが終了(disabled)済み。
@@ -200,4 +190,44 @@ pub(super) fn spawn_bus_subscriber(
             }
         }
     });
+}
+
+/// lossy キューが満杯時に追い出した最古の仕事を drop counter へ数える
+/// (issue-hdly)。押し込んだ種別ではなく**追い出された**種別で数える --
+/// イベントの push がバス配信を追い出すこともあるため。
+///
+/// journal イベントの読み取り位置は配送の成否と独立に進むので、ここで
+/// 捨てたイベントは replay でも戻らない。バス配信も再送されない。どちらも
+/// `plugins/list` の `dropped` に出すために数えておく。
+pub(crate) fn record_eviction(
+    drops: &DropCounters,
+    plugin_id: &str,
+    evicted: Option<PluginWork>,
+) {
+    match evicted {
+        None => {}
+        Some(PluginWork::Event(_)) => {
+            drops.record_event_drop();
+            tracing::warn!(
+                plugin_id = %plugin_id,
+                "work queue full ({PLUGIN_WORK_QUEUE_CAPACITY} pending), \
+                 evicted the oldest event for a slow/blocked plugin"
+            );
+        }
+        Some(PluginWork::Message(_)) => {
+            drops.record_bus_delivery_drop();
+            tracing::warn!(
+                plugin_id = %plugin_id,
+                "work queue full ({PLUGIN_WORK_QUEUE_CAPACITY} pending), \
+                 evicted the oldest bus delivery for a slow/blocked plugin"
+            );
+        }
+        // Stop / JobComplete は evictable ではない(queue::channel 参照)。
+        Some(other) => {
+            tracing::error!(
+                plugin_id = %plugin_id,
+                "BUG: work queue evicted a non-droppable item: {other:?}"
+            );
+        }
+    }
 }

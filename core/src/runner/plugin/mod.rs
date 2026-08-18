@@ -42,6 +42,7 @@ mod start;
 mod subscriber;
 
 pub use start::start_plugins;
+pub(crate) use subscriber::record_eviction;
 
 use std::sync::Arc;
 
@@ -88,11 +89,14 @@ use subscriber::{spawn_bus_subscriber, spawn_event_subscriber, subscribe_with_in
 /// そこでは検知できない。ここで容量を切ることで、プラグイン 1 件あたりの
 /// 積み残し(イベントであれバス配信であれ)を固定の小さい数に抑える。
 ///
-/// 満杯時の方針: `spawn_event_subscriber` は新しいイベントを、
-/// `spawn_bus_subscriber` は新しい配信を、それぞれ `tracing::warn!` を出して
-/// 捨てる(購読タスク自身をブロックする(各ドキュメントコメント参照)のでも
-/// プラグインを無効化するのでもない)。`driver-http.send` を待っているだけの
-/// ような、単に遅いプラグインを、遅れを理由に殺すべきではないため。
+/// 満杯時の方針(issue-hdly): 既定(`delivery = "lossy"`)ではキューが
+/// **最も古い**イベント/配信を捨てて新着を積む(リングバッファ動作。
+/// `queue::admit_lossy`)。購読タスク自身をブロックする(各ドキュメント
+/// コメント参照)のでもプラグインを無効化するのでもない --
+/// `driver-http.send` を待っているだけのような、単に遅いプラグインを、
+/// 遅れを理由に殺すべきではないため。取りこぼしが許されないプラグインは
+/// manifest で `delivery = "reliable"` を宣言すると無制限キュー
+/// (`queue::reliable_channel`)になり、この容量は関係しなくなる。
 ///
 /// **32 → 64 への変更(このタスクでの調整)**: この容量はもともと journal
 /// イベントのみを運んでいた頃に決めた値。今は 2 つの独立したプロデューサ
@@ -170,6 +174,7 @@ mod tests {
             bus: vec![],
             dashboard: vec![],
             schedules: vec![],
+            delivery: Default::default(),
         }
     }
 

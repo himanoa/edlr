@@ -134,7 +134,9 @@ impl ThreadSupervisor {
     /// (`plugins/dashboard-action` RPC 用)。
     ///
     /// bus 配信(`spawn_bus_subscriber`)と違い、失敗は呼び出し元へ同期的に
-    /// 返る(RPC がエラー応答にする)ので drop counter には数えない。
+    /// 返る(RPC がエラー応答にする)ので drop counter には数えない。ただし
+    /// lossy キューが満杯で**別の**最古の仕事を追い出した場合(issue-hdly)、
+    /// その追い出された分は呼び出し元からは見えないので数える。
     pub(crate) fn deliver_message(&self, id: &str, delivery: Delivery) -> Result<(), DeliverError> {
         let threads = self
             .plugin_threads
@@ -142,7 +144,17 @@ impl ThreadSupervisor {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let handle = threads.get(id).ok_or(DeliverError::NotRunning)?;
         match handle.work_tx.push(PluginWork::Message(delivery)) {
-            Ok(()) => Ok(()),
+            Ok(evicted) => {
+                if let Some(counters) = self
+                    .drop_counters
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .get(id)
+                {
+                    crate::runner::plugin::record_eviction(counters, id, evicted);
+                }
+                Ok(())
+            }
             Err(PushError::Dropped) => Err(DeliverError::QueueFull),
             Err(PushError::Disconnected) => Err(DeliverError::NotRunning),
         }
@@ -256,7 +268,9 @@ impl ThreadSupervisor {
 
             // 補助経路: `recv_timeout` で待ちに入っているスレッドを起こす。
             match thread_handle.work_tx.push(PluginWork::Stop) {
-                Ok(()) => {}
+                // 満杯なら最古の仕事を追い出して積まれる(DropOldest)が、
+                // どのみち直後にプロセスごと終了するので数えない。
+                Ok(_) => {}
                 Err(PushError::Dropped) => {
                     // キューが満杯 = スレッドは待ちに入っていないので、
                     // 起こす必要が無い。次の周回でフラグを見る。

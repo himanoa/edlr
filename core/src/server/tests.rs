@@ -272,6 +272,7 @@ fn plugins_list_includes_layout_or_null() {
             bus: Vec::new(),
             dashboard: Vec::new(),
             schedules: Vec::new(),
+            delivery: Default::default(),
         },
         state: crate::registry::plugin::PluginState::Running,
         settings_json: std::sync::Arc::new(std::sync::Mutex::new("{}".to_string())),

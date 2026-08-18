@@ -16,7 +16,7 @@ use crate::registry::driver::DriverRegistry;
 use crate::registry::plugin::{PluginEntry, PluginState, Registry};
 use crate::router::Router;
 use crate::runner::bootstrap::{build_initial_buffers, InitialBuffers};
-use crate::runner::plugin::queue::channel;
+use crate::runner::plugin::queue::{channel, reliable_channel};
 use crate::runtime::bus::{bus_json_string, BusRuntimeEntry};
 use crate::runtime::dropped::DropCounters;
 use crate::schedule::store::ScheduleStore;
@@ -206,7 +206,13 @@ fn load_and_run_plugin(
         .collect();
     let bus_json = Arc::new(Mutex::new(bus_json_string(&bus_entries)));
 
-    let (work_tx, work_rx) = channel();
+    // `delivery = "reliable"` なプラグイン(inara アップロード等の取りこぼし
+    // 厳禁なもの)は無制限キュー、それ以外は満杯時に最古を捨てる有界キュー
+    // (issue-hdly。`crate::manifest::DeliveryPolicy` 参照)。
+    let (work_tx, work_rx) = match manifest.delivery {
+        crate::manifest::DeliveryPolicy::Reliable => reliable_channel(),
+        crate::manifest::DeliveryPolicy::Lossy => channel(),
+    };
     let (ready_tx, ready_rx) = std_mpsc::channel::<PluginState>();
 
     // `Stop` のアウトオブバンド経路(`Registry::shutdown_plugins` が立てる)。

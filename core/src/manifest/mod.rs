@@ -361,6 +361,27 @@ pub struct Manifest {
     /// `validate_schedules` で検証する。
     #[serde(default, rename = "schedule")]
     pub schedules: Vec<ScheduleRequest>,
+    /// 作業キュー(journal イベント/バス配信)が溢れたときの扱い
+    /// (issue-hdly)。省略時は `lossy`。
+    #[serde(default)]
+    pub delivery: DeliveryPolicy,
+}
+
+/// 作業キューの満杯時ポリシー(`delivery = "..."`)。
+///
+/// - `lossy`(既定): 有界キュー。満杯なら**最も古い**イベント/配信を捨てて
+///   新着を積む(リングバッファ動作)。coeiroink への読み上げ通知のように
+///   「古いものは消えてよい・最新が届く方が大事」なプラグイン向け。
+/// - `reliable`: 無制限キュー。イベントを一切捨てない。inara への
+///   アップロードやカウンティングのように取りこぼしが許されないプラグイン
+///   向け。プラグインが長時間詰まるとホストメモリ上に溜まり続けるので、
+///   必要なプラグインだけが宣言すること。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DeliveryPolicy {
+    #[default]
+    Lossy,
+    Reliable,
 }
 
 impl Manifest {
@@ -799,6 +820,7 @@ pub(crate) const MANIFEST_TOP_LEVEL_KEYS: &[&str] = &[
     "bus",
     "dashboard",
     "schedule",
+    "delivery",
 ];
 
 /// マニフェスト本文のトップレベルにある、`known` に無いキーの一覧を返す。

@@ -131,6 +131,7 @@ mod tests {
             bus: vec![],
             dashboard: vec![],
             schedules: vec![],
+            delivery: Default::default(),
         };
         assert!(effective_via_trait(&store, &manifest).is_empty());
     }

@@ -104,7 +104,8 @@ struct DriverQueueSink(WorkSender<DriverWork>);
 impl MessageSink for DriverQueueSink {
     fn try_send(&self, message: Message) -> Result<(), SinkError> {
         match self.0.push(DriverWork::Message(message)) {
-            Ok(()) => Ok(()),
+            // ドライバの admit は DropOldest を返さないので evicted は常に None。
+            Ok(_) => Ok(()),
             Err(PushError::Dropped) => Err(SinkError::Full),
             Err(PushError::Disconnected) => Err(SinkError::Closed),
         }
@@ -292,7 +293,7 @@ fn load_and_run_driver(
 
     // バスのメッセージと submit 完了通知を 1 本に混ぜる作業キュー
     // (`DriverWork` のドキュメントコメント参照)。
-    let (work_tx, work_rx) = channel_for::<DriverWork>(admit_driver_work);
+    let (work_tx, work_rx) = channel_for::<DriverWork>(admit_driver_work, |_| false);
     let (ready_tx, ready_rx) = std_mpsc::channel::<DriverState>();
 
     // Bus への登録はスレッド起動前、`load`/`init` の成否が分かるより先に行う
@@ -531,7 +532,7 @@ mod tests {
     #[test]
     fn publish_through_the_queue_sink_returns_queue_full_when_full() {
         let bus = Bus::new();
-        let (work_tx, work_rx) = channel_for::<DriverWork>(admit_driver_work);
+        let (work_tx, work_rx) = channel_for::<DriverWork>(admit_driver_work, |_| false);
         bus.register_driver(
             "d",
             vec![edlr_driver_channel::TopicSpec {
@@ -562,11 +563,11 @@ mod tests {
     #[test]
     fn dropping_the_sink_delivers_a_disconnected_sentinel() {
         let bus = Bus::new();
-        let (work_tx, work_rx) = channel_for::<DriverWork>(admit_driver_work);
+        let (work_tx, work_rx) = channel_for::<DriverWork>(admit_driver_work, |_| false);
         bus.register_driver("d", Vec::new(), DriverQueueSink(work_tx.clone()));
 
         // 同じ id で登録し直すと古い sink が drop される。
-        let (new_tx, _new_rx) = channel_for::<DriverWork>(admit_driver_work);
+        let (new_tx, _new_rx) = channel_for::<DriverWork>(admit_driver_work, |_| false);
         bus.register_driver("d", Vec::new(), DriverQueueSink(new_tx));
 
         match work_rx.recv_timeout(std::time::Duration::from_secs(1)) {
