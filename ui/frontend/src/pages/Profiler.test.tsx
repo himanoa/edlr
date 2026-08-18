@@ -120,6 +120,26 @@ test("アンマウントで client.close が呼ばれ、以後タイマーが進
   expect(client.call).toHaveBeenCalledTimes(callsAtUnmount);
 });
 
+test("summary の取得が失敗しても unhandled rejection にならず、次のポーリングで回復する", async () => {
+  vi.useFakeTimers();
+  let calls = 0;
+  const client = {
+    call: vi.fn(async (method: string) => {
+      if (method !== "profiler/summary") throw new Error(`unexpected ${method}`);
+      calls += 1;
+      if (calls === 1) throw new Error("daemon down");
+      return SUMMARY_FIXTURE;
+    }),
+    close: vi.fn(),
+  };
+  render(<Profiler makeClient={() => client as unknown as Pick<RpcClient, "call" | "close">} />);
+  await vi.waitFor(() => expect(client.call).toHaveBeenCalledTimes(1));
+
+  await vi.advanceTimersByTimeAsync(2000);
+  await vi.waitFor(() => expect(client.call).toHaveBeenCalledTimes(2));
+  await vi.waitFor(() => expect(screen.getByText("inara-uploader")).toBeInTheDocument());
+});
+
 test("選択行の切り替えで古い series クライアントが close され、新しい対象を取得する", async () => {
   vi.useFakeTimers();
   // makeClient は summary 用に1回(マウント時)、series 用に選択のたびに1回呼ばれる。

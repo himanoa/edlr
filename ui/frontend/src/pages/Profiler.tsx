@@ -48,11 +48,16 @@ export default function Profiler({
     let cancelled = false;
     const client = makeClient();
     const poll = () => {
-      fetchSummary(client).then((res) => {
-        if (cancelled) return;
-        setSubjects(res.subjects);
-        setProfilerLost(res.profilerLost);
-      });
+      fetchSummary(client)
+        .then((res) => {
+          if (cancelled) return;
+          setSubjects(res.subjects);
+          setProfilerLost(res.profilerLost);
+        })
+        // RpcClient.call は RPC エラー・タイムアウト・close() のいずれでも
+        // reject する。アンマウント時や daemon 停止中は毎周期ここに来るが、
+        // 表示すべき状態はないので握りつぶして次回のポーリングに任せる。
+        .catch(() => {});
     };
     poll();
     const timer = setInterval(poll, POLL_MS);
@@ -72,9 +77,12 @@ export default function Profiler({
     let cancelled = false;
     const client = makeClient();
     const poll = () => {
-      fetchSeries(client, selected.subject, selected.id, rangeSeconds).then((res) => {
-        if (!cancelled) setSeries(res);
-      });
+      fetchSeries(client, selected.subject, selected.id, rangeSeconds)
+        .then((res) => {
+          if (!cancelled) setSeries(res);
+        })
+        // 上の summary ポーリングと同じ理由で握りつぶす。
+        .catch(() => {});
     };
     poll();
     const timer = setInterval(poll, POLL_MS);
