@@ -4,7 +4,7 @@
 use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, Write};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{sync_channel, RecvTimeoutError, SyncSender};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -26,6 +26,7 @@ struct Inner {
     lost: Arc<AtomicU64>,
     ring: Arc<Mutex<Ring>>,
     handle: Mutex<Option<JoinHandle<()>>>,
+    shutdown_flag: Arc<AtomicBool>,
 }
 
 enum ProfilerImpl {
@@ -54,11 +55,13 @@ impl Profiler {
         let (tx, rx) = sync_channel::<CollectorMsg>(CHANNEL_CAPACITY);
         let lost = Arc::new(AtomicU64::new(0));
         let ring = Arc::new(Mutex::new(Ring::new()));
+        let shutdown_flag = Arc::new(AtomicBool::new(false));
 
         let handle = {
             let lost = Arc::clone(&lost);
             let ring = Arc::clone(&ring);
-            std::thread::spawn(move || collector_loop(rx, ring, lost, profiler_dir))
+            let shutdown_flag = Arc::clone(&shutdown_flag);
+            std::thread::spawn(move || collector_loop(rx, ring, lost, profiler_dir, shutdown_flag))
         };
 
         Profiler {
@@ -67,6 +70,7 @@ impl Profiler {
                 lost,
                 ring,
                 handle: Mutex::new(Some(handle)),
+                shutdown_flag,
             })),
         }
     }
@@ -83,6 +87,9 @@ impl Profiler {
         let ProfilerImpl::Live(inner) = &self.inner else {
             return;
         };
+        // ponytail: Full(満杯)だけでなく Disconnected(collector スレッド終了後)
+        // も lost として数える意図的な広め判定。record 呼び出し側からは
+        // どちらも「記録できなかった」で区別する必要がないため。
         if inner.tx.try_send(CollectorMsg::Sample(sample)).is_err() {
             inner.lost.fetch_add(1, Ordering::Relaxed);
         }
@@ -95,14 +102,22 @@ impl Profiler {
         }
     }
 
-    /// センチネルで collector スレッドを止めて flush・join する。
-    /// 複数回呼んでも 2 回目以降は何もしない(handle が既に取り出し済み)。
+    /// フラグを立ててからセンチネルを送り、collector スレッドを止めて
+    /// flush・join する。チャネルが満杯でセンチネルが届かなくても、
+    /// フラグは次の秒境界(recv_timeout の Timeout アーム)で必ず見られる
+    /// ので join は無限に待たない。複数回呼んでも 2 回目以降は何もしない
+    /// (handle が既に取り出し済み)。
     pub fn shutdown(&self) {
         let ProfilerImpl::Live(inner) = &self.inner else {
             return;
         };
+        inner.shutdown_flag.store(true, Ordering::SeqCst);
         let _ = inner.tx.try_send(CollectorMsg::Shutdown);
-        let handle = inner.handle.lock().unwrap().take();
+        let handle = inner
+            .handle
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .take();
         if let Some(handle) = handle {
             let _ = handle.join();
         }
@@ -208,7 +223,7 @@ fn emit_second_boundary(ring: &Arc<Mutex<Ring>>, sink: &mut Sink, dir: &std::pat
         ts: now_secs_f64(),
         lost,
     };
-    ring.lock().unwrap().insert(&sample);
+    ring.lock().unwrap_or_else(|p| p.into_inner()).insert(&sample);
     sink.write_line(&sample.to_jsonl_line());
     sink.flush();
     sink.reopen_if_date_changed(dir);
@@ -219,12 +234,19 @@ fn collector_loop(
     ring: Arc<Mutex<Ring>>,
     lost: Arc<AtomicU64>,
     dir: PathBuf,
+    shutdown_flag: Arc<AtomicBool>,
 ) {
     let mut sink = Sink::open(&dir);
     loop {
+        // フラグは try_send がチャネル満杯で失敗しても必ず見える
+        // (センチネルは起こすためのおまけ、止める判断はフラグで行う)。
+        if shutdown_flag.load(Ordering::SeqCst) {
+            emit_second_boundary(&ring, &mut sink, &dir, lost.load(Ordering::Relaxed));
+            return;
+        }
         match rx.recv_timeout(duration_until_next_second_boundary()) {
             Ok(CollectorMsg::Sample(sample)) => {
-                ring.lock().unwrap().insert(&sample);
+                ring.lock().unwrap_or_else(|p| p.into_inner()).insert(&sample);
                 sink.write_line(&sample.to_jsonl_line());
             }
             Ok(CollectorMsg::Shutdown) => {
@@ -300,5 +322,22 @@ mod tests {
             .collect();
         let content = std::fs::read_to_string(files[0].as_ref().unwrap().path()).unwrap();
         assert!(!content.is_empty());
+    }
+
+    #[test]
+    fn shutdown_returns_promptly_even_when_the_sentinel_is_dropped_by_a_full_channel() {
+        let tmp = tempfile::tempdir().unwrap();
+        let profiler = Profiler::start(tmp.path().join("profiler"));
+        // 送信を詰め込んでチャネルを埋め尽くす(shutdown のセンチネルが
+        // try_send の Full で捨てられるケースを作る)。
+        for i in 0..(CHANNEL_CAPACITY * 4) {
+            profiler.record(sample_call(i as f64));
+        }
+        let started = std::time::Instant::now();
+        profiler.shutdown();
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "shutdown must not hang forever when the sentinel is dropped by a full channel"
+        );
     }
 }
