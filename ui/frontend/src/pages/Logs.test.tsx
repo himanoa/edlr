@@ -68,35 +68,58 @@ test("renders log entries with level badge and message", () => {
   expect(getByText("warn", { selector: "span" })).toBeTruthy();
 });
 
-test("kind filter checkboxes hide unchecked kinds", async () => {
+test("committing a kind:journal query as a badge hides other kinds", async () => {
   const userEvent = (await import("@testing-library/user-event")).default;
   mockEntries = [
     { id: 1, kind: "journal", timestamp: "t", event: "FSDJump", raw: {} },
     { id: 2, kind: "log", timestamp: "t", level: "info", message: "daemon log line", raw: {} },
   ];
-  const { getByText, queryByText, getByRole } = render(<Logs />);
+  const { getByText, queryByText, getByLabelText } = render(<Logs />);
   expect(getByText("daemon log line")).toBeTruthy();
+  const input = getByLabelText("フィルタクエリ");
   await act(async () => {
-    await userEvent.click(getByRole("checkbox", { name: "log" }));
+    await userEvent.type(input, "kind:journal{Enter}");
   });
+  // 確定したトークンは Badge になり、入力欄は空になる
+  expect(getByText("kind:journal")).toBeTruthy();
+  expect((input as HTMLInputElement).value).toBe("");
   expect(queryByText("daemon log line")).toBeNull();
   expect(getByText("FSDJump")).toBeTruthy();
 });
 
-test("level filter checkboxes hide unchecked levels for log entries only", async () => {
+test("backspace on empty input removes the whole last badge", async () => {
   const userEvent = (await import("@testing-library/user-event")).default;
   mockEntries = [
     { id: 1, kind: "journal", timestamp: "t", event: "FSDJump", raw: {} },
-    { id: 2, kind: "log", timestamp: "t", level: "debug", message: "noisy debug line", raw: {} },
-    { id: 3, kind: "log", timestamp: "t", level: "warn", message: "watch out", raw: {} },
+    { id: 2, kind: "log", timestamp: "t", level: "info", message: "daemon log line", raw: {} },
   ];
-  const { getByText, queryByText, getByRole } = render(<Logs />);
-  expect(getByText("noisy debug line")).toBeTruthy();
+  const { getByText, queryByText, getByLabelText } = render(<Logs />);
+  const input = getByLabelText("フィルタクエリ");
   await act(async () => {
-    await userEvent.click(getByRole("checkbox", { name: "debug" }));
+    await userEvent.type(input, "kind:journal{Enter}");
   });
-  expect(queryByText("noisy debug line")).toBeNull();
-  // レベルフィルタは kind=log 以外には効かない。
-  expect(getByText("watch out")).toBeTruthy();
-  expect(getByText("FSDJump")).toBeTruthy();
+  expect(queryByText("daemon log line")).toBeNull();
+  await act(async () => {
+    await userEvent.type(input, "{Backspace}");
+  });
+  expect(queryByText("kind:journal")).toBeNull();
+  expect(getByText("daemon log line")).toBeTruthy();
+});
+
+test("focusing the input shows key suggestions and clicking one fills the input", async () => {
+  const userEvent = (await import("@testing-library/user-event")).default;
+  mockEntries = [];
+  const { getByLabelText, getByRole, queryByRole } = render(<Logs />);
+  const input = getByLabelText("フィルタクエリ") as HTMLInputElement;
+  expect(queryByRole("listbox")).toBeNull();
+  await act(async () => {
+    await userEvent.click(input);
+  });
+  expect(getByRole("listbox")).toBeTruthy();
+  await act(async () => {
+    await userEvent.click(getByRole("option", { name: "kind:" }));
+  });
+  expect(input.value).toBe("kind:");
+  // キー確定後は値のサジェストに切り替わる
+  expect(getByRole("option", { name: "kind:journal" })).toBeTruthy();
 });

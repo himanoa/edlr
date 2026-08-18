@@ -1,4 +1,4 @@
-import { filterEntries, type LogEntry } from "./filter";
+import { filterEntries, parseQuery, suggest, type LogEntry } from "./filter";
 
 const entries: LogEntry[] = [
   { id: 1, kind: "journal", timestamp: "t1", event: "FSDJump", raw: { StarSystem: "Sol" } },
@@ -35,4 +35,37 @@ test("matches log entries by message text", () => {
   };
   expect(filterEntries([log], "widgety")).toHaveLength(1);
   expect(filterEntries([log], "nomatch")).toHaveLength(0);
+});
+
+test("parseQuery splits keyed tokens and free text", () => {
+  expect(parseQuery("kind:log level:error boom")).toEqual([
+    { key: "kind", value: "log" },
+    { key: "level", value: "error" },
+    { value: "boom" },
+  ]);
+  // 未知キーや値なしは自由文扱い
+  expect(parseQuery("foo:bar kind:")).toEqual([{ value: "foo:bar" }, { value: "kind:" }]);
+});
+
+test("keyed tokens match exactly; same key ORs, different keys AND", () => {
+  const logs: LogEntry[] = [
+    { id: 1, kind: "log", level: "error", message: "boom", raw: {} },
+    { id: 2, kind: "log", level: "info", message: "ok", raw: {} },
+    { id: 3, kind: "journal", event: "FSDJump", raw: {} },
+  ];
+  expect(filterEntries(logs, "kind:log").map((e) => e.id)).toEqual([1, 2]);
+  expect(filterEntries(logs, "level:error level:info").map((e) => e.id)).toEqual([1, 2]);
+  expect(filterEntries(logs, "kind:log level:error").map((e) => e.id)).toEqual([1]);
+  // キー付き条件はそのフィールドを持たないエントリを除外する
+  expect(filterEntries(logs, "level:error").map((e) => e.id)).toEqual([1]);
+  expect(filterEntries(logs, "kind:log boom").map((e) => e.id)).toEqual([1]);
+});
+
+test("suggest offers keys, then values for enumerable keys", () => {
+  expect(suggest("")).toEqual(["kind:", "level:", "event:", "target:", "driver:", "topic:"]);
+  expect(suggest("ki")).toEqual(["kind:"]);
+  expect(suggest("kind:")).toEqual(["kind:journal", "kind:status", "kind:log", "kind:bus"]);
+  expect(suggest("level:e")).toEqual(["level:error"]);
+  expect(suggest("event:")).toEqual([]);
+  expect(suggest("nosuchkey:x")).toEqual([]);
 });

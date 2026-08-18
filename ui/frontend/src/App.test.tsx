@@ -8,7 +8,7 @@ test("shows dashboard placeholder by default and switches tabs", async () => {
   render(<App />);
   expect(screen.getByRole("button", { name: "Dashboard" })).toHaveClass("active");
   await userEvent.click(screen.getByRole("button", { name: "Logs" }));
-  expect(screen.getByPlaceholderText("フィルタ(イベント名・内容)")).toBeInTheDocument();
+  expect(screen.getByLabelText("フィルタクエリ")).toBeInTheDocument();
 });
 
 describe("初期タブ", () => {
