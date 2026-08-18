@@ -338,7 +338,12 @@ async fn main() {
     // `drivers` は `ServerState` にも渡すが、shutdown シーケンス(下記)でも
     // `stop_all_sidecars` を呼ぶために手元に残しておく必要があるので、渡す
     // のは複製(`DriverRegistry` も `Clone` = 内部は `Arc` 共有で安価)。
-    let state = server::ServerState::new(&router, registry.clone(), drivers.clone());
+    let state = server::ServerState::new(
+        &router,
+        registry.clone(),
+        drivers.clone(),
+        Some(profiler.clone()),
+    );
     state.attach_log_stream(log_rx);
     // bus フレームもログと同じ ReplayBuffer + broadcast 経路に合流させる
     state.attach_log_stream(bus_frames_rx);

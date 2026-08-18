@@ -446,7 +446,7 @@ fn set_bus_grant_returns_the_full_bus_array_for_that_plugin() {
 #[tokio::test]
 async fn attached_log_frames_reach_the_replay_buffer_and_broadcast() {
     let router = crate::router::Router::new(8);
-    let state = ServerState::new(&router, None, None);
+    let state = ServerState::new(&router, None, None, None);
     let (tx, rx) = tokio::sync::broadcast::channel::<std::sync::Arc<String>>(8);
     state.attach_log_stream(rx);
 
@@ -483,7 +483,7 @@ async fn plugin_ui_serves_granted_assets_with_cors_and_404s_everything_else() {
     std::fs::write(ui_dir.join("index.html"), "<html>w</html>").unwrap();
 
     let router = crate::router::Router::new(8);
-    let state = ServerState::new(&router, Some(registry.clone()), None);
+    let state = ServerState::new(&router, Some(registry.clone()), None, None);
     let app = app(state, None);
 
     let get = |uri: &str| {
@@ -1054,4 +1054,32 @@ fn drivers_set_filesystem_grant_reports_unknown_driver() {
     )
     .unwrap_err();
     assert_eq!(err, "unknown driver: not-a-driver");
+}
+
+#[test]
+fn profiler_rpc_reads_the_ring_and_errors_without_a_profiler() {
+    assert!(handle_profiler_rpc(None, "profiler/summary", &serde_json::json!({})).is_err());
+
+    let profiler = crate::profiler::Profiler::noop();
+    profiler
+        .ring()
+        .lock()
+        .unwrap()
+        .insert(&crate::profiler::Sample::Call(
+            crate::profiler::CallSample {
+                ts: 100.0,
+                subject: crate::profiler::Subject::Plugin,
+                id: "p1".into(),
+                call: crate::profiler::CallKind::OnEvent,
+                detail: "E".into(),
+                duration_us: 10,
+                outcome: crate::profiler::Outcome::Ok,
+            },
+        ));
+    let v =
+        handle_profiler_rpc(Some(&profiler), "profiler/summary", &serde_json::json!({})).unwrap();
+    assert_eq!(v["subjects"].as_array().unwrap().len(), 1);
+    assert!(
+        handle_profiler_rpc(Some(&profiler), "profiler/unknown", &serde_json::json!({})).is_err()
+    );
 }

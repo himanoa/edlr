@@ -31,7 +31,7 @@ async fn setup(
     drivers: Option<DriverRegistry>,
 ) -> (Router, SocketAddr) {
     let router = Router::new(64);
-    let state = ServerState::new(&router, registry, drivers);
+    let state = ServerState::new(&router, registry, drivers, None);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(server::serve(listener, state, None));

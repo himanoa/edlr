@@ -96,7 +96,7 @@ fn hello_logger_registry() -> (tempfile::TempDir, Registry) {
 
 async fn setup(registry: Option<Registry>) -> (Router, SocketAddr) {
     let router = Router::new(64);
-    let state = ServerState::new(&router, registry, None);
+    let state = ServerState::new(&router, registry, None, None);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(server::serve(listener, state, None));

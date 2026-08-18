@@ -4,6 +4,7 @@
 //! ロジック自体は持たない。
 
 use crate::event::Event;
+use crate::profiler::{Profiler, Subject};
 use crate::registry::driver::DriverRegistry;
 use crate::registry::plugin::Registry;
 use crate::router::Router;
@@ -65,6 +66,7 @@ pub struct ServerState {
     inner: Arc<Mutex<ReplayBuffer>>,
     registry: Option<Registry>,
     drivers: Option<DriverRegistry>,
+    profiler: Option<Profiler>,
 }
 
 struct ReplayBuffer {
@@ -77,6 +79,7 @@ impl ServerState {
         router: &Router,
         registry: Option<Registry>,
         drivers: Option<DriverRegistry>,
+        profiler: Option<Profiler>,
     ) -> Self {
         let (tx, _) = broadcast::channel(256);
         let state = Self {
@@ -86,6 +89,7 @@ impl ServerState {
             })),
             registry,
             drivers,
+            profiler,
         };
         let mut rx = router.subscribe();
         let feeder = state.clone();
@@ -188,6 +192,62 @@ pub fn handle_rpc_with_drivers(
         "plugins/set-filesystem-config" => rpc_plugins::set_filesystem_config(registry, params),
         "plugins/set-filesystem-grant" => rpc_plugins::set_filesystem_grant(registry, params),
         other => Err(format!("unknown method: {other}")),
+    }
+}
+
+/// `profiler/*` RPC メソッドを処理する。`rpc::profiler` の純関数へ委譲する
+/// 薄いラッパで、時刻取得(`now_sec`)とロック(`Ring`)はここで行う
+/// (→ pure-imperative-boundary.md)。`profiler` が `None`(未配線環境)なら
+/// `Err("profiler unavailable")`。
+pub fn handle_profiler_rpc(
+    profiler: Option<&Profiler>,
+    method: &str,
+    params: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let profiler = profiler.ok_or_else(|| "profiler unavailable".to_string())?;
+    let now_sec = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    match method {
+        "profiler/summary" => {
+            let ring = profiler.ring();
+            let ring = ring.lock().unwrap_or_else(|p| p.into_inner());
+            Ok(crate::rpc::profiler::summary_json(&ring, now_sec))
+        }
+        "profiler/series" => {
+            let subject = parse_profiler_subject(params.get("subject"))?;
+            let id = params
+                .get("id")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| "id is required".to_string())?;
+            let seconds = parse_profiler_seconds(params.get("seconds"))?;
+            let ring = profiler.ring();
+            let ring = ring.lock().unwrap_or_else(|p| p.into_inner());
+            Ok(crate::rpc::profiler::series_json(
+                &ring, subject, id, seconds, now_sec,
+            ))
+        }
+        other => Err(format!("unknown method: {other}")),
+    }
+}
+
+fn parse_profiler_subject(value: Option<&serde_json::Value>) -> Result<Subject, String> {
+    match value.and_then(|v| v.as_str()) {
+        Some("plugin") => Ok(Subject::Plugin),
+        Some("driver") => Ok(Subject::Driver),
+        _ => Err("subject must be \"plugin\" or \"driver\"".to_string()),
+    }
+}
+
+fn parse_profiler_seconds(value: Option<&serde_json::Value>) -> Result<u64, String> {
+    match value {
+        None => Ok(300),
+        Some(v) => v
+            .as_u64()
+            .filter(|n| *n > 0)
+            .ok_or_else(|| "seconds must be a positive integer".to_string()),
     }
 }
 
@@ -417,9 +477,14 @@ async fn handle_client_message(state: &ServerState, text: &str) -> Option<String
         .unwrap_or(serde_json::json!({}));
     let registry = state.registry.clone();
     let drivers = state.drivers.clone();
+    let profiler = state.profiler.clone();
 
     let result = tokio::task::spawn_blocking(move || {
-        handle_rpc_with_drivers(registry.as_ref(), drivers.as_ref(), &method, &params)
+        if method.starts_with("profiler/") {
+            handle_profiler_rpc(profiler.as_ref(), &method, &params)
+        } else {
+            handle_rpc_with_drivers(registry.as_ref(), drivers.as_ref(), &method, &params)
+        }
     })
     .await;
 

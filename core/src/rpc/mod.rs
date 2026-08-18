@@ -5,4 +5,5 @@
 
 pub mod info;
 pub mod params;
+pub mod profiler;
 pub mod render;

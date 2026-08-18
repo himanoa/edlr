@@ -12,7 +12,7 @@ type Ws =
 
 async fn setup(ui_dir: Option<std::path::PathBuf>) -> (Router, SocketAddr) {
     let router = Router::new(64);
-    let state = ServerState::new(&router, None, None);
+    let state = ServerState::new(&router, None, None, None);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(server::serve(listener, state, ui_dir));
