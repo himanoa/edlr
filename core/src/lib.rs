@@ -25,6 +25,7 @@ pub mod layout;
 pub mod logs;
 pub mod manifest;
 pub mod monitor;
+pub mod profiler;
 pub mod registry;
 pub mod router;
 pub mod rpc;
