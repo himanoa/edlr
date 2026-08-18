@@ -1,5 +1,8 @@
 //! プロファイラ(issue: docs/superpowers/specs/2026-08-18-profiler-tab-design.md)。
-//! このモジュール直下と sample/bucket は純粋(値イン値アウト)。
+//! sample/bucket は純粋(値イン値アウト)。collector は命令的(チャネル・
+//! スレッド・ファイル IO、→ .claude/rules/pure-imperative-boundary.md)。
 pub mod sample;
 pub mod bucket;
+pub mod collector;
+pub use collector::Profiler;
 pub use sample::{CallKind, CallSample, GaugeSample, Outcome, Sample, Subject};
