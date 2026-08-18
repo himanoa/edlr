@@ -5,9 +5,10 @@ import Dashboard from "./pages/Dashboard";
 import DriversPage from "./pages/Drivers";
 import Logs from "./pages/Logs";
 import Plugins from "./pages/Plugins";
+import Profiler from "./pages/Profiler";
 import Settings from "./pages/Settings";
 
-const TABS = ["Dashboard", "Logs", "Plugins", "Drivers", "Settings"] as const;
+const TABS = ["Dashboard", "Logs", "Profiler", "Plugins", "Drivers", "Settings"] as const;
 type Tab = (typeof TABS)[number];
 
 export default function App() {
@@ -48,6 +49,7 @@ export default function App() {
       <main className="flex-1 overflow-auto p-4">
         {tab === "Dashboard" && <Dashboard />}
         {tab === "Logs" && <Logs />}
+        {tab === "Profiler" && <Profiler />}
         {tab === "Plugins" && <Plugins />}
         {tab === "Drivers" && <DriversPage />}
         {tab === "Settings" && <Settings />}
