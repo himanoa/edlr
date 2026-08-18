@@ -4,5 +4,7 @@
 pub mod sample;
 pub mod bucket;
 pub mod collector;
-pub use collector::Profiler;
+pub mod wiring;
+pub use collector::{GaugeSource, Profiler};
 pub use sample::{CallKind, CallSample, GaugeSample, Outcome, Sample, Subject};
+pub use wiring::{call_sample, now_ts};

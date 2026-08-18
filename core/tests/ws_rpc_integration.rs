@@ -89,6 +89,7 @@ fn hello_logger_registry() -> (tempfile::TempDir, Registry) {
         edlr_driver_channel::Bus::new(),
         support::empty_driver_registry(tmp.path()),
         host,
+        edlr_core::profiler::Profiler::noop(),
     );
     (tmp, registry)
 }

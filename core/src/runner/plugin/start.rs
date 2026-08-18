@@ -3,7 +3,7 @@
 //! 購読タスクは `subscriber` を参照。
 
 use std::path::Path;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::{mpsc as std_mpsc, Arc, Mutex};
 use std::thread;
 
@@ -12,6 +12,7 @@ use edlr_driver_channel::{Bus, Delivery};
 use crate::capability::grants::GrantsStore;
 use crate::host::plugin::PluginHost;
 use crate::manifest::{load_manifest, Manifest};
+use crate::profiler::{GaugeSource, Profiler, Subject};
 use crate::registry::driver::DriverRegistry;
 use crate::registry::plugin::{PluginEntry, PluginState, Registry};
 use crate::router::Router;
@@ -61,6 +62,7 @@ pub fn start_plugins(
     bus: Bus,
     drivers: DriverRegistry,
     host: PluginHost,
+    profiler: Profiler,
 ) -> Registry {
     let host = Arc::new(host);
     let settings_store = Arc::new(settings_store);
@@ -124,6 +126,7 @@ pub fn start_plugins(
             &bus,
             &host,
             &registry,
+            &profiler,
         );
     }
 
@@ -145,6 +148,7 @@ fn load_and_run_plugin(
     bus: &Bus,
     host: &Arc<PluginHost>,
     registry: &Registry,
+    profiler: &Profiler,
 ) {
     let entry_path = dir.join(&manifest.entry);
 
@@ -219,6 +223,12 @@ fn load_and_run_plugin(
     // 詳細は `run_plugin_thread` のループ先頭のコメント参照。
     let stop_flag = Arc::new(AtomicBool::new(false));
 
+    // このプラグインの生きている線形メモリ量(バイト)。インスタンス再作成
+    // (期限超過からの復帰)をまたいで同じ `Arc` を使い回すので、プロファイラ
+    // の gauge 登録は 1 回のままでよい(`run_plugin_thread::load_instance`
+    // のドキュメント参照)。
+    let memory_gauge = Arc::new(AtomicU64::new(0));
+
     let thread_handle = thread::spawn({
         let host = host.clone();
         let manifest = manifest.clone();
@@ -231,6 +241,8 @@ fn load_and_run_plugin(
         let registry = registry.clone();
         let stop_flag = stop_flag.clone();
         let schedule_store = schedule_store.clone();
+        let memory_gauge = memory_gauge.clone();
+        let profiler = profiler.clone();
         // `submit-send` の完了通知(`PluginWork::JobComplete`)を自分の
         // キューへ push するため、スレッド自身も送信側を持つ
         // (`HostCtx::submit_send` が spawn するタスクへ配る)。
@@ -252,6 +264,8 @@ fn load_and_run_plugin(
                 ready_tx,
                 stop_flag,
                 schedule_store,
+                memory_gauge,
+                profiler,
             );
         }
     });
@@ -294,6 +308,19 @@ fn load_and_run_plugin(
         // `plugins/list`(読み手)が共有する。
         let drops = DropCounters::new();
         registry.register_drop_counters(&manifest.id, drops.clone());
+
+        // gauge 登録は「起動して Running になった」タイミングでのみ行う
+        // (Disabled のままなら work_tx/drops もこのブロックの外なので登録
+        // しようがない)。対応する unregister は `run_plugin_thread` がスレッド
+        // 終了直前(trap による disable・`Stop` の両方)に自分で呼ぶ
+        // (`event_loop::run_plugin_thread` のループ末尾のコメント参照)。
+        profiler.register_gauge(GaugeSource {
+            subject: Subject::Plugin,
+            id: manifest.id.clone(),
+            queue: work_tx.len_probe(),
+            drops: Some(drops.clone()),
+            memory_bytes: memory_gauge.clone(),
+        });
 
         spawn_event_subscriber(
             manifest.clone(),

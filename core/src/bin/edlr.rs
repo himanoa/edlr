@@ -2,6 +2,7 @@ use clap::Parser;
 use edlr_core::capability::grants::GrantsStore;
 use edlr_core::host::driver::DriverHost;
 use edlr_core::host::plugin::PluginHost;
+use edlr_core::profiler::Profiler;
 use edlr_core::runner::driver::start_drivers;
 use edlr_core::runner::plugin::start_plugins;
 use edlr_core::schedule::store::ScheduleStore;
@@ -202,6 +203,11 @@ async fn main() {
     };
     tracing::info!("http/ws server listening on {}", args.listen);
 
+    // 計測点(event_loop・driver・起動経路)が使う collector。ドライバ・
+    // プラグインの起動より前に構築しておく必要がある -- どちらの
+    // `run_*_thread` も起動直後から wasm 呼び出しを計測するため。
+    let profiler = Profiler::start(state_dir.join("profiler"));
+
     // プラグインホストの起動に失敗しても(wasmtime エンジン初期化失敗など)
     // デーモン本体は止めない。プラグイン機能なしで継続する。
     // `registry` は RPC 経由でのプラグイン一覧・設定操作に消費する想定で
@@ -274,6 +280,7 @@ async fn main() {
                 });
             }
             let drivers_dir_for_blocking = drivers_dir.clone();
+            let profiler_for_startup = profiler.clone();
             match tokio::task::spawn_blocking(move || {
                 let drivers = start_drivers(
                     &drivers_dir_for_blocking,
@@ -283,6 +290,7 @@ async fn main() {
                     driver_grants_store,
                     bus.clone(),
                     driver_host,
+                    profiler_for_startup.clone(),
                 );
                 let registry = start_plugins(
                     &plugins_dir_for_blocking,
@@ -295,6 +303,7 @@ async fn main() {
                     bus,
                     drivers.clone(),
                     host,
+                    profiler_for_startup,
                 );
                 (registry, drivers)
             })
@@ -456,4 +465,11 @@ async fn main() {
     if let Some(drivers) = drivers {
         let _ = tokio::task::spawn_blocking(move || drivers.stop_all_sidecars()).await;
     }
+
+    // 最後の後始末: プラグイン/ドライバのスレッドはもう wasm を呼ばないので
+    // (`shutdown_plugins` が全プラグインの on-stop を待ち終えており、ドライバ
+    // 側は `stop_all_sidecars` の後もスレッド自体はブロックしたまま残るが
+    // 新しいサンプルを送らない)、ここで collector を止めて最後の秒境界を
+    // flush する。プロセス終了直前が最後で最も正しいタイミング。
+    profiler.shutdown();
 }

@@ -108,6 +108,7 @@ fn ed_state_driver_registry() -> (tempfile::TempDir, DriverRegistry) {
         grants_store,
         edlr_driver_channel::Bus::new(),
         host,
+        edlr_core::profiler::Profiler::noop(),
     );
     (tmp, drivers)
 }
@@ -171,6 +172,7 @@ fn secret_driver_registry() -> (tempfile::TempDir, DriverRegistry) {
         grants_store,
         edlr_driver_channel::Bus::new(),
         host,
+        edlr_core::profiler::Profiler::noop(),
     );
     (tmp, drivers)
 }

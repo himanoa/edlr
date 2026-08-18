@@ -210,6 +210,7 @@ fn start_drivers_for_test(
         GrantsStore::new_for_drivers(tmp.join("driver-grants")),
         bus,
         edlr_core::host::driver::DriverHost::new(test_handle()).expect("driver host should build"),
+        edlr_core::profiler::Profiler::noop(),
     )
 }
 
@@ -239,6 +240,7 @@ fn start_plugins_for_test(
         bus,
         drivers,
         PluginHost::new(test_handle()).expect("wasmtime engine builds"),
+        edlr_core::profiler::Profiler::noop(),
     )
 }
 

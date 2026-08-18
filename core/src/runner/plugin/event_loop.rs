@@ -6,13 +6,14 @@
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc as std_mpsc, Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use edlr_driver_channel::Bus;
 
 use crate::event::Event;
 use crate::host::plugin::{HostCtx, PluginCallError, PluginHost, PluginInstance, PluginJobs};
 use crate::manifest::Manifest;
+use crate::profiler::{self, CallKind, Profiler, Sample, Subject};
 use crate::registry::plugin::{PluginState, Registry};
 use crate::schedule::store::ScheduleStore;
 use crate::schedule::{Clock, ScheduleState, ScheduleView};
@@ -102,6 +103,8 @@ pub(super) fn run_plugin_thread(
     ready_tx: std_mpsc::Sender<PluginState>,
     stop_flag: Arc<AtomicBool>,
     schedule_store: Arc<ScheduleStore>,
+    memory_gauge: Arc<AtomicU64>,
+    profiler: Profiler,
 ) {
     // submit 系ジョブの共有状態。インスタンス再作成をまたいで同じ `Arc` を
     // 各 `HostCtx` へ配る(`PluginJobs` のドキュメントコメント参照)。
@@ -133,10 +136,11 @@ pub(super) fn run_plugin_thread(
             work_tx.clone(),
             jobs.clone(),
         );
-        // TODO(task 6): wire the real per-plugin memory gauge here instead
-        // of this throwaway counter.
+        // `memory_gauge` は再作成(期限超過からの復帰)をまたいで同じ `Arc`
+        // を使い回す。プロファイラの gauge 登録もこの `Arc` を指すので、
+        // インスタンスが作り直されても登録し直す必要が無い。
         let mut instance = host
-            .load(&entry_path, ctx, Arc::new(AtomicU64::new(0)))
+            .load(&entry_path, ctx, memory_gauge.clone())
             .map_err(|e| format!("failed to load plugin component: {e}"))?;
         instance
             .call_init()
@@ -315,6 +319,7 @@ pub(super) fn run_plugin_thread(
 
         match next_action(recv_result, due) {
             LoopAction::Handle(work) => {
+                let started = Instant::now();
                 let result = match &work {
                     PluginWork::Event(event) => {
                         let (kind, timestamp, name, payload_json, replay) = event_params(event);
@@ -358,22 +363,44 @@ pub(super) fn run_plugin_thread(
                         "next_action routes PluginWork::Stop to LoopAction::Stop, not Handle"
                     ),
                 };
+                profiler.record(Sample::Call(profiler::call_sample(
+                    Subject::Plugin,
+                    &manifest.id,
+                    call_kind_of(&work),
+                    &detail_of(&work),
+                    started,
+                    &result,
+                    profiler::now_ts(),
+                )));
                 handle_call_result!(result);
                 handle_call_result!(fire_all_due(
                     &mut schedule_state,
                     &mut instance,
                     &manifest.id,
                     &schedule_store,
+                    &profiler,
                 ));
             }
             LoopAction::Fire(name) => {
-                handle_call_result!(instance.call_on_schedule(&name));
+                let started = Instant::now();
+                let result = instance.call_on_schedule(&name);
+                profiler.record(Sample::Call(profiler::call_sample(
+                    Subject::Plugin,
+                    &manifest.id,
+                    CallKind::OnSchedule,
+                    &name,
+                    started,
+                    &result,
+                    profiler::now_ts(),
+                )));
+                handle_call_result!(result);
                 record_fire(&schedule_state, &manifest.id, &name, &schedule_store);
                 handle_call_result!(fire_all_due(
                     &mut schedule_state,
                     &mut instance,
                     &manifest.id,
                     &schedule_store,
+                    &profiler,
                 ));
             }
             LoopAction::Idle => {}
@@ -384,6 +411,12 @@ pub(super) fn run_plugin_thread(
             LoopAction::Stop => stop_and_break!(),
         }
     }
+
+    // 全ての `break`(trap による disable、`Stop`、送信側全断)がここへ
+    // 合流する。gauge は「登録している場合だけ」意味を持つ操作なので、
+    // 未登録でも(= 起動直後に即終了した場合でも)無条件に呼んで構わない
+    // (`Profiler::unregister_gauge` は無ければ何もしない)。
+    profiler.unregister_gauge(Subject::Plugin, &manifest.id);
 }
 
 /// 直前の wasm 呼び出し(ブロックしうる)の間に期限を過ぎたスケジュールを、
@@ -398,12 +431,24 @@ fn fire_all_due(
     instance: &mut PluginInstance,
     plugin_id: &str,
     schedule_store: &ScheduleStore,
+    profiler: &Profiler,
 ) -> Result<(), PluginCallError> {
     loop {
         let Some(name) = state.take_due(Clock::now()) else {
             return Ok(());
         };
-        instance.call_on_schedule(&name)?;
+        let started = Instant::now();
+        let result = instance.call_on_schedule(&name);
+        profiler.record(Sample::Call(profiler::call_sample(
+            Subject::Plugin,
+            plugin_id,
+            CallKind::OnSchedule,
+            &name,
+            started,
+            &result,
+            profiler::now_ts(),
+        )));
+        result?;
         record_fire(state, plugin_id, &name, schedule_store);
     }
 }
@@ -466,6 +511,40 @@ pub(super) fn next_action(
     }
 }
 
+/// `PluginWork` から計測点の `CallKind` を判定する純関数。
+///
+/// `PluginWork::Stop` は `next_action` が `LoopAction::Stop` へ振り分け、
+/// `LoopAction::Handle` には never 来ないので `call_kind_of`/`detail_of` の
+/// 対象にもならない。
+fn call_kind_of(work: &PluginWork) -> CallKind {
+    match work {
+        PluginWork::Event(_) => CallKind::OnEvent,
+        PluginWork::Message(_) => CallKind::OnMessage,
+        PluginWork::JobComplete { .. } => CallKind::OnJobComplete,
+        PluginWork::Stop => unreachable!(
+            "next_action routes PluginWork::Stop to LoopAction::Stop, not Handle"
+        ),
+    }
+}
+
+/// `PluginWork` から計測点の `detail`(サンプルの人間可読な補足)を組み立てる
+/// 純関数。journal イベントはイベント名(status イベントは名前が無いので
+/// `kind`("status")で代用)、バス配信はプラグイン側から見た接続先の
+/// `"driver_id/topic"` 形、ジョブ完了は `job_id`。
+fn detail_of(work: &PluginWork) -> String {
+    match work {
+        PluginWork::Event(event) => {
+            let (kind, _timestamp, name, _payload_json, _replay) = event_params(event);
+            name.unwrap_or_else(|| kind.to_string())
+        }
+        PluginWork::Message(delivery) => format!("{}/{}", delivery.driver_id, delivery.topic),
+        PluginWork::JobComplete { job_id, .. } => job_id.to_string(),
+        PluginWork::Stop => unreachable!(
+            "next_action routes PluginWork::Stop to LoopAction::Stop, not Handle"
+        ),
+    }
+}
+
 fn event_params(event: &Event) -> (&'static str, Option<String>, Option<String>, String, bool) {
     match event {
         Event::Journal {
@@ -518,6 +597,63 @@ mod tests {
                 job_completion_verdict(2, 1),
                 JobCompletionVerdict::DropStale
             );
+        }
+    }
+
+    /// `call_kind_of`/`detail_of` は計測点(`profiler::call_sample` へ渡す
+    /// 引数)を組み立てるだけの純関数。実際の記録がどこに着地するかは
+    /// `profiler::collector` の統合テストで検証済みなので、ここでは
+    /// `PluginWork` → `(CallKind, detail)` の対応だけを見る。
+    mod call_kind_and_detail_tests {
+        use super::*;
+        use edlr_driver_channel::Delivery;
+
+        fn journal_event(name: &str) -> PluginWork {
+            PluginWork::Event(Arc::new(Event::Journal {
+                timestamp: "2026-08-05T00:00:00Z".into(),
+                event: name.into(),
+                raw: serde_json::json!({}),
+                replay: false,
+            }))
+        }
+
+        #[test]
+        fn journal_events_report_on_event_with_the_event_name() {
+            let work = journal_event("FSDJump");
+            assert!(matches!(call_kind_of(&work), CallKind::OnEvent));
+            assert_eq!(detail_of(&work), "FSDJump");
+        }
+
+        #[test]
+        fn status_events_fall_back_to_the_kind_as_detail() {
+            let work = PluginWork::Event(Arc::new(Event::Status {
+                raw: serde_json::json!({}),
+            }));
+            assert!(matches!(call_kind_of(&work), CallKind::OnEvent));
+            assert_eq!(detail_of(&work), "status");
+        }
+
+        #[test]
+        fn bus_deliveries_report_on_message_with_driver_slash_topic() {
+            let work = PluginWork::Message(Delivery {
+                plugin_id: "p1".into(),
+                driver_id: "coeiroink".into(),
+                topic: "speak".into(),
+                payload: Vec::new(),
+            });
+            assert!(matches!(call_kind_of(&work), CallKind::OnMessage));
+            assert_eq!(detail_of(&work), "coeiroink/speak");
+        }
+
+        #[test]
+        fn job_completions_report_on_job_complete_with_the_job_id() {
+            let work = PluginWork::JobComplete {
+                generation: 0,
+                job_id: 42,
+                result_json: "{}".into(),
+            };
+            assert!(matches!(call_kind_of(&work), CallKind::OnJobComplete));
+            assert_eq!(detail_of(&work), "42");
         }
     }
 }

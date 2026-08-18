@@ -841,6 +841,7 @@ pub(crate) mod tests {
             edlr_driver_channel::Bus::new(),
             crate::host::driver::DriverHost::new(crate::host::drivers::test_handle())
                 .expect("driver host should build"),
+            crate::profiler::Profiler::noop(),
         )
     }
 

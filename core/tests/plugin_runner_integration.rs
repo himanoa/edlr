@@ -3,6 +3,7 @@ use edlr_core::event::Event;
 use edlr_core::host::driver::DriverHost;
 use edlr_core::host::plugin::PluginHost;
 use edlr_core::registry::driver::DriverRegistry;
+use edlr_core::profiler::Profiler;
 use edlr_core::registry::plugin::PluginState;
 use edlr_core::router::Router;
 use edlr_core::runner::driver::start_drivers;
@@ -28,6 +29,7 @@ fn empty_driver_registry(tmp_path: &Path) -> DriverRegistry {
         GrantsStore::new_for_drivers(tmp_path.join("driver-grants")),
         edlr_driver_channel::Bus::new(),
         DriverHost::new(test_handle()).expect("driver host should build"),
+        Profiler::noop(),
     )
 }
 
@@ -150,6 +152,7 @@ async fn hello_logger_stays_running_and_busy_loop_gets_disabled_after_publish() 
         edlr_driver_channel::Bus::new(),
         empty_driver_registry(tmp.path()),
         host,
+        Profiler::noop(),
     );
 
     let snapshot = registry.snapshot();
@@ -262,6 +265,7 @@ async fn broken_manifest_directory_is_skipped_but_others_still_load() {
         edlr_driver_channel::Bus::new(),
         empty_driver_registry(tmp.path()),
         host,
+        Profiler::noop(),
     );
 
     let snapshot = registry.snapshot();
@@ -298,6 +302,7 @@ async fn nonexistent_plugins_dir_yields_empty_registry() {
         edlr_driver_channel::Bus::new(),
         empty_driver_registry(tmp.path()),
         host,
+        Profiler::noop(),
     );
 
     assert!(registry.snapshot().is_empty());
@@ -335,6 +340,7 @@ async fn init_failure_registers_disabled_and_starts_no_event_task() {
         edlr_driver_channel::Bus::new(),
         empty_driver_registry(tmp.path()),
         host,
+        Profiler::noop(),
     );
 
     // start_plugins only returns once every plugin's load/init outcome is
@@ -416,6 +422,7 @@ async fn list_returns_plugin_info_with_effective_values_matching_manifest_defaul
         edlr_driver_channel::Bus::new(),
         empty_driver_registry(tmp.path()),
         host,
+        Profiler::noop(),
     );
 
     let list = registry.list();
@@ -466,6 +473,7 @@ async fn set_values_persists_validates_and_updates_shared_settings_json() {
         edlr_driver_channel::Bus::new(),
         empty_driver_registry(tmp.path()),
         host,
+        Profiler::noop(),
     );
 
     let mut new_values = serde_json::Map::new();
@@ -529,6 +537,7 @@ async fn set_values_with_unknown_key_returns_err_and_leaves_values_unchanged() {
         edlr_driver_channel::Bus::new(),
         empty_driver_registry(tmp.path()),
         host,
+        Profiler::noop(),
     );
 
     let before = registry

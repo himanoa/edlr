@@ -47,6 +47,7 @@ pub fn empty_driver_registry(tmp_path: &Path) -> DriverRegistry {
         GrantsStore::new_for_drivers(tmp_path.join("driver-grants")),
         edlr_driver_channel::Bus::new(),
         DriverHost::new(test_handle()).expect("driver host should build"),
+        edlr_core::profiler::Profiler::noop(),
     )
 }
 
@@ -168,6 +169,7 @@ pub fn http_caller_registry() -> (tempfile::TempDir, Registry) {
         edlr_driver_channel::Bus::new(),
         empty_driver_registry(tmp.path()),
         host,
+        edlr_core::profiler::Profiler::noop(),
     );
     (tmp, registry)
 }
@@ -233,6 +235,7 @@ pub fn sidecar_env(name: &str, port: u16, scalable: bool) -> Env {
         edlr_driver_channel::Bus::new(),
         empty_driver_registry(tmp.path()),
         PluginHost::new(test_handle()).expect("plugin host"),
+        edlr_core::profiler::Profiler::noop(),
     );
 
     Env { registry, tmp }
@@ -273,6 +276,7 @@ pub fn two_plugin_sidecar_env(sidecar_name: &str, port_a: u16, port_b: u16) -> E
         edlr_driver_channel::Bus::new(),
         empty_driver_registry(tmp.path()),
         PluginHost::new(test_handle()).expect("plugin host"),
+        edlr_core::profiler::Profiler::noop(),
     );
 
     Env { registry, tmp }
@@ -325,6 +329,7 @@ pub fn filesystem_env(name: &str, mode: &str) -> Env {
         edlr_driver_channel::Bus::new(),
         empty_driver_registry(tmp.path()),
         PluginHost::new(test_handle()).expect("plugin host"),
+        edlr_core::profiler::Profiler::noop(),
     );
 
     Env { registry, tmp }

@@ -21,6 +21,7 @@ use std::sync::atomic::AtomicU64;
 use std::sync::mpsc as std_mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::Instant;
 
 use edlr_driver_channel::{Bus, Message, MessageSink, SinkError, HOST_SENDER};
 
@@ -31,6 +32,7 @@ use crate::runner::plugin::queue::{
 use crate::capability::grants::GrantsStore;
 use crate::host::driver::{DriverCtx, DriverHost};
 use crate::manifest::driver::{load_driver_manifest, DriverManifest};
+use crate::profiler::{GaugeSource, Profiler, Subject};
 use crate::registry::driver::{DriverEntry, DriverRegistry, DriverState};
 use crate::runner::bootstrap::{build_initial_buffers, InitialBuffers};
 use crate::settings::filesystem::FilesystemConfigStore;
@@ -128,6 +130,7 @@ impl Drop for DriverQueueSink {
 /// より先に呼ぶこと。ドライバの登録(`Bus::register_driver`)が完了する前に
 /// プラグインが起動すると、そのプラグインの `init` 中の最初の `bus.get` 呼び
 /// 出しが `unknown-driver` を見てしまう(設計書「起動順序」参照)。
+#[allow(clippy::too_many_arguments)]
 pub fn start_drivers(
     drivers_dir: &Path,
     settings_store: SettingsStore,
@@ -136,6 +139,7 @@ pub fn start_drivers(
     grants_store: GrantsStore,
     bus: Bus,
     host: DriverHost,
+    profiler: Profiler,
 ) -> DriverRegistry {
     let host = Arc::new(host);
 
@@ -203,6 +207,7 @@ pub fn start_drivers(
             &bus,
             &host,
             &registry,
+            &profiler,
         );
     }
 
@@ -252,6 +257,7 @@ fn load_and_run_driver(
     bus: &Bus,
     host: &Arc<DriverHost>,
     registry: &DriverRegistry,
+    profiler: &Profiler,
 ) {
     let entry_path = dir.join(&manifest.entry);
 
@@ -306,6 +312,14 @@ fn load_and_run_driver(
         DriverQueueSink(work_tx.clone()),
     );
 
+    // `work_tx` はこのすぐ後の `thread::spawn` に move されるので、gauge 用の
+    // プローブは move の前に取っておく(`WorkSender::len_probe` は `&self`
+    // で、`Arc` 越しなので `work_tx` の生存とは無関係に使える)。
+    let queue_probe = work_tx.len_probe();
+    // ドライバはインスタンス再作成が無い(プラグイン側と違い `load` は
+    // 1 回だけ)ので、`memory_gauge` もこの 1 回きりの `Arc` でよい。
+    let memory_gauge = Arc::new(AtomicU64::new(0));
+
     thread::spawn({
         let host = host.clone();
         let manifest = manifest.clone();
@@ -315,6 +329,8 @@ fn load_and_run_driver(
         let filesystem_json = filesystem_json.clone();
         let bus = bus.clone();
         let registry = registry.clone();
+        let memory_gauge = memory_gauge.clone();
+        let profiler = profiler.clone();
         move || {
             run_driver_thread(
                 host,
@@ -329,6 +345,8 @@ fn load_and_run_driver(
                 work_rx,
                 work_tx,
                 ready_tx,
+                memory_gauge,
+                profiler,
             );
         }
     });
@@ -336,6 +354,21 @@ fn load_and_run_driver(
     let state = ready_rx.recv().unwrap_or_else(|_| DriverState::Disabled {
         reason: "driver thread exited before reporting an init result".to_string(),
     });
+
+    if matches!(state, DriverState::Running) {
+        // gauge 登録は Running のときだけ(Disabled は work_tx が無い/意味を
+        // 持たないので登録しようがない)。対応する unregister は
+        // `run_driver_thread` がスレッド終了直前に自分で呼ぶ(trap による
+        // disable・`Disconnected` の両方をここ 1 箇所でカバーする、
+        // `crate::runner::plugin::event_loop::run_plugin_thread` と対称)。
+        profiler.register_gauge(GaugeSource {
+            subject: Subject::Driver,
+            id: manifest.id.clone(),
+            queue: queue_probe,
+            drops: None,
+            memory_bytes: memory_gauge,
+        });
+    }
 
     if let DriverState::Disabled { reason } = &state {
         // 起動時の失敗(load/init の trap 等)はここが唯一のログ地点
@@ -379,6 +412,8 @@ fn run_driver_thread(
     work_rx: WorkReceiver<DriverWork>,
     work_tx: WorkSender<DriverWork>,
     ready_tx: std_mpsc::Sender<DriverState>,
+    memory_gauge: Arc<AtomicU64>,
+    profiler: Profiler,
 ) {
     // submit 系ジョブの共有状態。ドライバはインスタンス再作成が無いため
     // 世代は進まないが、プラグイン側と同じ型・同じ照合で対称に扱う。
@@ -397,9 +432,7 @@ fn run_driver_thread(
         work_tx,
         jobs.clone(),
     );
-    // TODO(task 6): wire the real per-driver memory gauge here instead of
-    // this throwaway counter.
-    let mut instance = match host.load(&entry_path, ctx, Arc::new(AtomicU64::new(0))) {
+    let mut instance = match host.load(&entry_path, ctx, memory_gauge) {
         Ok(instance) => instance,
         Err(e) => {
             let _ = ready_tx.send(DriverState::Disabled {
@@ -437,9 +470,11 @@ fn run_driver_thread(
     // 持つため)だが、起きても素直に終了する。通常の終了経路は
     // `DriverWork::Disconnected`(`DriverQueueSink` の `Drop`)。
     while let Ok(work) = work_rx.recv() {
-        let (call, result) = match &work {
+        let started = Instant::now();
+        let (call, detail, result) = match &work {
             DriverWork::Message(message) => (
                 "on-message",
+                format!("{}/{}", message.from, message.topic),
                 instance.call_on_message(&message.from, &message.topic, &message.payload),
             ),
             DriverWork::JobComplete {
@@ -459,11 +494,37 @@ fn run_driver_thread(
                 }
                 (
                     "on-job-complete",
+                    job_id.to_string(),
                     instance.call_on_job_complete(*job_id, result_json),
                 )
             }
             DriverWork::Disconnected => break,
         };
+        // `DriverInstance` の呼び出しは `anyhow::Result` を返すのみで、
+        // `crate::host::plugin::PluginCallError` のような期限超過/trap の
+        // 区別を保持しない(ドライバは期限超過も即 `Disabled` にする設計
+        // -- `DriverInstance::call_on_message` のドキュメントコメント参照)。
+        // そのため `profiler::call_sample`(`PluginCallError` 専用)は使わず、
+        // ここで直接 `Outcome::Ok`/`Error` の二択に組み立てる
+        // (`Timeout` はドライバでは観測できないので使わない)。
+        let outcome = match &result {
+            Ok(()) => crate::profiler::Outcome::Ok,
+            Err(_) => crate::profiler::Outcome::Error,
+        };
+        let call_kind = if call == "on-message" {
+            crate::profiler::CallKind::OnMessage
+        } else {
+            crate::profiler::CallKind::OnJobComplete
+        };
+        profiler.record(crate::profiler::Sample::Call(crate::profiler::CallSample {
+            ts: crate::profiler::now_ts(),
+            subject: Subject::Driver,
+            id: manifest.id.clone(),
+            call: call_kind,
+            detail,
+            duration_us: started.elapsed().as_micros() as u64,
+            outcome,
+        }));
         if let Err(e) = result {
             // 恒久 Disabled は error(plugin 側 disable_and_break! と同じ理由)。
             tracing::error!(
@@ -474,6 +535,11 @@ fn run_driver_thread(
             break;
         }
     }
+
+    // 全ての exit(`Disconnected`・trap による disable・全センダー切断)が
+    // ここへ合流する。`crate::runner::plugin::event_loop::run_plugin_thread`
+    // 末尾と同じ理由で、登録の有無に関わらず無条件に呼んでよい。
+    profiler.unregister_gauge(Subject::Driver, &manifest.id);
 }
 
 #[cfg(test)]
@@ -683,6 +749,7 @@ mod tests {
             GrantsStore::new_for_drivers(tmp.path().join("grants")),
             edlr_driver_channel::Bus::new(),
             DriverHost::new(crate::host::drivers::test_handle()).expect("wasmtime engine builds"),
+            Profiler::noop(),
         )
     }
 }
