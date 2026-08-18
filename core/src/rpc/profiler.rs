@@ -83,11 +83,7 @@ fn fold_window(window: &[Option<SecondBucket>]) -> WindowFold {
 }
 
 fn avg_us(sum_us: u64, calls: u64) -> u64 {
-    if calls == 0 {
-        0
-    } else {
-        sum_us / calls
-    }
+    sum_us.checked_div(calls).unwrap_or(0)
 }
 
 fn subject_summary_json(subject: Subject, id: &str, fold: &WindowFold) -> Value {
