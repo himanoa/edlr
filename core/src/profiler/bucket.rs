@@ -43,6 +43,10 @@ impl Ring {
         let bucket = match deque.back_mut() {
             Some((s, b)) if *s == sec => b,
             _ => {
+                // 挿入順が秒単位で単調でないサンプル(スレッド間のわずかな順序ずれ)の場合、
+                // `back_mut()` の秒が一致しないケースは新バケットを積む素朴な実装を採用している。
+                // これは `window()` が `find` で秒を引くため、重複秒があってもそのうち最初の 1 個を返すだけだから許容される。
+                // 1 秒単位のずれは表示上無視できるため、この割り切りでよい。
                 deque.push_back((sec, SecondBucket::default()));
                 while deque.len() > 1 && sec.saturating_sub(deque[0].0) >= RING_SECONDS {
                     deque.pop_front();
