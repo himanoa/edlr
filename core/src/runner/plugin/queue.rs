@@ -109,6 +109,21 @@ struct SharedState<T> {
 
 pub struct WorkSender<T>(Arc<SharedState<T>>);
 
+/// キュー長を読むだけのプローブ。プロファイラの gauge 走査(秒境界)が
+/// `WorkSender<T>` の型パラメータ `T` を知らずに複数の異なる `T` の
+/// キューを 1 つの `Vec<GaugeSource>` にまとめて持つために型を消す
+/// (`.claude/rules/trait-di.md` の「dyn を標準にしない、必要が実証された
+/// 場所を除く」に該当する箇所 — ここではジェネリクスをそのまま公開すると
+/// `GaugeSource<T>` になってしまい、収集先の `Vec` を持てない)。
+#[derive(Clone)]
+pub struct QueueLenProbe(Arc<dyn Fn() -> usize + Send + Sync>);
+
+impl QueueLenProbe {
+    pub fn get(&self) -> usize {
+        (self.0)()
+    }
+}
+
 /// 既存の公開名(プラグイン用)。中身はジェネリック版の別名。
 pub type PluginWorkSender = WorkSender<PluginWork>;
 pub type PluginWorkReceiver = WorkReceiver<PluginWork>;
@@ -150,6 +165,24 @@ impl<T> WorkSender<T> {
                 Ok(evicted)
             }
         }
+    }
+
+    /// 現在のキュー長。state ロック 1 回。
+    #[allow(clippy::len_without_is_empty)] // 空判定は今のところ使い道がない
+    pub fn len(&self) -> usize {
+        self.0.state.lock().unwrap_or_else(|p| p.into_inner()).queue.len()
+    }
+}
+
+impl<T: Send + 'static> WorkSender<T> {
+    /// このキューの長さを読むだけの `QueueLenProbe` を作る(プロファイラの
+    /// gauge 走査用)。`Arc` 越しなので `WorkSender` の生存とは無関係に
+    /// 呼べる。
+    pub fn len_probe(&self) -> QueueLenProbe {
+        let shared = self.0.clone();
+        QueueLenProbe(Arc::new(move || {
+            shared.state.lock().unwrap_or_else(|p| p.into_inner()).queue.len()
+        }))
     }
 }
 
@@ -306,6 +339,16 @@ mod tests {
                 result_json: "{}".to_string(),
             }));
         }
+    }
+
+    #[test]
+    fn len_and_len_probe_report_the_queue_depth() {
+        let (tx, _rx) = channel();
+        tx.push(journal_work("a")).unwrap();
+        tx.push(journal_work("b")).unwrap();
+        assert_eq!(tx.len(), 2);
+        let probe = tx.len_probe();
+        assert_eq!(probe.get(), 2);
     }
 
     #[test]

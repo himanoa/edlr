@@ -10,14 +10,43 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use crate::runner::plugin::queue::QueueLenProbe;
+use crate::runtime::dropped::DropCounters;
+
 use super::bucket::Ring;
-use super::Sample;
+use super::{GaugeSample, Sample, Subject};
 
 const CHANNEL_CAPACITY: usize = 4096;
 
 enum CollectorMsg {
     Sample(Sample),
     Shutdown,
+}
+
+/// 毎秒の gauge 走査で読む 1 プラグイン/ドライバぶんの登録。ドライバ側は
+/// `drops: None` で登録する(dropped_* はプラグインのみ意味を持つため、
+/// gauge 化する際は 0 で埋める)。
+pub struct GaugeSource {
+    pub subject: Subject,
+    pub id: String,
+    pub queue: QueueLenProbe,
+    pub drops: Option<Arc<DropCounters>>,
+    pub memory_bytes: Arc<AtomicU64>,
+}
+
+/// 1 つの `GaugeSource` を今の時刻でスナップショットして `GaugeSample` を
+/// 組み立てる純関数(判断と実行を分ける、→ procedure-style.md)。
+fn sample_gauge_source(source: &GaugeSource, ts: f64) -> GaugeSample {
+    let dropped = source.drops.as_ref().map(|d| d.snapshot()).unwrap_or_default();
+    GaugeSample {
+        ts,
+        subject: source.subject,
+        id: source.id.clone(),
+        queue_len: source.queue.get(),
+        dropped_events: dropped.events,
+        dropped_bus: dropped.bus_deliveries,
+        memory_bytes: source.memory_bytes.load(Ordering::Relaxed),
+    }
 }
 
 /// `Profiler::start` の中身。collector スレッドを持つ実体。
@@ -27,6 +56,7 @@ struct Inner {
     ring: Arc<Mutex<Ring>>,
     handle: Mutex<Option<JoinHandle<()>>>,
     shutdown_flag: Arc<AtomicBool>,
+    gauges: Arc<Mutex<Vec<GaugeSource>>>,
 }
 
 enum ProfilerImpl {
@@ -56,12 +86,16 @@ impl Profiler {
         let lost = Arc::new(AtomicU64::new(0));
         let ring = Arc::new(Mutex::new(Ring::new()));
         let shutdown_flag = Arc::new(AtomicBool::new(false));
+        let gauges = Arc::new(Mutex::new(Vec::new()));
 
         let handle = {
             let lost = Arc::clone(&lost);
             let ring = Arc::clone(&ring);
             let shutdown_flag = Arc::clone(&shutdown_flag);
-            std::thread::spawn(move || collector_loop(rx, ring, lost, profiler_dir, shutdown_flag))
+            let gauges = Arc::clone(&gauges);
+            std::thread::spawn(move || {
+                collector_loop(rx, ring, lost, profiler_dir, shutdown_flag, gauges)
+            })
         };
 
         Profiler {
@@ -71,6 +105,7 @@ impl Profiler {
                 ring,
                 handle: Mutex::new(Some(handle)),
                 shutdown_flag,
+                gauges,
             })),
         }
     }
@@ -80,6 +115,33 @@ impl Profiler {
         Profiler {
             inner: ProfilerImpl::Noop(Arc::new(Mutex::new(Ring::new()))),
         }
+    }
+
+    /// gauge source を登録する。毎秒境界で走査され、キュー長・drop・メモリの
+    /// スナップショットが `GaugeSample` として ring + JSONL へ入る。noop
+    /// なら何もしない。
+    pub fn register_gauge(&self, source: GaugeSource) {
+        let ProfilerImpl::Live(inner) = &self.inner else {
+            return;
+        };
+        inner
+            .gauges
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .push(source);
+    }
+
+    /// プラグイン/ドライバが Disabled になったときに呼ぶ。登録が無ければ
+    /// 何もしない。noop なら何もしない。
+    pub fn unregister_gauge(&self, subject: Subject, id: &str) {
+        let ProfilerImpl::Live(inner) = &self.inner else {
+            return;
+        };
+        inner
+            .gauges
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .retain(|s| !(s.subject == subject && s.id == id));
     }
 
     /// `try_send`。満杯なら捨てて lost を数える。noop なら何もしない。
@@ -216,15 +278,37 @@ impl Sink {
     }
 }
 
-/// SinkLost を合成して ring + sink へ書く(秒境界処理をここ 1 箇所に集約。
-/// gauge 走査は Task 4 でこの関数の呼び出し元に足す)。
-fn emit_second_boundary(ring: &Arc<Mutex<Ring>>, sink: &mut Sink, dir: &std::path::Path, lost: u64) {
-    let sample = Sample::SinkLost {
-        ts: now_secs_f64(),
-        lost,
-    };
+/// 登録済み gauge source を走査し、`GaugeSample` を ring + sink へ書く
+/// (lock 順序: gauge レジストリ → ring の順で 1 箇所のみ、
+/// →.claude/rules に合わせて procedure-style: 読み(スナップショット)→
+/// 書き(ring/sink)の順)。
+fn emit_gauges(gauges: &Mutex<Vec<GaugeSource>>, ring: &Arc<Mutex<Ring>>, sink: &mut Sink, ts: f64) {
+    let samples: Vec<Sample> = gauges
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .iter()
+        .map(|source| Sample::Gauge(sample_gauge_source(source, ts)))
+        .collect();
+    for sample in &samples {
+        ring.lock().unwrap_or_else(|p| p.into_inner()).insert(sample);
+        sink.write_line(&sample.to_jsonl_line());
+    }
+}
+
+/// SinkLost + gauge 走査を合成して ring + sink へ書く(秒境界処理をここ
+/// 1 箇所に集約)。
+fn emit_second_boundary(
+    ring: &Arc<Mutex<Ring>>,
+    sink: &mut Sink,
+    dir: &std::path::Path,
+    lost: u64,
+    gauges: &Mutex<Vec<GaugeSource>>,
+) {
+    let ts = now_secs_f64();
+    let sample = Sample::SinkLost { ts, lost };
     ring.lock().unwrap_or_else(|p| p.into_inner()).insert(&sample);
     sink.write_line(&sample.to_jsonl_line());
+    emit_gauges(gauges, ring, sink, ts);
     sink.flush();
     sink.reopen_if_date_changed(dir);
 }
@@ -235,13 +319,14 @@ fn collector_loop(
     lost: Arc<AtomicU64>,
     dir: PathBuf,
     shutdown_flag: Arc<AtomicBool>,
+    gauges: Arc<Mutex<Vec<GaugeSource>>>,
 ) {
     let mut sink = Sink::open(&dir);
     loop {
         // フラグは try_send がチャネル満杯で失敗しても必ず見える
         // (センチネルは起こすためのおまけ、止める判断はフラグで行う)。
         if shutdown_flag.load(Ordering::SeqCst) {
-            emit_second_boundary(&ring, &mut sink, &dir, lost.load(Ordering::Relaxed));
+            emit_second_boundary(&ring, &mut sink, &dir, lost.load(Ordering::Relaxed), &gauges);
             return;
         }
         match rx.recv_timeout(duration_until_next_second_boundary()) {
@@ -250,14 +335,14 @@ fn collector_loop(
                 sink.write_line(&sample.to_jsonl_line());
             }
             Ok(CollectorMsg::Shutdown) => {
-                emit_second_boundary(&ring, &mut sink, &dir, lost.load(Ordering::Relaxed));
+                emit_second_boundary(&ring, &mut sink, &dir, lost.load(Ordering::Relaxed), &gauges);
                 return;
             }
             Err(RecvTimeoutError::Timeout) => {
-                emit_second_boundary(&ring, &mut sink, &dir, lost.load(Ordering::Relaxed));
+                emit_second_boundary(&ring, &mut sink, &dir, lost.load(Ordering::Relaxed), &gauges);
             }
             Err(RecvTimeoutError::Disconnected) => {
-                emit_second_boundary(&ring, &mut sink, &dir, lost.load(Ordering::Relaxed));
+                emit_second_boundary(&ring, &mut sink, &dir, lost.load(Ordering::Relaxed), &gauges);
                 return;
             }
         }
@@ -268,6 +353,47 @@ fn collector_loop(
 mod tests {
     use super::*;
     use crate::profiler::{CallKind, CallSample, Outcome, Subject};
+    use crate::runtime::dropped::DropCounters;
+    use std::sync::atomic::AtomicU64 as StdAtomicU64;
+
+    fn test_work() -> crate::runner::plugin::PluginWork {
+        crate::runner::plugin::PluginWork::Event(Arc::new(crate::event::Event::Journal {
+            timestamp: "2026-08-05T00:00:00Z".into(),
+            event: "E".into(),
+            raw: serde_json::json!({}),
+            replay: false,
+        }))
+    }
+
+    #[test]
+    fn registered_gauge_sources_are_sampled_every_second() {
+        let tmp = tempfile::tempdir().unwrap();
+        let profiler = Profiler::start(tmp.path().join("profiler"));
+        let (tx, _rx) = crate::runner::plugin::queue::channel();
+        tx.push(test_work()).unwrap();
+        let memory = Arc::new(StdAtomicU64::new(4096));
+        profiler.register_gauge(GaugeSource {
+            subject: Subject::Plugin,
+            id: "p1".into(),
+            queue: tx.len_probe(),
+            drops: Some(DropCounters::new()),
+            memory_bytes: memory.clone(),
+        });
+        std::thread::sleep(std::time::Duration::from_millis(2500));
+        profiler.shutdown();
+
+        let ring = profiler.ring();
+        let ring = ring.lock().unwrap();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let recent = ring.window(Subject::Plugin, "p1", now - 5, now + 1);
+        let sampled = recent.into_iter().flatten().find(|b| b.queue_len.is_some());
+        let b = sampled.expect("at least one gauge bucket in the last seconds");
+        assert_eq!(b.queue_len, Some(1));
+        assert_eq!(b.memory_bytes, Some(4096));
+    }
 
     fn sample_call(ts: f64) -> Sample {
         Sample::Call(CallSample {
