@@ -17,6 +17,7 @@
 //!   両者が同じ数字であることに深い意味は無い(たまたま揃っただけ)。
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicU64;
 use std::sync::mpsc as std_mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -396,7 +397,9 @@ fn run_driver_thread(
         work_tx,
         jobs.clone(),
     );
-    let mut instance = match host.load(&entry_path, ctx) {
+    // TODO(task 6): wire the real per-driver memory gauge here instead of
+    // this throwaway counter.
+    let mut instance = match host.load(&entry_path, ctx, Arc::new(AtomicU64::new(0))) {
         Ok(instance) => instance,
         Err(e) => {
             let _ = ready_tx.send(DriverState::Disabled {

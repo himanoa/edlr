@@ -4,7 +4,7 @@
 //! 発生する(親モジュールのドキュメントコメント参照)。
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc as std_mpsc, Arc, Mutex};
 use std::time::Duration;
 
@@ -133,8 +133,10 @@ pub(super) fn run_plugin_thread(
             work_tx.clone(),
             jobs.clone(),
         );
+        // TODO(task 6): wire the real per-plugin memory gauge here instead
+        // of this throwaway counter.
         let mut instance = host
-            .load(&entry_path, ctx)
+            .load(&entry_path, ctx, Arc::new(AtomicU64::new(0)))
             .map_err(|e| format!("failed to load plugin component: {e}"))?;
         instance
             .call_init()

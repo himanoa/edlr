@@ -7,11 +7,14 @@
 //! beyond the grants/settings utilities they already share.
 
 use std::path::Path;
+use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use wasmtime::component::{Component, HasSelf, Linker, ResourceTable};
 use wasmtime::{Store, StoreLimits, StoreLimitsBuilder};
+
+use super::plugin::TrackedLimits;
 use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
 use super::drivers::SharedDrivers;
@@ -143,7 +146,20 @@ pub struct DriverCtx {
     wasi_table: ResourceTable,
     /// Resource limits (memory/instances/tables) enforced on this driver's
     /// `Store` via `Store::limiter`. See `DRIVER_MEMORY_LIMIT`.
-    limits: StoreLimits,
+    limits: TrackedLimits,
+}
+
+/// Builds the `StoreLimits` shared by every driver `Store`. Mirrors
+/// `crate::host::plugin::plugin_store_limits` -- see its doc comment for why
+/// this is broken out (a placeholder in `DriverCtx::new` and the real one in
+/// `DriverHost::load` must not drift on the limit values).
+fn driver_store_limits() -> StoreLimits {
+    StoreLimitsBuilder::new()
+        .memory_size(DRIVER_MEMORY_LIMIT)
+        .instances(DRIVER_INSTANCE_LIMIT)
+        .tables(DRIVER_TABLE_LIMIT)
+        .trap_on_grow_failure(true)
+        .build()
 }
 
 impl DriverCtx {
@@ -178,12 +194,11 @@ impl DriverCtx {
             // with the host through the `driver` world's explicit imports.
             wasi_ctx: WasiCtxBuilder::new().build(),
             wasi_table: ResourceTable::new(),
-            limits: StoreLimitsBuilder::new()
-                .memory_size(DRIVER_MEMORY_LIMIT)
-                .instances(DRIVER_INSTANCE_LIMIT)
-                .tables(DRIVER_TABLE_LIMIT)
-                .trap_on_grow_failure(true)
-                .build(),
+            // Placeholder gauge -- `DriverHost::load` replaces this with a
+            // `TrackedLimits` wired to the caller's real memory gauge before
+            // handing the `Store` to wasmtime, so nothing ever reads through
+            // this one (mirrors `crate::host::plugin::HostCtx::new`).
+            limits: TrackedLimits::new(driver_store_limits(), Arc::new(AtomicU64::new(0))),
         }
     }
 }
@@ -582,7 +597,16 @@ impl DriverHost {
         self.drivers.fs()
     }
 
-    pub fn load(&self, wasm_path: &Path, ctx: DriverCtx) -> anyhow::Result<DriverInstance> {
+    /// `memory_gauge` receives the driver's live linear memory size (bytes)
+    /// as reported by `TrackedLimits::memory_growing`. Mirrors
+    /// `crate::host::plugin::PluginHost::load`'s `memory_gauge` -- see its
+    /// doc comment.
+    pub fn load(
+        &self,
+        wasm_path: &Path,
+        mut ctx: DriverCtx,
+        memory_gauge: Arc<AtomicU64>,
+    ) -> anyhow::Result<DriverInstance> {
         let engine = self.engine.engine();
         let component = Component::from_file(engine, wasm_path).map_err(|e| {
             anyhow::anyhow!("failed to load component at {}: {e}", wasm_path.display())
@@ -591,6 +615,7 @@ impl DriverHost {
         let mut linker = Linker::new(engine);
         wasmtime_wasi::p2::add_to_linker_sync(&mut linker)
             .map_err(|e| anyhow::anyhow!("failed to wire WASI imports into linker: {e}"))?;
+        ctx.limits = TrackedLimits::new(driver_store_limits(), memory_gauge);
         DriverBindings::add_to_linker::<_, HasSelf<_>>(&mut linker, |ctx| ctx)
             .map_err(|e| anyhow::anyhow!("failed to wire host imports into linker: {e}"))?;
 

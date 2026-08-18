@@ -5,6 +5,7 @@ use edlr_core::host::plugin::{
 use edlr_driver_http::HttpDriver;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -103,7 +104,9 @@ fn load(
     settings_json: &str,
 ) -> (PluginInstance, Arc<Mutex<String>>) {
     let (ctx, settings) = ctx(settings_json);
-    let instance = host.load(wasm_path, ctx).expect("load should succeed");
+    let instance = host
+        .load(wasm_path, ctx, Arc::new(AtomicU64::new(0)))
+        .expect("load should succeed");
     (instance, settings)
 }
 
@@ -114,7 +117,9 @@ fn load_with_capabilities(
     capabilities_json: &str,
 ) -> (PluginInstance, Arc<Mutex<String>>, Arc<Mutex<String>>) {
     let (ctx, settings, capabilities) = ctx_with_capabilities(settings_json, capabilities_json);
-    let instance = host.load(wasm_path, ctx).expect("load should succeed");
+    let instance = host
+        .load(wasm_path, ctx, Arc::new(AtomicU64::new(0)))
+        .expect("load should succeed");
     (instance, settings, capabilities)
 }
 
@@ -162,7 +167,11 @@ fn load_nonexistent_path_returns_err() {
     let host = PluginHost::new(test_handle()).expect("host should start");
     let (ctx, _settings) = ctx(r#"{}"#);
 
-    let result = host.load(Path::new("/nonexistent/path/does-not-exist.wasm"), ctx);
+    let result = host.load(
+        Path::new("/nonexistent/path/does-not-exist.wasm"),
+        ctx,
+        Arc::new(AtomicU64::new(0)),
+    );
 
     assert!(result.is_err());
 }

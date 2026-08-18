@@ -348,7 +348,84 @@ pub struct HostCtx {
     wasi_table: ResourceTable,
     /// Resource limits (memory/instances/tables) enforced on this plugin's
     /// `Store` via `Store::limiter`. See `PLUGIN_MEMORY_LIMIT`.
-    limits: StoreLimits,
+    limits: TrackedLimits,
+}
+
+/// Builds the `StoreLimits` shared by every plugin `Store`. Broken out so
+/// `HostCtx::new` (which needs a placeholder `TrackedLimits` to satisfy the
+/// struct literal) and `PluginHost::load` (which builds the real one once it
+/// has the caller's memory gauge, see `PluginHost::load`'s doc comment) don't
+/// drift apart on the limit values.
+fn plugin_store_limits() -> StoreLimits {
+    StoreLimitsBuilder::new()
+        .memory_size(PLUGIN_MEMORY_LIMIT)
+        .instances(PLUGIN_INSTANCE_LIMIT)
+        .tables(PLUGIN_TABLE_LIMIT)
+        .trap_on_grow_failure(true)
+        .build()
+}
+
+/// Wraps wasmtime's `StoreLimits` to also record the linear memory size a
+/// plugin's `Store` has actually been granted, so the daemon can report a
+/// live per-plugin memory gauge (wired in a later task) without polling the
+/// `Store` itself. All decisions are delegated verbatim to `inner`; this
+/// type only observes the outcome of `memory_growing`.
+pub struct TrackedLimits {
+    inner: StoreLimits,
+    memory_bytes: Arc<AtomicU64>,
+}
+
+impl TrackedLimits {
+    pub fn new(inner: StoreLimits, memory_bytes: Arc<AtomicU64>) -> TrackedLimits {
+        TrackedLimits {
+            inner,
+            memory_bytes,
+        }
+    }
+}
+
+impl wasmtime::ResourceLimiter for TrackedLimits {
+    fn memory_growing(
+        &mut self,
+        current: usize,
+        desired: usize,
+        maximum: Option<usize>,
+    ) -> wasmtime::Result<bool> {
+        let allowed = self.inner.memory_growing(current, desired, maximum)?;
+        if allowed {
+            self.memory_bytes.store(desired as u64, Ordering::Relaxed);
+        }
+        Ok(allowed)
+    }
+
+    fn memory_grow_failed(&mut self, error: wasmtime::Error) -> wasmtime::Result<()> {
+        self.inner.memory_grow_failed(error)
+    }
+
+    fn table_growing(
+        &mut self,
+        current: usize,
+        desired: usize,
+        maximum: Option<usize>,
+    ) -> wasmtime::Result<bool> {
+        self.inner.table_growing(current, desired, maximum)
+    }
+
+    fn table_grow_failed(&mut self, error: wasmtime::Error) -> wasmtime::Result<()> {
+        self.inner.table_grow_failed(error)
+    }
+
+    fn instances(&self) -> usize {
+        self.inner.instances()
+    }
+
+    fn tables(&self) -> usize {
+        self.inner.tables()
+    }
+
+    fn memories(&self) -> usize {
+        self.inner.memories()
+    }
 }
 
 impl HostCtx {
@@ -385,12 +462,11 @@ impl HostCtx {
             // with the host through the `plugin` world's explicit imports.
             wasi_ctx: WasiCtxBuilder::new().build(),
             wasi_table: ResourceTable::new(),
-            limits: StoreLimitsBuilder::new()
-                .memory_size(PLUGIN_MEMORY_LIMIT)
-                .instances(PLUGIN_INSTANCE_LIMIT)
-                .tables(PLUGIN_TABLE_LIMIT)
-                .trap_on_grow_failure(true)
-                .build(),
+            // Placeholder gauge -- `PluginHost::load` replaces this with a
+            // `TrackedLimits` wired to the caller's real memory gauge before
+            // handing the `Store` to wasmtime, so nothing ever reads through
+            // this one.
+            limits: TrackedLimits::new(plugin_store_limits(), Arc::new(AtomicU64::new(0))),
         }
     }
 }
@@ -918,7 +994,16 @@ impl PluginHost {
         self.drivers.fs()
     }
 
-    pub fn load(&self, wasm_path: &Path, ctx: HostCtx) -> anyhow::Result<PluginInstance> {
+    /// `memory_gauge` receives the plugin's live linear memory size (bytes)
+    /// as reported by `TrackedLimits::memory_growing`. Wiring a real,
+    /// per-plugin gauge into this is left to a later task; callers that
+    /// don't care yet can pass `Arc::new(AtomicU64::new(0))`.
+    pub fn load(
+        &self,
+        wasm_path: &Path,
+        mut ctx: HostCtx,
+        memory_gauge: Arc<AtomicU64>,
+    ) -> anyhow::Result<PluginInstance> {
         let engine = self.engine.engine();
         let component = Component::from_file(engine, wasm_path).map_err(|e| {
             anyhow::anyhow!("failed to load component at {}: {e}", wasm_path.display())
@@ -930,6 +1015,7 @@ impl PluginHost {
         PluginBindings::add_to_linker::<_, HasSelf<_>>(&mut linker, |ctx| ctx)
             .map_err(|e| anyhow::anyhow!("failed to wire host imports into linker: {e}"))?;
 
+        ctx.limits = TrackedLimits::new(plugin_store_limits(), memory_gauge);
         let mut store = Store::new(engine, ctx);
         store.limiter(|ctx| &mut ctx.limits);
         // Ticks-beyond-current is set fresh before every call in
@@ -1800,5 +1886,26 @@ mod tests {
             jobs.try_acquire_slot().is_ok(),
             "a released slot must become acquirable again"
         );
+    }
+
+    #[test]
+    fn tracked_limits_records_the_granted_memory_size() {
+        let gauge = Arc::new(AtomicU64::new(0));
+        let mut limits = TrackedLimits::new(
+            StoreLimitsBuilder::new()
+                .memory_size(PLUGIN_MEMORY_LIMIT)
+                .build(),
+            gauge.clone(),
+        );
+        // 上限内の成長は許可され、desired が記録される
+        let ok = wasmtime::ResourceLimiter::memory_growing(&mut limits, 0, 65536, None).unwrap();
+        assert!(ok);
+        assert_eq!(gauge.load(std::sync::atomic::Ordering::Relaxed), 65536);
+        // 上限超過は拒否され、値は据え置き
+        let ok =
+            wasmtime::ResourceLimiter::memory_growing(&mut limits, 65536, u64::MAX as usize, None)
+                .unwrap();
+        assert!(!ok);
+        assert_eq!(gauge.load(std::sync::atomic::Ordering::Relaxed), 65536);
     }
 }
